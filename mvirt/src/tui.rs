@@ -487,20 +487,20 @@ impl App {
 
 fn format_state(state: i32) -> &'static str {
     match VmState::try_from(state).unwrap_or(VmState::Unspecified) {
-        VmState::Unspecified => "unknown",
-        VmState::Stopped => "stopped",
-        VmState::Starting => "starting",
-        VmState::Running => "running",
-        VmState::Stopping => "stopping",
+        VmState::Unspecified => "○ unknown",
+        VmState::Stopped => "○ stopped",
+        VmState::Starting => "◐ starting",
+        VmState::Running => "● running",
+        VmState::Stopping => "◑ stopping",
     }
 }
 
 fn state_style(state: i32) -> Style {
     match VmState::try_from(state).unwrap_or(VmState::Unspecified) {
-        VmState::Running => Style::default().fg(Color::Green),
-        VmState::Stopped => Style::default().fg(Color::Red),
+        VmState::Running => Style::default().fg(Color::Green).bold(),
+        VmState::Stopped => Style::default().fg(Color::DarkGray),
         VmState::Starting | VmState::Stopping => Style::default().fg(Color::Yellow),
-        VmState::Unspecified => Style::default().fg(Color::Gray),
+        VmState::Unspecified => Style::default().fg(Color::DarkGray),
     }
 }
 
@@ -508,16 +508,48 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(3), // Title bar
+            Constraint::Min(5),    // Table
+            Constraint::Length(1), // Legend
+            Constraint::Length(1), // Status
         ])
         .split(frame.area());
 
+    // Title bar
+    let running_count = app
+        .vms
+        .iter()
+        .filter(|vm| vm.state == VmState::Running as i32)
+        .count();
+    let total_count = app.vms.len();
+
+    let title = Line::from(vec![
+        Span::styled(" mvirt ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(
+            format!("{}", running_count),
+            Style::default().fg(Color::Green).bold(),
+        ),
+        Span::styled("/", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", total_count), Style::default().bold()),
+        Span::styled(" VMs", Style::default().fg(Color::DarkGray)),
+    ]);
+    let title_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(Paragraph::new(title).block(title_block), chunks[0]);
+
     // VM Table
-    let header = Row::new(vec!["ID", "NAME", "STATE", "VCPUS", "MEMORY"])
-        .style(Style::default().bold())
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        Cell::from("ID").style(Style::default().fg(Color::Cyan)),
+        Cell::from("NAME").style(Style::default().fg(Color::Cyan)),
+        Cell::from("STATE").style(Style::default().fg(Color::Cyan)),
+        Cell::from("CPU").style(Style::default().fg(Color::Cyan)),
+        Cell::from("MEM").style(Style::default().fg(Color::Cyan)),
+    ])
+    .style(Style::default().bold())
+    .bottom_margin(1);
 
     let rows: Vec<Row> = app
         .vms
@@ -526,13 +558,16 @@ fn draw(frame: &mut Frame, app: &mut App) {
             let config = vm.config.as_ref();
             let state = vm.state;
             Row::new(vec![
-                Cell::from(vm.id.clone()),
+                Cell::from(Span::styled(
+                    &vm.id[..8], // Show short ID
+                    Style::default().fg(Color::DarkGray),
+                )),
                 Cell::from(vm.name.clone().unwrap_or_else(|| "-".to_string())),
                 Cell::from(format_state(state)).style(state_style(state)),
                 Cell::from(config.map(|c| c.vcpus.to_string()).unwrap_or_default()),
                 Cell::from(
                     config
-                        .map(|c| format!("{}MB", c.memory_mb))
+                        .map(|c| format!("{} MB", c.memory_mb))
                         .unwrap_or_default(),
                 ),
             ])
@@ -542,39 +577,42 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(36),
-            Constraint::Min(15),
             Constraint::Length(10),
-            Constraint::Length(6),
+            Constraint::Min(15),
+            Constraint::Length(12),
+            Constraint::Length(5),
             Constraint::Length(10),
         ],
     )
     .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" VMs "))
-    .row_highlight_style(Style::default().reversed());
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    )
+    .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
-    frame.render_stateful_widget(table, chunks[0], &mut app.table_state);
+    frame.render_stateful_widget(table, chunks[1], &mut app.table_state);
 
     // Hotkey legend with refresh time
     let legend_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(20)])
-        .split(chunks[1]);
+        .constraints([Constraint::Min(0), Constraint::Length(12)])
+        .split(chunks[2]);
 
     let legend = Line::from(vec![
-        Span::raw(" "),
-        Span::styled("c", Style::default().bold()),
-        Span::raw(" Create  "),
-        Span::styled("s", Style::default().bold()),
-        Span::raw(" Start  "),
-        Span::styled("S", Style::default().bold()),
-        Span::raw(" Stop  "),
-        Span::styled("k", Style::default().bold()),
-        Span::raw(" Kill  "),
-        Span::styled("d", Style::default().bold()),
-        Span::raw(" Delete  "),
-        Span::styled("q", Style::default().bold()),
-        Span::raw(" Quit"),
+        Span::styled(" c", Style::default().fg(Color::Cyan).bold()),
+        Span::styled(" Create ", Style::default().fg(Color::DarkGray)),
+        Span::styled("s", Style::default().fg(Color::Green).bold()),
+        Span::styled(" Start ", Style::default().fg(Color::DarkGray)),
+        Span::styled("S", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" Stop ", Style::default().fg(Color::DarkGray)),
+        Span::styled("k", Style::default().fg(Color::Red).bold()),
+        Span::styled(" Kill ", Style::default().fg(Color::DarkGray)),
+        Span::styled("d", Style::default().fg(Color::Red).bold()),
+        Span::styled(" Delete ", Style::default().fg(Color::DarkGray)),
+        Span::styled("q", Style::default().fg(Color::Magenta).bold()),
+        Span::styled(" Quit", Style::default().fg(Color::DarkGray)),
     ]);
     frame.render_widget(Paragraph::new(legend), legend_chunks[0]);
 
@@ -594,21 +632,23 @@ fn draw(frame: &mut Frame, app: &mut App) {
     // Status bar / Confirmation
     if let Some(ref id) = app.confirm_delete {
         let confirm_line = Line::from(vec![
+            Span::styled(" ⚠ ", Style::default().fg(Color::Red)),
             Span::styled(
-                format!(" Delete VM {}? ", id),
+                format!("Delete VM {}? ", &id[..8]),
                 Style::default().fg(Color::Red).bold(),
             ),
-            Span::styled("y", Style::default().bold()),
-            Span::raw("/"),
-            Span::styled("n", Style::default().bold()),
+            Span::styled("[y]", Style::default().fg(Color::Green).bold()),
+            Span::styled("es / ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[n]", Style::default().fg(Color::Red).bold()),
+            Span::styled("o", Style::default().fg(Color::DarkGray)),
         ]);
-        frame.render_widget(Paragraph::new(confirm_line), chunks[2]);
+        frame.render_widget(Paragraph::new(confirm_line), chunks[3]);
     } else if let Some(status) = &app.status_message {
         let status_line = Line::from(vec![Span::styled(
             format!(" {}", status),
             Style::default().fg(Color::Yellow),
         )]);
-        frame.render_widget(Paragraph::new(status_line), chunks[2]);
+        frame.render_widget(Paragraph::new(status_line), chunks[3]);
     }
 
     // Create VM Modal
@@ -638,10 +678,18 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
     frame.render_widget(Clear, modal_area);
 
     // Modal block
+    let title = Line::from(vec![
+        Span::styled(" Create VM ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Tab", Style::default().fg(Color::Yellow)),
+        Span::styled(": next ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Red)),
+        Span::styled(": cancel ", Style::default().fg(Color::DarkGray)),
+    ]);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Create VM (Tab: next, Enter: browse, Esc: cancel) ")
-        .style(Style::default().bg(Color::DarkGray));
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
@@ -665,28 +713,33 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
         ("Kernel:", &modal.kernel, true),
         ("Disk:", &modal.disk, true),
         ("VCPUs:", &modal.vcpus, false),
-        ("Memory (MB):", &modal.memory_mb, false),
+        ("Memory:", &modal.memory_mb, false),
         ("User-Data:", &modal.user_data, true),
     ];
 
     for (i, (label, value, is_file)) in fields.iter().enumerate() {
         let is_focused = modal.focused_field == i;
-        let style = if is_focused {
-            Style::default().fg(Color::Yellow).bold()
+        let label_style = if is_focused {
+            Style::default().fg(Color::Cyan).bold()
         } else {
-            Style::default()
+            Style::default().fg(Color::DarkGray)
+        };
+        let value_style = if is_focused {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
         };
 
-        let cursor = if is_focused { "_" } else { "" };
+        let cursor = if is_focused { "▌" } else { "" };
         let browse_hint = if is_focused && *is_file {
-            Span::styled(" [Enter: browse]", Style::default().fg(Color::Cyan))
+            Span::styled(" [Enter: browse]", Style::default().fg(Color::Yellow))
         } else {
             Span::raw("")
         };
 
         let line = Line::from(vec![
-            Span::styled(format!("{:<14}", label), style),
-            Span::raw(format!("{}{}", value, cursor)),
+            Span::styled(format!(" {:<12}", label), label_style),
+            Span::styled(format!("{}{}", value, cursor), value_style),
             browse_hint,
         ]);
         frame.render_widget(Paragraph::new(line), field_chunks[i]);
@@ -694,12 +747,12 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
 
     // Submit button
     let submit_style = if modal.focused_field == 6 {
-        Style::default().fg(Color::Green).bold().reversed()
+        Style::default().fg(Color::Black).bg(Color::Green).bold()
     } else {
         Style::default().fg(Color::Green)
     };
     let submit = Paragraph::new(Line::from(vec![Span::styled(
-        "  [ Create ]  ",
+        "  ▶ Create VM  ",
         submit_style,
     )]))
     .alignment(ratatui::prelude::Alignment::Center);
