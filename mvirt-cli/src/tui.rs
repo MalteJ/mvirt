@@ -1673,7 +1673,10 @@ fn draw_splash(frame: &mut Frame) {
     // Center vertically
     let start_y = (area.height.saturating_sub(art_height)) / 2;
 
-    let lines: Vec<Line> = ascii_art.lines().map(Line::from).collect();
+    let lines: Vec<Line> = ascii_art
+        .lines()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::Cyan))))
+        .collect();
 
     let splash_area = Rect {
         x: area.x,
