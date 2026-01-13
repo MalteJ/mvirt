@@ -1,0 +1,21 @@
+# Build artifacts
+target/
+/images/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Runtime data (development)
+/tmp/
+
+# SQLite database
+*.db
+*.db-shm
+*.db-wal
+
+# Linux kernel build (keep only config and Makefile)
+/linux/kernel/
+/linux/*.tar.*
+/linux/initramfs/

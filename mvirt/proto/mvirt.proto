@@ -1,0 +1,169 @@
+syntax = "proto3";
+package mvirt;
+
+// ============================================
+// Core Types
+// ============================================
+
+enum VmState {
+  VM_STATE_UNSPECIFIED = 0;
+  VM_STATE_STOPPED = 1;
+  VM_STATE_STARTING = 2;
+  VM_STATE_RUNNING = 3;
+  VM_STATE_STOPPING = 4;
+}
+
+message Vm {
+  string id = 1;
+  optional string name = 2;
+  VmState state = 3;
+  VmConfig config = 4;
+  int64 created_at = 5;
+  optional int64 started_at = 6;
+}
+
+message VmConfig {
+  uint32 vcpus = 1;
+  uint64 memory_mb = 2;
+  string kernel = 3;
+  optional string initramfs = 4;
+  optional string cmdline = 5;
+  repeated DiskConfig disks = 6;
+  repeated NicConfig nics = 7;
+  optional string user_data = 8;  // cloud-init user-data (YAML content)
+}
+
+message DiskConfig {
+  string path = 1;
+  bool readonly = 2;
+}
+
+message NicConfig {
+  optional string tap = 1;
+  optional string mac = 2;
+}
+
+// ============================================
+// VM Service
+// ============================================
+
+service VmService {
+  // CRUD
+  rpc CreateVm(CreateVmRequest) returns (Vm);
+  rpc GetVm(GetVmRequest) returns (Vm);
+  rpc ListVms(ListVmsRequest) returns (ListVmsResponse);
+  rpc DeleteVm(DeleteVmRequest) returns (DeleteVmResponse);
+
+  // Lifecycle
+  rpc StartVm(StartVmRequest) returns (Vm);
+  rpc StopVm(StopVmRequest) returns (Vm);
+  rpc KillVm(KillVmRequest) returns (Vm);
+
+  // Hot-plug (Phase 2)
+  rpc AttachDisk(AttachDiskRequest) returns (Vm);
+  rpc DetachDisk(DetachDiskRequest) returns (Vm);
+  rpc AttachNic(AttachNicRequest) returns (Vm);
+  rpc DetachNic(DetachNicRequest) returns (Vm);
+
+  // Console
+  rpc Console(stream ConsoleInput) returns (stream ConsoleOutput);
+
+  // Events
+  rpc WatchVms(WatchVmsRequest) returns (stream VmEvent);
+}
+
+// ============================================
+// Request/Response Messages
+// ============================================
+
+// CRUD
+
+message CreateVmRequest {
+  optional string name = 1;
+  VmConfig config = 2;
+}
+
+message GetVmRequest {
+  string id = 1;
+}
+
+message ListVmsRequest {}
+
+message ListVmsResponse {
+  repeated Vm vms = 1;
+}
+
+message DeleteVmRequest {
+  string id = 1;
+}
+
+message DeleteVmResponse {}
+
+// Lifecycle
+
+message StartVmRequest {
+  string id = 1;
+}
+
+message StopVmRequest {
+  string id = 1;
+  uint32 timeout_seconds = 2;
+}
+
+message KillVmRequest {
+  string id = 1;
+}
+
+// Hot-plug
+
+message AttachDiskRequest {
+  string vm_id = 1;
+  DiskConfig disk = 2;
+}
+
+message DetachDiskRequest {
+  string vm_id = 1;
+  string path = 2;
+}
+
+message AttachNicRequest {
+  string vm_id = 1;
+  NicConfig nic = 2;
+}
+
+message DetachNicRequest {
+  string vm_id = 1;
+  string mac = 2;
+}
+
+// Console
+
+message ConsoleInput {
+  string vm_id = 1;
+  bytes data = 2;
+}
+
+message ConsoleOutput {
+  bytes data = 1;
+}
+
+// Events
+
+message WatchVmsRequest {
+  optional string vm_id = 1;
+}
+
+message VmEvent {
+  string vm_id = 1;
+  VmEventType type = 2;
+  int64 timestamp = 3;
+  optional Vm vm = 4;
+}
+
+enum VmEventType {
+  VM_EVENT_UNSPECIFIED = 0;
+  VM_EVENT_CREATED = 1;
+  VM_EVENT_STARTED = 2;
+  VM_EVENT_STOPPED = 3;
+  VM_EVENT_DELETED = 4;
+}

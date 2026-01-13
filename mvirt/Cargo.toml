@@ -1,0 +1,31 @@
+[package]
+name = "mvirt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# gRPC client
+tonic = "0.12"
+prost = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
+tokio-stream = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Output formatting
+tabled = "0.17"
+
+# Terminal raw mode
+crossterm = "0.28"
+
+# TUI
+ratatui = "0.29"
+
+# Time formatting
+chrono = "0.4"
+
+[build-dependencies]
+tonic-build = "0.12"
