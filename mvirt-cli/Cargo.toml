@@ -1,7 +1,11 @@
 [package]
-name = "mvirt"
+name = "mvirt-cli"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "mvirt"
+path = "src/main.rs"
 
 [dependencies]
 # gRPC client

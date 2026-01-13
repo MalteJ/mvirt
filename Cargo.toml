@@ -2,6 +2,6 @@
 resolver = "2"
 members = [
     "mvirt-vmm",
-    "mvirt",
+    "mvirt-cli",
     "linux/pideins",
 ]
