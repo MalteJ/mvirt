@@ -77,7 +77,26 @@ impl VmService for VmServiceImpl {
             .config
             .ok_or_else(|| Status::invalid_argument("config is required"))?;
 
-        info!(name = ?req.name, vcpus = config.vcpus, memory_mb = config.memory_mb, "Creating VM");
+        // Validate boot configuration
+        let boot_mode = BootMode::try_from(config.boot_mode).unwrap_or(BootMode::Disk);
+        match boot_mode {
+            BootMode::Disk | BootMode::Unspecified => {
+                if config.disks.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "Disk boot mode requires at least one disk",
+                    ));
+                }
+            }
+            BootMode::Kernel => {
+                if config.kernel.is_none() {
+                    return Err(Status::invalid_argument(
+                        "Kernel boot mode requires kernel path",
+                    ));
+                }
+            }
+        }
+
+        info!(name = ?req.name, vcpus = config.vcpus, memory_mb = config.memory_mb, boot_mode = ?boot_mode, "Creating VM");
 
         let entry = self
             .store

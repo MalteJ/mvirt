@@ -14,6 +14,11 @@ CH_VERSION := v50.0
 CH_URL := https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$(CH_VERSION)/cloud-hypervisor-static
 CH_BIN := $(MVIRT_OS_DIR)/target/cloud-hypervisor
 
+# Firmware (hypervisor-fw for UEFI boot)
+FW_VERSION := 0.5.0
+FW_URL := https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/$(FW_VERSION)/hypervisor-fw
+FW_BIN := $(MVIRT_OS_DIR)/target/hypervisor-fw
+
 NPROC := $(shell nproc)
 
 # Rust binaries
@@ -58,9 +63,16 @@ $(CH_BIN): | $(MVIRT_OS_DIR)/target
 	curl -L -o $(CH_BIN) $(CH_URL)
 	chmod +x $(CH_BIN)
 
+# ============ FIRMWARE ============
+
+$(FW_BIN): | $(MVIRT_OS_DIR)/target
+	curl -L -o $(FW_BIN) $(FW_URL)
+
+firmware: $(FW_BIN)
+
 # ============ INITRAMFS ============
 
-$(INITRAMFS): $(CH_BIN) $(RUST_TARGET_DIR)/pideins $(RUST_TARGET_DIR)/mvirt-cli $(RUST_TARGET_DIR)/mvirt-vmm | $(MVIRT_OS_DIR)/target
+$(INITRAMFS): $(CH_BIN) $(FW_BIN) $(RUST_TARGET_DIR)/pideins $(RUST_TARGET_DIR)/mvirt-cli $(RUST_TARGET_DIR)/mvirt-vmm | $(MVIRT_OS_DIR)/target
 	cp $(RUST_TARGET_DIR)/pideins $(INITRAMFS_ROOTFS)/init
 	chmod +x $(INITRAMFS_ROOTFS)/init
 	cp $(RUST_TARGET_DIR)/mvirt-cli $(INITRAMFS_ROOTFS)/usr/sbin/
@@ -68,6 +80,8 @@ $(INITRAMFS): $(CH_BIN) $(RUST_TARGET_DIR)/pideins $(RUST_TARGET_DIR)/mvirt-cli 
 	chmod +x $(INITRAMFS_ROOTFS)/usr/sbin/*
 	cp $(CH_BIN) $(INITRAMFS_ROOTFS)/usr/bin/cloud-hypervisor
 	chmod +x $(INITRAMFS_ROOTFS)/usr/bin/cloud-hypervisor
+	mkdir -p $(INITRAMFS_ROOTFS)/var/lib/mvirt
+	cp $(FW_BIN) $(INITRAMFS_ROOTFS)/var/lib/mvirt/hypervisor-fw
 	cd $(INITRAMFS_ROOTFS) && find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../../../$(INITRAMFS)
 
 initramfs: $(INITRAMFS)
@@ -99,6 +113,7 @@ os-clean:
 	rm -f $(INITRAMFS_ROOTFS)/usr/sbin/mvirt-cli
 	rm -f $(INITRAMFS_ROOTFS)/usr/sbin/mvirt-vmm
 	rm -f $(INITRAMFS_ROOTFS)/usr/bin/cloud-hypervisor
+	rm -rf $(INITRAMFS_ROOTFS)/usr/share/mvirt
 
 os-distclean: os-clean
 	rm -rf $(KERNEL_DIR)

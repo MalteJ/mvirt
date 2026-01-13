@@ -31,5 +31,11 @@ ratatui = "0.29"
 # Time formatting
 chrono = "0.4"
 
+# Home directory
+dirs = "5"
+
+# HTTP client for fetching GitHub SSH keys
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
 [build-dependencies]
 tonic-build = "0.12"

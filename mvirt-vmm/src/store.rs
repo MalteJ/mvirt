@@ -253,7 +253,10 @@ pub struct VmRuntime {
 struct ProtoConfig {
     vcpus: u32,
     memory_mb: u64,
-    kernel: String,
+    #[serde(default)]
+    boot_mode: i32, // 0=unspecified, 1=disk, 2=kernel
+    #[serde(default)]
+    kernel: Option<String>,
     initramfs: Option<String>,
     cmdline: Option<String>,
     disks: Vec<ProtoDisk>,
@@ -279,6 +282,7 @@ impl From<VmConfig> for ProtoConfig {
         Self {
             vcpus: c.vcpus,
             memory_mb: c.memory_mb,
+            boot_mode: c.boot_mode,
             kernel: c.kernel,
             initramfs: c.initramfs,
             cmdline: c.cmdline,
@@ -309,6 +313,7 @@ impl From<ProtoConfig> for VmConfig {
         Self {
             vcpus: c.vcpus,
             memory_mb: c.memory_mb,
+            boot_mode: c.boot_mode,
             kernel: c.kernel,
             initramfs: c.initramfs,
             cmdline: c.cmdline,

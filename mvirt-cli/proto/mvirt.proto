@@ -22,12 +22,22 @@ message Vm {
   optional int64 started_at = 6;
 }
 
+enum BootMode {
+  BOOT_MODE_UNSPECIFIED = 0;
+  BOOT_MODE_DISK = 1;    // Boot from disk using firmware (UEFI)
+  BOOT_MODE_KERNEL = 2;  // Direct kernel boot
+}
+
 message VmConfig {
   uint32 vcpus = 1;
   uint64 memory_mb = 2;
-  string kernel = 3;
-  optional string initramfs = 4;
-  optional string cmdline = 5;
+
+  // Boot configuration
+  BootMode boot_mode = 9;         // DISK or KERNEL boot
+  optional string kernel = 3;     // Required for KERNEL boot
+  optional string initramfs = 4;  // Optional, for KERNEL boot
+  optional string cmdline = 5;    // Optional, for KERNEL boot
+
   repeated DiskConfig disks = 6;
   repeated NicConfig nics = 7;
   optional string user_data = 8;  // cloud-init user-data (YAML content)

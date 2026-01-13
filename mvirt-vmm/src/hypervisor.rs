@@ -8,10 +8,11 @@ use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 
-use crate::proto::VmConfig;
+use crate::proto::{BootMode, VmConfig};
 use crate::store::VmStore;
 
 const CLOUD_HYPERVISOR_BIN: &str = "/usr/bin/cloud-hypervisor";
+const FIRMWARE_FILENAME: &str = "hypervisor-fw";
 
 pub struct Hypervisor {
     data_dir: PathBuf,
@@ -88,6 +89,10 @@ impl Hypervisor {
 
     fn cloudinit_iso(&self, vm_id: &str) -> PathBuf {
         self.vm_dir(vm_id).join("cloudinit.iso")
+    }
+
+    fn firmware_path(&self) -> PathBuf {
+        self.data_dir.join(FIRMWARE_FILENAME)
     }
 
     fn tap_name(&self, vm_id: &str) -> String {
@@ -243,7 +248,21 @@ ethernets:
 
         cmd.arg("--console").arg("off");
 
-        cmd.arg("--kernel").arg(&config.kernel);
+        // Boot configuration based on boot_mode
+        match BootMode::try_from(config.boot_mode).unwrap_or(BootMode::Disk) {
+            BootMode::Disk | BootMode::Unspecified => {
+                // Disk boot: use firmware, boot from first disk
+                cmd.arg("--kernel").arg(self.firmware_path());
+            }
+            BootMode::Kernel => {
+                // Kernel boot: use provided kernel
+                if let Some(kernel) = &config.kernel {
+                    cmd.arg("--kernel").arg(kernel);
+                } else {
+                    return Err(anyhow!("Kernel boot mode requires kernel path"));
+                }
+            }
+        }
 
         cmd.arg("--cpus").arg(format!("boot={}", config.vcpus));
 
@@ -275,14 +294,14 @@ ethernets:
             }
         }
 
-        // Add kernel cmdline if present
-        if let Some(cmdline) = &config.cmdline {
-            cmd.arg("--cmdline").arg(cmdline);
-        }
-
-        // Add initramfs if present
-        if let Some(initramfs) = &config.initramfs {
-            cmd.arg("--initramfs").arg(initramfs);
+        // Add kernel cmdline and initramfs (only for kernel boot)
+        if matches!(BootMode::try_from(config.boot_mode), Ok(BootMode::Kernel)) {
+            if let Some(cmdline) = &config.cmdline {
+                cmd.arg("--cmdline").arg(cmdline);
+            }
+            if let Some(initramfs) = &config.initramfs {
+                cmd.arg("--initramfs").arg(initramfs);
+            }
         }
 
         // Create TAP device and add network interface

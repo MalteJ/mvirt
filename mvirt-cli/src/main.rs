@@ -42,17 +42,25 @@ enum Commands {
         #[arg(long, default_value = "512")]
         memory: u64,
 
-        /// Path to kernel
-        #[arg(long)]
-        kernel: String,
+        /// Boot mode: disk (default) or kernel
+        #[arg(long, default_value = "disk")]
+        boot: String,
 
-        /// Path to disk image
+        /// Path to kernel (required for kernel boot)
         #[arg(long)]
-        disk: Option<String>,
+        kernel: Option<String>,
 
-        /// Kernel command line
+        /// Path to initramfs (for kernel boot)
+        #[arg(long)]
+        initramfs: Option<String>,
+
+        /// Kernel command line (for kernel boot)
         #[arg(long)]
         cmdline: Option<String>,
+
+        /// Path to disk image (required for disk boot)
+        #[arg(long)]
+        disk: Option<String>,
 
         /// Path to cloud-init user-data file
         #[arg(long)]
@@ -281,11 +289,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             name,
             vcpus,
             memory,
+            boot,
             kernel,
-            disk,
+            initramfs,
             cmdline,
+            disk,
             user_data,
         } => {
+            // Parse boot mode
+            let boot_mode = match boot.to_lowercase().as_str() {
+                "disk" => BootMode::Disk,
+                "kernel" => BootMode::Kernel,
+                _ => {
+                    eprintln!(
+                        "Error: Invalid boot mode '{}'. Use 'disk' or 'kernel'.",
+                        boot
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            // Validate boot mode requirements
+            if boot_mode == BootMode::Kernel && kernel.is_none() {
+                eprintln!("Error: Kernel boot mode requires --kernel");
+                std::process::exit(1);
+            }
+            if boot_mode == BootMode::Disk && disk.is_none() {
+                eprintln!("Error: Disk boot mode requires --disk");
+                std::process::exit(1);
+            }
+
             let disks = disk
                 .map(|path| {
                     vec![DiskConfig {
@@ -308,8 +341,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config: Some(VmConfig {
                     vcpus,
                     memory_mb: memory,
+                    boot_mode: boot_mode.into(),
                     kernel,
-                    initramfs: None,
+                    initramfs,
                     cmdline,
                     disks,
                     nics: vec![],
@@ -345,7 +379,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("State:   {}", format_state(vm.state()));
             println!("vCPUs:   {}", config.vcpus);
             println!("Memory:  {}MB", config.memory_mb);
-            println!("Kernel:  {}", config.kernel);
+            let boot_mode_str = match BootMode::try_from(config.boot_mode) {
+                Ok(BootMode::Disk) | Ok(BootMode::Unspecified) | Err(_) => "disk",
+                Ok(BootMode::Kernel) => "kernel",
+            };
+            println!("Boot:    {}", boot_mode_str);
+            if let Some(kernel) = &config.kernel {
+                println!("Kernel:  {}", kernel);
+            }
+            if let Some(initramfs) = &config.initramfs {
+                println!("Initramfs: {}", initramfs);
+            }
             if let Some(cmdline) = &config.cmdline {
                 println!("Cmdline: {}", cmdline);
             }
