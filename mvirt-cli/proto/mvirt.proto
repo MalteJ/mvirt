@@ -88,6 +88,9 @@ message SystemInfo {
   uint64 total_memory_mb = 2;
   uint32 allocated_cpus = 3;
   uint64 allocated_memory_mb = 4;
+  float load_1 = 5;
+  float load_5 = 6;
+  float load_15 = 7;
 }
 
 // CRUD

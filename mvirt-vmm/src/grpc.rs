@@ -56,11 +56,16 @@ impl VmService for VmServiceImpl {
                 (cpus + e.config.vcpus, mem + e.config.memory_mb)
             });
 
+        let load_avg = System::load_average();
+
         Ok(Response::new(SystemInfo {
             total_cpus,
             total_memory_mb,
             allocated_cpus,
             allocated_memory_mb,
+            load_1: load_avg.one as f32,
+            load_5: load_avg.five as f32,
+            load_15: load_avg.fifteen as f32,
         }))
     }
 

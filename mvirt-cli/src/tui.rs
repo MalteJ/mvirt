@@ -328,35 +328,35 @@ impl App {
             }
             ActionResult::Started(id, Ok(())) => {
                 self.status_message = Some(format!("Started {}", id));
-                self.send_action(Action::Refresh);
+                self.send_refresh();
             }
             ActionResult::Started(_, Err(e)) => {
                 self.status_message = Some(format!("Error: {}", e));
             }
             ActionResult::Stopped(id, Ok(())) => {
                 self.status_message = Some(format!("Stopped {}", id));
-                self.send_action(Action::Refresh);
+                self.send_refresh();
             }
             ActionResult::Stopped(_, Err(e)) => {
                 self.status_message = Some(format!("Error: {}", e));
             }
             ActionResult::Killed(id, Ok(())) => {
                 self.status_message = Some(format!("Killed {}", id));
-                self.send_action(Action::Refresh);
+                self.send_refresh();
             }
             ActionResult::Killed(_, Err(e)) => {
                 self.status_message = Some(format!("Error: {}", e));
             }
             ActionResult::Deleted(id, Ok(())) => {
                 self.status_message = Some(format!("Deleted {}", id));
-                self.send_action(Action::Refresh);
+                self.send_refresh();
             }
             ActionResult::Deleted(_, Err(e)) => {
                 self.status_message = Some(format!("Error: {}", e));
             }
             ActionResult::Created(Ok(id)) => {
                 self.status_message = Some(format!("Created {}", id));
-                self.send_action(Action::Refresh);
+                self.send_refresh();
             }
             ActionResult::Created(Err(e)) => {
                 self.status_message = Some(format!("Error: {}", e));
@@ -469,11 +469,14 @@ impl App {
         }
     }
 
+    fn send_refresh(&self) {
+        let _ = self.action_tx.send(Action::Refresh);
+        let _ = self.action_tx.send(Action::RefreshSystemInfo);
+    }
+
     fn refresh(&mut self) {
         self.status_message = Some("Refreshing...".to_string());
-        self.send_action(Action::Refresh);
-        // Also refresh system info (non-blocking, fire-and-forget)
-        let _ = self.action_tx.send(Action::RefreshSystemInfo);
+        self.send_refresh();
     }
 
     fn next(&mut self) {
@@ -604,10 +607,28 @@ fn draw(frame: &mut Frame, app: &mut App) {
             Span::styled(" loading...", Style::default().fg(Color::DarkGray)),
         ])
     };
+    let load_text = if let Some(ref info) = app.system_info {
+        Line::from(vec![Span::styled(
+            format!("Load {:.2} {:.2} {:.2} ", info.load_1, info.load_5, info.load_15),
+            Style::default().fg(Color::DarkGray),
+        )])
+    } else {
+        Line::from("")
+    };
     let title_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(Paragraph::new(title).block(title_block), chunks[0]);
+    frame.render_widget(title_block.clone(), chunks[0]);
+    let title_inner = title_block.inner(chunks[0]);
+    let title_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(22)])
+        .split(title_inner);
+    frame.render_widget(Paragraph::new(title), title_chunks[0]);
+    frame.render_widget(
+        Paragraph::new(load_text).alignment(ratatui::prelude::Alignment::Right),
+        title_chunks[1],
+    );
 
     // VM Table
     let header = Row::new(vec![
@@ -702,10 +723,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
     // Status bar / Confirmation
     if let Some(ref id) = app.confirm_kill {
+        let vm_display = if let Some(vm) = app.get_vm_by_id(id) {
+            format!("{} ({}…)", vm.name.as_deref().unwrap_or(&id[..8]), &id[..8])
+        } else {
+            format!("{}…", &id[..8])
+        };
         let confirm_line = Line::from(vec![
             Span::styled(" ⚠ ", Style::default().fg(Color::Red)),
             Span::styled(
-                format!("Kill VM {}…? ", &id[..8]),
+                format!("Kill VM {}? ", vm_display),
                 Style::default().fg(Color::Red).bold(),
             ),
             Span::styled("[y]", Style::default().fg(Color::Green).bold()),
@@ -715,10 +741,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
         ]);
         frame.render_widget(Paragraph::new(confirm_line), chunks[3]);
     } else if let Some(ref id) = app.confirm_delete {
+        let vm_display = if let Some(vm) = app.get_vm_by_id(id) {
+            format!("{} ({}…)", vm.name.as_deref().unwrap_or(&id[..8]), &id[..8])
+        } else {
+            format!("{}…", &id[..8])
+        };
         let confirm_line = Line::from(vec![
             Span::styled(" ⚠ ", Style::default().fg(Color::Red)),
             Span::styled(
-                format!("Delete VM {}…? ", &id[..8]),
+                format!("Delete VM {}? ", vm_display),
                 Style::default().fg(Color::Red).bold(),
             ),
             Span::styled("[y]", Style::default().fg(Color::Green).bold()),
