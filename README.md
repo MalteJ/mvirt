@@ -1,19 +1,19 @@
 # mvirt
 
 > [!WARNING]
-> Dieses Projekt wurde vibe-coded mit Claude Code. Not for production use!
+> This project was vibe-coded with Claude Code. Not for production use!
 
-Leichtgewichtiger VM-Manager in Rust als moderne Alternative zu libvirt.
+Lightweight VM manager in Rust as a modern alternative to libvirt.
 
 ## Features
 
-- **cloud-hypervisor** als Hypervisor (statt QEMU)
-- **gRPC API** für einfache Integration
-- **TUI** mit ratatui
-- **SQLite** für persistenten State
-- **Statisch gelinkt** mit musl für einfaches Deployment
+- **cloud-hypervisor** as hypervisor (instead of QEMU)
+- **gRPC API** for easy integration
+- **TUI** with ratatui
+- **SQLite** for persistent state
+- **Statically linked** with musl for easy deployment
 
-## Architektur
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -28,31 +28,31 @@ Leichtgewichtiger VM-Manager in Rust als moderne Alternative zu libvirt.
 └──────────────────────────┼──────────────────────────────────┘
                            │ HTTP API (Unix Socket)
 ┌──────────────────────────▼──────────────────────────────────┐
-│                 cloud-hypervisor Prozesse                   │
+│                 cloud-hypervisor Processes                  │
 │       ┌────────┐    ┌────────┐    ┌────────┐                │
 │       │  VM 1  │    │  VM 2  │    │  VM n  │                │
 │       └────────┘    └────────┘    └────────┘                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Komponenten
+## Components
 
-| Verzeichnis | Beschreibung |
-|-------------|--------------|
-| `mvirt-vmm/` | Daemon der VMs verwaltet |
-| `mvirt-cli/` | CLI und TUI Client |
-| `mvirt-os/` | Linux-Kernel, initramfs, UKI Build-System |
+| Directory | Description |
+|-----------|-------------|
+| `mvirt-vmm/` | Daemon that manages VMs |
+| `mvirt-cli/` | CLI and TUI client |
+| `mvirt-os/` | Linux kernel, initramfs, UKI build system |
 
-## Voraussetzungen
+## Prerequisites
 
 ```bash
-# Rust mit musl target
+# Rust with musl target
 rustup target add x86_64-unknown-linux-musl
 
-# Build-Tools
+# Build tools
 sudo apt install build-essential musl-tools
 
-# Für mvirt-os (Kernel/UKI)
+# For mvirt-os (Kernel/UKI)
 sudo apt install flex bison libncurses-dev libssl-dev libelf-dev bc dwarves
 sudo apt install systemd-ukify systemd-boot-efi genisoimage
 ```
@@ -60,70 +60,70 @@ sudo apt install systemd-ukify systemd-boot-efi genisoimage
 ## Build
 
 ```bash
-# Alles bauen (Rust + Kernel + initramfs + UKI)
+# Build everything (Rust + Kernel + initramfs + UKI)
 make
 
-# Nur Rust-Binaries
+# Rust binaries only
 make release
 
-# Nur mvirt-os
+# mvirt-os only
 make os
 ```
 
-## Entwicklung
+## Development
 
 ```bash
-# Debug-Build
+# Debug build
 cargo build
 
-# Daemon starten (Development)
+# Start daemon (development)
 cargo run --bin mvirt-vmm -- --data-dir ./tmp
 
-# CLI/TUI starten
+# Start CLI/TUI
 cargo run --bin mvirt
 
 # Tests
 cargo test --workspace
 
-# Formatierung & Linting
+# Formatting & linting
 cargo fmt && cargo clippy --workspace
 ```
 
-## Verzeichnisstruktur
+## Directory Structure
 
 ```
 mvirt/
 ├── Cargo.toml              # Workspace
-├── Makefile                # Build-Orchestrierung
+├── Makefile                # Build orchestration
 ├── mvirt-cli/              # CLI + TUI
 │   ├── src/
-│   │   ├── main.rs         # CLI Commands
-│   │   └── tui.rs          # TUI mit ratatui
-│   └── proto/              # gRPC Proto (Client)
+│   │   ├── main.rs         # CLI commands
+│   │   └── tui.rs          # TUI with ratatui
+│   └── proto/              # gRPC proto (client)
 ├── mvirt-vmm/              # Daemon
 │   ├── src/
-│   │   ├── main.rs         # Server-Start
-│   │   ├── grpc.rs         # gRPC Handler
-│   │   ├── hypervisor.rs   # cloud-hypervisor Management
-│   │   └── store.rs        # SQLite Persistence
-│   └── proto/              # gRPC Proto (Server)
-├── mvirt-os/               # OS Build-System
+│   │   ├── main.rs         # Server startup
+│   │   ├── grpc.rs         # gRPC handlers
+│   │   ├── hypervisor.rs   # cloud-hypervisor management
+│   │   └── store.rs        # SQLite persistence
+│   └── proto/              # gRPC proto (server)
+├── mvirt-os/               # OS build system
 │   ├── pideins/            # Rust init (PID 1)
-│   ├── initramfs/          # initramfs Skeleton
-│   ├── kernel.config       # Kernel Kconfig Fragment
-│   └── *.mk                # Make-Includes
-├── images/                 # VM Disk Images
-└── tmp/                    # Development Data-Dir
+│   ├── initramfs/          # initramfs skeleton
+│   ├── kernel.config       # Kernel Kconfig fragment
+│   └── *.mk                # Make includes
+├── images/                 # VM disk images
+└── tmp/                    # Development data dir
 ```
 
 ## Output
 
-| Datei | Beschreibung |
-|-------|--------------|
-| `target/x86_64-unknown-linux-musl/release/mvirt` | CLI Binary |
-| `target/x86_64-unknown-linux-musl/release/mvirt-vmm` | Daemon Binary |
-| `mvirt-os/mvirt.efi` | Bootbares UKI |
+| File | Description |
+|------|-------------|
+| `target/x86_64-unknown-linux-musl/release/mvirt` | CLI binary |
+| `target/x86_64-unknown-linux-musl/release/mvirt-vmm` | Daemon binary |
+| `mvirt-os/mvirt.efi` | Bootable UKI |
 
-## Lizenz
+## License
 
 MIT

@@ -1,20 +1,20 @@
 # mvirt-cli
 
-CLI und TUI Client für mvirt.
+CLI and TUI client for mvirt.
 
 ## Features
 
-- **TUI** - Interaktive Oberfläche mit ratatui
-- **CLI** - Scriptbare Kommandos
-- **Console** - Serial Console Zugriff (Ctrl+a t zum Beenden)
+- **TUI** - Interactive interface with ratatui
+- **CLI** - Scriptable commands
+- **Console** - Serial console access (Ctrl+a t to exit)
 
-## Verwendung
+## Usage
 
 ```bash
-# TUI starten (default)
+# Start TUI (default)
 mvirt
 
-# CLI Kommandos
+# CLI commands
 mvirt list
 mvirt create --name test --kernel /path/to/kernel --disk /path/to/disk.raw
 mvirt start <id>
@@ -36,31 +36,31 @@ mvirt console <id>
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Tastenkürzel
+### Keyboard Shortcuts
 
-| Taste | Aktion |
-|-------|--------|
-| `↵` | VM-Details anzeigen |
-| `c` | Neue VM erstellen |
-| `s` | VM starten |
-| `S` | VM stoppen (graceful) |
-| `k` | VM killen (force) |
-| `d` | VM löschen |
-| `q` | Beenden |
+| Key | Action |
+|-----|--------|
+| `↵` | Show VM details |
+| `c` | Create new VM |
+| `s` | Start VM |
+| `S` | Stop VM (graceful) |
+| `k` | Kill VM (force) |
+| `d` | Delete VM |
+| `q` | Quit |
 | `↑/↓` | Navigation |
 
 ### Create Modal
 
-- **Name** - Optional, nur `[a-zA-Z0-9-_]`
-- **Kernel** - Pflicht, File Picker mit Enter
-- **Disk** - Pflicht, File Picker mit Enter
-- **VCPUs** - Default 1, nur Zahlen
-- **Memory** - Default 512 MB, nur Zahlen
+- **Name** - Optional, only `[a-zA-Z0-9-_]`
+- **Kernel** - Required, file picker with Enter
+- **Disk** - Required, file picker with Enter
+- **VCPUs** - Default 1, numbers only
+- **Memory** - Default 512 MB, numbers only
 - **User-Data** - Optional, cloud-init YAML
 
-## CLI Kommandos
+## CLI Commands
 
-### VM erstellen
+### Create VM
 
 ```bash
 mvirt create \
@@ -72,34 +72,34 @@ mvirt create \
     --user-data /path/to/cloud-init.yaml
 ```
 
-### VM verwalten
+### Manage VMs
 
 ```bash
-mvirt list                  # Alle VMs auflisten
-mvirt get <id>              # VM-Details
-mvirt start <id>            # VM starten
-mvirt stop <id>             # Graceful Shutdown (30s Timeout)
-mvirt stop <id> -t 60       # Mit 60s Timeout
-mvirt kill <id>             # Force Kill
-mvirt delete <id>           # VM löschen (muss gestoppt sein)
+mvirt list                  # List all VMs
+mvirt get <id>              # VM details
+mvirt start <id>            # Start VM
+mvirt stop <id>             # Graceful shutdown (30s timeout)
+mvirt stop <id> -t 60       # With 60s timeout
+mvirt kill <id>             # Force kill
+mvirt delete <id>           # Delete VM (must be stopped)
 ```
 
 ### Console
 
 ```bash
-mvirt console <id>          # Serial Console verbinden
-                            # Ctrl+a t zum Beenden
+mvirt console <id>          # Connect to serial console
+                            # Ctrl+a t to exit
 ```
 
-## Optionen
+## Options
 
-| Option | Default | Beschreibung |
-|--------|---------|--------------|
-| `-s, --server` | `http://[::1]:50051` | gRPC Server-Adresse |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-s, --server` | `http://[::1]:50051` | gRPC server address |
 
 ## Exit Codes
 
-| Code | Bedeutung |
-|------|-----------|
-| 0 | Erfolg |
-| 1 | Fehler (Connection, API, etc.) |
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Error (connection, API, etc.) |

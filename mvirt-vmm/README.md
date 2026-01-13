@@ -1,83 +1,83 @@
 # mvirt-vmm
 
-Daemon zur Verwaltung von VMs via cloud-hypervisor.
+Daemon for managing VMs via cloud-hypervisor.
 
 ## Features
 
-- gRPC API auf Port 50051
-- SQLite für VM-Definitionen und Runtime-State
-- Automatische TAP-Device und Bridge-Verwaltung
-- Cloud-init Support (user-data, meta-data, network-config)
-- Graceful Shutdown mit Timeout
-- Crash Recovery (findet laufende VMs nach Daemon-Restart)
+- gRPC API on port 50051
+- SQLite for VM definitions and runtime state
+- Automatic TAP device and bridge management
+- Cloud-init support (user-data, meta-data, network-config)
+- Graceful shutdown with timeout
+- Crash recovery (finds running VMs after daemon restart)
 
-## Verwendung
+## Usage
 
 ```bash
-# Mit Default-Einstellungen (/var/lib/mvirt)
+# With default settings (/var/lib/mvirt)
 mvirt-vmm
 
-# Development (lokales Verzeichnis)
+# Development (local directory)
 mvirt-vmm --data-dir ./tmp
 
-# Eigene Bridge
+# Custom bridge
 mvirt-vmm --bridge br0
 ```
 
-## Optionen
+## Options
 
-| Option | Default | Beschreibung |
-|--------|---------|--------------|
-| `--data-dir` | `/var/lib/mvirt` | Verzeichnis für DB und Sockets |
-| `--bridge` | `mvirt0` | Linux Bridge für VM-Netzwerk |
-| `--listen` | `[::1]:50051` | gRPC Listen-Adresse |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--data-dir` | `/var/lib/mvirt` | Directory for DB and sockets |
+| `--bridge` | `mvirt0` | Linux bridge for VM network |
+| `--listen` | `[::1]:50051` | gRPC listen address |
 
-## Datenverzeichnis
+## Data Directory
 
 ```
 <data-dir>/
-├── mvirt.db                # SQLite Datenbank
+├── mvirt.db                # SQLite database
 └── vm/
     └── <vm-id>/
-        ├── api.sock        # cloud-hypervisor API Socket
-        ├── serial.sock     # Serial Console Socket
+        ├── api.sock        # cloud-hypervisor API socket
+        ├── serial.sock     # Serial console socket
         ├── cloudinit.iso   # Generated cloud-init ISO
-        └── *.log           # Prozess-Logs
+        └── *.log           # Process logs
 ```
 
 ## gRPC API
 
-Definiert in `proto/mvirt.proto`:
+Defined in `proto/mvirt.proto`:
 
 ### System
-- `GetSystemInfo` - CPU/RAM total und allocated
+- `GetSystemInfo` - CPU/RAM total and allocated
 
 ### CRUD
-- `CreateVm` - VM erstellen
-- `GetVm` - VM-Details abrufen
-- `ListVms` - Alle VMs auflisten
-- `DeleteVm` - VM löschen (muss gestoppt sein)
+- `CreateVm` - Create VM
+- `GetVm` - Get VM details
+- `ListVms` - List all VMs
+- `DeleteVm` - Delete VM (must be stopped)
 
 ### Lifecycle
-- `StartVm` - VM starten
-- `StopVm` - Graceful Shutdown (mit Timeout)
-- `KillVm` - Force Kill (SIGKILL)
+- `StartVm` - Start VM
+- `StopVm` - Graceful shutdown (with timeout)
+- `KillVm` - Force kill (SIGKILL)
 
 ### Console
-- `Console` - Bidirektionaler Serial Console Stream
+- `Console` - Bidirectional serial console stream
 
-## Architektur
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                     grpc.rs                         │
-│                  (gRPC Handler)                     │
+│                  (gRPC Handlers)                    │
 └──────────┬─────────────────────────┬────────────────┘
            │                         │
 ┌──────────▼──────────┐   ┌──────────▼──────────┐
 │      store.rs       │   │    hypervisor.rs    │
 │  (SQLite: VMs,      │   │  (cloud-hypervisor  │
-│   Runtime-Info)     │   │   Prozesse, TAPs)   │
+│   Runtime Info)     │   │   processes, TAPs)  │
 └─────────────────────┘   └──────────┬──────────┘
                                      │
                           ┌──────────▼──────────┐
@@ -89,7 +89,7 @@ Definiert in `proto/mvirt.proto`:
 ## SQLite Schema
 
 ```sql
--- VM-Definitionen
+-- VM definitions
 CREATE TABLE vms (
     id TEXT PRIMARY KEY,
     name TEXT,
@@ -99,7 +99,7 @@ CREATE TABLE vms (
     started_at INTEGER
 );
 
--- Runtime-Info (PID, Sockets)
+-- Runtime info (PID, sockets)
 CREATE TABLE vm_runtime (
     vm_id TEXT PRIMARY KEY REFERENCES vms(id),
     pid INTEGER NOT NULL,
@@ -108,7 +108,7 @@ CREATE TABLE vm_runtime (
 );
 ```
 
-## cloud-hypervisor Kommando
+## cloud-hypervisor Command
 
 ```bash
 cloud-hypervisor \

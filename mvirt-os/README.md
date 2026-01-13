@@ -1,40 +1,40 @@
 # mvirt-os
 
-Build-System für Linux-Kernel, initramfs und UKI (Unified Kernel Image).
+Build system for Linux kernel, initramfs, and UKI (Unified Kernel Image).
 
 ## Features
 
-- Minimaler Linux-Kernel für cloud-hypervisor
-- initramfs mit statisch gelinkten Binaries
-- UKI für direktes EFI-Booten
+- Minimal Linux kernel for cloud-hypervisor
+- initramfs with statically linked binaries
+- UKI for direct EFI booting
 - pideins - Rust init (PID 1)
 
-## Verwendung
+## Usage
 
 ```bash
-# Alles bauen (Kernel + initramfs + UKI)
+# Build everything (kernel + initramfs + UKI)
 make -C mvirt-os
 
-# Einzelne Targets
+# Individual targets
 make -C mvirt-os kernel
 make -C mvirt-os initramfs
 make -C mvirt-os uki
 
-# Kernel konfigurieren
+# Configure kernel
 make -C mvirt-os menuconfig
 ```
 
-## Struktur
+## Structure
 
 ```
 mvirt-os/
-├── kernel.version          # Kernel-Version (z.B. "6.18.4")
-├── kernel.config           # Kconfig Fragment
-├── cmdline.txt             # Kernel Cmdline
-├── mvirt-os.mk             # Haupt-Makefile
-├── linux.mk                # Kernel-Build
+├── kernel.version          # Kernel version (e.g. "6.18.4")
+├── kernel.config           # Kconfig fragment
+├── cmdline.txt             # Kernel cmdline
+├── mvirt-os.mk             # Main Makefile
+├── linux.mk                # Kernel build
 ├── initramfs/
-│   └── rootfs/             # initramfs Skeleton
+│   └── rootfs/             # initramfs skeleton
 │       ├── dev/
 │       ├── proc/
 │       ├── sys/
@@ -43,13 +43,13 @@ mvirt-os/
 ├── pideins/                # Rust init
 │   ├── Cargo.toml
 │   └── src/main.rs
-└── target/                 # Build-Output
-    ├── cloud-hypervisor    # Downloaded Binary
+└── target/                 # Build output
+    ├── cloud-hypervisor    # Downloaded binary
     ├── initramfs.cpio.gz
     └── mvirt.efi
 ```
 
-## Konfiguration
+## Configuration
 
 ### kernel.version
 
@@ -59,7 +59,7 @@ mvirt-os/
 
 ### kernel.config
 
-Kconfig-Fragment das auf `tinyconfig` angewendet wird:
+Kconfig fragment applied on top of `tinyconfig`:
 
 ```
 CONFIG_64BIT=y
@@ -76,45 +76,45 @@ CONFIG_EXT4_FS=y
 console=ttyS0 quiet
 ```
 
-## initramfs Inhalt
+## initramfs Contents
 
-| Pfad | Quelle |
+| Path | Source |
 |------|--------|
 | `/init` | `pideins` (Rust init) |
 | `/usr/sbin/mvirt` | CLI |
 | `/usr/sbin/mvirt-vmm` | Daemon |
-| `/usr/bin/cloud-hypervisor` | cloud-hypervisor Release |
+| `/usr/bin/cloud-hypervisor` | cloud-hypervisor release |
 
 ## pideins
 
-Minimaler init-Prozess in Rust:
+Minimal init process in Rust:
 
-1. Mountet `/proc`, `/sys`, `/dev`
-2. Setzt Hostname
-3. Startet `mvirt-vmm`
-4. Wartet auf Shutdown-Signal
-5. Rebootet
+1. Mounts `/proc`, `/sys`, `/dev`
+2. Sets hostname
+3. Starts `mvirt-vmm`
+4. Waits for shutdown signal
+5. Reboots
 
 ## Output
 
-| Datei | Beschreibung |
-|-------|--------------|
-| `kernel/arch/x86/boot/bzImage` | Linux Kernel |
-| `target/initramfs.cpio.gz` | Komprimiertes initramfs |
-| `target/mvirt.efi` | Bootbares UKI |
-| `target/cloud-hypervisor` | cloud-hypervisor Binary |
+| File | Description |
+|------|-------------|
+| `kernel/arch/x86/boot/bzImage` | Linux kernel |
+| `target/initramfs.cpio.gz` | Compressed initramfs |
+| `target/mvirt.efi` | Bootable UKI |
+| `target/cloud-hypervisor` | cloud-hypervisor binary |
 
-## Aufräumen
+## Cleanup
 
 ```bash
-make -C mvirt-os clean       # Build-Artefakte löschen
-make -C mvirt-os distclean   # + Kernel-Source + Downloads
+make -C mvirt-os clean       # Delete build artifacts
+make -C mvirt-os distclean   # + kernel source + downloads
 ```
 
-## Abhängigkeiten
+## Dependencies
 
 ```bash
-# Kernel-Build
+# Kernel build
 sudo apt install build-essential flex bison libncurses-dev \
     libssl-dev libelf-dev bc dwarves
 
