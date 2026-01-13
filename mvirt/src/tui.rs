@@ -261,6 +261,7 @@ pub struct App {
     last_refresh: Option<chrono::DateTime<chrono::Local>>,
     create_modal: Option<CreateModal>,
     file_picker: Option<FilePicker>,
+    detail_view: Option<String>, // VM ID for detail view
 }
 
 impl App {
@@ -280,6 +281,7 @@ impl App {
             last_refresh: None,
             create_modal: None,
             file_picker: None,
+            detail_view: None,
         }
     }
 
@@ -483,6 +485,20 @@ impl App {
         };
         self.table_state.select(Some(i));
     }
+
+    fn open_detail_view(&mut self) {
+        if let Some(vm) = self.selected_vm() {
+            self.detail_view = Some(vm.id.clone());
+        }
+    }
+
+    fn close_detail_view(&mut self) {
+        self.detail_view = None;
+    }
+
+    fn get_vm_by_id(&self, id: &str) -> Option<&Vm> {
+        self.vms.iter().find(|vm| vm.id == id)
+    }
 }
 
 fn format_state(state: i32) -> &'static str {
@@ -559,7 +575,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             let state = vm.state;
             Row::new(vec![
                 Cell::from(Span::styled(
-                    &vm.id[..8], // Show short ID
+                    format!("{}…", &vm.id[..8]), // Show short ID with ellipsis
                     Style::default().fg(Color::DarkGray),
                 )),
                 Cell::from(vm.name.clone().unwrap_or_else(|| "-".to_string())),
@@ -577,7 +593,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(10),
+            Constraint::Length(11), // 8 chars + ellipsis + padding
             Constraint::Min(15),
             Constraint::Length(12),
             Constraint::Length(5),
@@ -601,7 +617,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
         .split(chunks[2]);
 
     let legend = Line::from(vec![
-        Span::styled(" c", Style::default().fg(Color::Cyan).bold()),
+        Span::styled(" ↵", Style::default().fg(Color::White).bold()),
+        Span::styled(" Details ", Style::default().fg(Color::DarkGray)),
+        Span::styled("c", Style::default().fg(Color::Cyan).bold()),
         Span::styled(" Create ", Style::default().fg(Color::DarkGray)),
         Span::styled("s", Style::default().fg(Color::Green).bold()),
         Span::styled(" Start ", Style::default().fg(Color::DarkGray)),
@@ -634,7 +652,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         let confirm_line = Line::from(vec![
             Span::styled(" ⚠ ", Style::default().fg(Color::Red)),
             Span::styled(
-                format!("Delete VM {}? ", &id[..8]),
+                format!("Delete VM {}…? ", &id[..8]),
                 Style::default().fg(Color::Red).bold(),
             ),
             Span::styled("[y]", Style::default().fg(Color::Green).bold()),
@@ -649,6 +667,13 @@ fn draw(frame: &mut Frame, app: &mut App) {
             Style::default().fg(Color::Yellow),
         )]);
         frame.render_widget(Paragraph::new(status_line), chunks[3]);
+    }
+
+    // Detail View
+    if let Some(ref vm_id) = app.detail_view
+        && let Some(vm) = app.get_vm_by_id(vm_id)
+    {
+        draw_detail_view(frame, vm);
     }
 
     // Create VM Modal
@@ -854,6 +879,164 @@ fn draw_file_picker(frame: &mut Frame, picker: &FilePicker) {
     }
 }
 
+fn draw_detail_view(frame: &mut Frame, vm: &Vm) {
+    let area = frame.area();
+    let modal_width = 70.min(area.width.saturating_sub(4));
+    let modal_height = 22.min(area.height.saturating_sub(4));
+
+    let modal_area = Rect {
+        x: (area.width - modal_width) / 2,
+        y: (area.height - modal_height) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the modal area
+    frame.render_widget(Clear, modal_area);
+
+    // Modal block
+    let name_str = vm.name.clone().unwrap_or_else(|| "unnamed".to_string());
+    let title = Line::from(vec![
+        Span::styled(
+            format!(" {} ", name_str),
+            Style::default().fg(Color::Cyan).bold(),
+        ),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Esc", Style::default().fg(Color::Yellow)),
+        Span::styled(": close ", Style::default().fg(Color::DarkGray)),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let config = vm.config.as_ref();
+    let label_style = Style::default().fg(Color::DarkGray);
+    let value_style = Style::default().fg(Color::White);
+
+    // Build the detail lines
+    let mut lines: Vec<Line> = Vec::new();
+
+    // ID
+    lines.push(Line::from(vec![
+        Span::styled(" ID:          ", label_style),
+        Span::styled(&vm.id, value_style),
+    ]));
+
+    // State
+    let state_text = format_state(vm.state);
+    lines.push(Line::from(vec![
+        Span::styled(" State:       ", label_style),
+        Span::styled(state_text, state_style(vm.state)),
+    ]));
+
+    // VCPUs and Memory
+    if let Some(cfg) = config {
+        lines.push(Line::from(vec![
+            Span::styled(" VCPUs:       ", label_style),
+            Span::styled(cfg.vcpus.to_string(), value_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" Memory:      ", label_style),
+            Span::styled(format!("{} MB", cfg.memory_mb), value_style),
+        ]));
+
+        // Kernel
+        lines.push(Line::from(vec![
+            Span::styled(" Kernel:      ", label_style),
+            Span::styled(&cfg.kernel, value_style),
+        ]));
+
+        // Initramfs (if set)
+        if let Some(ref initramfs) = cfg.initramfs {
+            lines.push(Line::from(vec![
+                Span::styled(" Initramfs:   ", label_style),
+                Span::styled(initramfs, value_style),
+            ]));
+        }
+
+        // Cmdline (if set)
+        if let Some(ref cmdline) = cfg.cmdline {
+            let display_cmdline = if cmdline.len() > 50 {
+                format!("{}…", &cmdline[..50])
+            } else {
+                cmdline.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(" Cmdline:     ", label_style),
+                Span::styled(display_cmdline, value_style),
+            ]));
+        }
+
+        // Disks
+        for (i, disk) in cfg.disks.iter().enumerate() {
+            let label = if i == 0 {
+                " Disks:       "
+            } else {
+                "              "
+            };
+            let readonly = if disk.readonly { " (ro)" } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(label, label_style),
+                Span::styled(format!("{}{}", disk.path, readonly), value_style),
+            ]));
+        }
+
+        // NICs
+        for (i, nic) in cfg.nics.iter().enumerate() {
+            let label = if i == 0 {
+                " NICs:        "
+            } else {
+                "              "
+            };
+            let nic_info = match (&nic.tap, &nic.mac) {
+                (Some(tap), Some(mac)) => format!("{} ({})", tap, mac),
+                (Some(tap), None) => tap.clone(),
+                (None, Some(mac)) => format!("({})", mac),
+                (None, None) => "default".to_string(),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(label, label_style),
+                Span::styled(nic_info, value_style),
+            ]));
+        }
+
+        // User-Data indicator
+        if cfg.user_data.is_some() {
+            lines.push(Line::from(vec![
+                Span::styled(" User-Data:   ", label_style),
+                Span::styled("configured", Style::default().fg(Color::Green)),
+            ]));
+        }
+    }
+
+    // Timestamps
+    lines.push(Line::from(vec![Span::raw("")])); // Empty line
+
+    let created_time = chrono::DateTime::from_timestamp(vm.created_at, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "-".to_string());
+    lines.push(Line::from(vec![
+        Span::styled(" Created:     ", label_style),
+        Span::styled(created_time, value_style),
+    ]));
+
+    if let Some(started_at) = vm.started_at {
+        let started_time = chrono::DateTime::from_timestamp(started_at, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "-".to_string());
+        lines.push(Line::from(vec![
+            Span::styled(" Started:     ", label_style),
+            Span::styled(started_time, value_style),
+        ]));
+    }
+
+    let text = Text::from(lines);
+    frame.render_widget(Paragraph::new(text), inner);
+}
+
 async fn action_worker(
     mut client: VmServiceClient<Channel>,
     mut action_rx: mpsc::UnboundedReceiver<Action>,
@@ -996,6 +1179,12 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                     KeyCode::Enter => app.select_file(),
                     _ => {}
                 }
+            } else if app.detail_view.is_some() {
+                // Handle detail view
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.close_detail_view(),
+                    _ => {}
+                }
             } else if app.create_modal.is_some() {
                 // Handle create modal
                 match key.code {
@@ -1066,6 +1255,7 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                     KeyCode::Char('q') => app.should_quit = true,
                     KeyCode::Down => app.next(),
                     KeyCode::Up => app.previous(),
+                    KeyCode::Enter => app.open_detail_view(),
                     KeyCode::Char('c') => app.open_create_modal(),
                     KeyCode::Char('s') => app.start_selected(),
                     KeyCode::Char('S') => app.stop_selected(),
