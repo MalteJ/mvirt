@@ -27,6 +27,43 @@ impl VmServiceImpl {
 
 #[tonic::async_trait]
 impl VmService for VmServiceImpl {
+    // System
+
+    async fn get_system_info(
+        &self,
+        _request: Request<GetSystemInfoRequest>,
+    ) -> Result<Response<SystemInfo>, Status> {
+        use sysinfo::System;
+
+        let mut sys = System::new();
+        sys.refresh_cpu_all();
+        sys.refresh_memory();
+
+        let total_cpus = sys.cpus().len() as u32;
+        let total_memory_mb = sys.total_memory() / 1024 / 1024;
+
+        // Calculate allocated resources from running VMs
+        let entries = self
+            .store
+            .list()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let (allocated_cpus, allocated_memory_mb) = entries
+            .iter()
+            .filter(|e| e.state == VmState::Running)
+            .fold((0u32, 0u64), |(cpus, mem), e| {
+                (cpus + e.config.vcpus, mem + e.config.memory_mb)
+            });
+
+        Ok(Response::new(SystemInfo {
+            total_cpus,
+            total_memory_mb,
+            allocated_cpus,
+            allocated_memory_mb,
+        }))
+    }
+
     // CRUD
 
     async fn create_vm(&self, request: Request<CreateVmRequest>) -> Result<Response<Vm>, Status> {

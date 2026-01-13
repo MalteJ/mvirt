@@ -19,6 +19,7 @@ use crate::proto::*;
 
 pub(crate) enum Action {
     Refresh,
+    RefreshSystemInfo,
     Start(String),
     Stop(String),
     Kill(String),
@@ -38,6 +39,7 @@ pub(crate) struct CreateVmParams {
 
 pub(crate) enum ActionResult {
     Refreshed(Result<Vec<Vm>, String>),
+    SystemInfoRefreshed(Result<SystemInfo, String>),
     Started(String, Result<(), String>),
     Stopped(String, Result<(), String>),
     Killed(String, Result<(), String>),
@@ -251,6 +253,7 @@ impl CreateModal {
 
 pub struct App {
     vms: Vec<Vm>,
+    system_info: Option<SystemInfo>,
     table_state: TableState,
     should_quit: bool,
     status_message: Option<String>,
@@ -271,6 +274,7 @@ impl App {
     ) -> Self {
         Self {
             vms: Vec::new(),
+            system_info: None,
             table_state: TableState::default(),
             should_quit: false,
             status_message: None,
@@ -313,6 +317,12 @@ impl App {
             }
             ActionResult::Refreshed(Err(e)) => {
                 self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::SystemInfoRefreshed(Ok(info)) => {
+                self.system_info = Some(info);
+            }
+            ActionResult::SystemInfoRefreshed(Err(_)) => {
+                // Silently ignore system info errors
             }
             ActionResult::Started(id, Ok(())) => {
                 self.status_message = Some(format!("Started {}", id));
@@ -450,6 +460,8 @@ impl App {
     fn refresh(&mut self) {
         self.status_message = Some("Refreshing...".to_string());
         self.send_action(Action::Refresh);
+        // Also refresh system info (non-blocking, fire-and-forget)
+        let _ = self.action_tx.send(Action::RefreshSystemInfo);
     }
 
     fn next(&mut self) {
@@ -531,26 +543,55 @@ fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(frame.area());
 
-    // Title bar
-    let running_count = app
-        .vms
-        .iter()
-        .filter(|vm| vm.state == VmState::Running as i32)
-        .count();
-    let total_count = app.vms.len();
+    // Title bar with system resource info
+    let title = if let Some(ref info) = app.system_info {
+        let cpu_color = if info.allocated_cpus > info.total_cpus * 8 / 10 {
+            Color::Red
+        } else if info.allocated_cpus > info.total_cpus / 2 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        let mem_color = if info.allocated_memory_mb > info.total_memory_mb * 8 / 10 {
+            Color::Red
+        } else if info.allocated_memory_mb > info.total_memory_mb / 2 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        let total_mem_gib = info.total_memory_mb as f64 / 1024.0;
+        let alloc_mem_gib = info.allocated_memory_mb as f64 / 1024.0;
 
-    let title = Line::from(vec![
-        Span::styled(" mvirt ", Style::default().fg(Color::Cyan).bold()),
-        Span::styled("│", Style::default().fg(Color::DarkGray)),
-        Span::raw(" "),
-        Span::styled(
-            format!("{}", running_count),
-            Style::default().fg(Color::Green).bold(),
-        ),
-        Span::styled("/", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{}", total_count), Style::default().bold()),
-        Span::styled(" VMs", Style::default().fg(Color::DarkGray)),
-    ]);
+        Line::from(vec![
+            Span::styled(" mvirt ", Style::default().fg(Color::Cyan).bold()),
+            Span::styled("│", Style::default().fg(Color::DarkGray)),
+            Span::styled(" CPU ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", info.allocated_cpus),
+                Style::default().fg(cpu_color).bold(),
+            ),
+            Span::styled(
+                format!("/{}", info.total_cpus),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(" │", Style::default().fg(Color::DarkGray)),
+            Span::styled(" RAM ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.1}", alloc_mem_gib),
+                Style::default().fg(mem_color).bold(),
+            ),
+            Span::styled(
+                format!("/{:.1} GiB", total_mem_gib),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" mvirt ", Style::default().fg(Color::Cyan).bold()),
+            Span::styled("│", Style::default().fg(Color::DarkGray)),
+            Span::styled(" loading...", Style::default().fg(Color::DarkGray)),
+        ])
+    };
     let title_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
@@ -1048,6 +1089,12 @@ async fn action_worker(
                 Ok(response) => ActionResult::Refreshed(Ok(response.into_inner().vms)),
                 Err(e) => ActionResult::Refreshed(Err(e.message().to_string())),
             },
+            Action::RefreshSystemInfo => {
+                match client.get_system_info(GetSystemInfoRequest {}).await {
+                    Ok(response) => ActionResult::SystemInfoRefreshed(Ok(response.into_inner())),
+                    Err(e) => ActionResult::SystemInfoRefreshed(Err(e.message().to_string())),
+                }
+            }
             Action::Start(id) => match client.start_vm(StartVmRequest { id: id.clone() }).await {
                 Ok(_) => ActionResult::Started(id, Ok(())),
                 Err(e) => ActionResult::Started(id, Err(e.message().to_string())),

@@ -48,6 +48,9 @@ message NicConfig {
 // ============================================
 
 service VmService {
+  // System
+  rpc GetSystemInfo(GetSystemInfoRequest) returns (SystemInfo);
+
   // CRUD
   rpc CreateVm(CreateVmRequest) returns (Vm);
   rpc GetVm(GetVmRequest) returns (Vm);
@@ -75,6 +78,17 @@ service VmService {
 // ============================================
 // Request/Response Messages
 // ============================================
+
+// System
+
+message GetSystemInfoRequest {}
+
+message SystemInfo {
+  uint32 total_cpus = 1;
+  uint64 total_memory_mb = 2;
+  uint32 allocated_cpus = 3;
+  uint64 allocated_memory_mb = 4;
+}
 
 // CRUD
 

@@ -44,5 +44,8 @@ uuid = { version = "1", features = ["v4"] }
 # Unix process handling
 nix = { version = "0.29", features = ["signal", "process"] }
 
+# System information
+sysinfo = "0.32"
+
 [build-dependencies]
 tonic-build = "0.12"
