@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::Local;
@@ -44,6 +45,105 @@ pub(crate) enum ActionResult {
     Created(Result<String, String>), // Ok(vm_id) or Err(error)
 }
 
+struct FilePicker {
+    current_path: PathBuf,
+    entries: Vec<PathBuf>,
+    selected: usize,
+    scroll_offset: usize,
+    target_field: usize, // Which CreateModal field to populate
+}
+
+impl FilePicker {
+    fn new(start_path: PathBuf, target_field: usize) -> Self {
+        let mut picker = Self {
+            current_path: start_path,
+            entries: Vec::new(),
+            selected: 0,
+            scroll_offset: 0,
+            target_field,
+        };
+        picker.refresh_entries();
+        picker
+    }
+
+    fn refresh_entries(&mut self) {
+        self.entries.clear();
+
+        // Add parent directory entry if not at root
+        if self.current_path.parent().is_some() {
+            self.entries.push(PathBuf::from(".."));
+        }
+
+        // Read directory contents
+        if let Ok(read_dir) = std::fs::read_dir(&self.current_path) {
+            let mut dirs: Vec<PathBuf> = Vec::new();
+            let mut files: Vec<PathBuf> = Vec::new();
+
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                // Skip hidden files
+                if name.starts_with('.') {
+                    continue;
+                }
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+
+            // Sort directories and files separately
+            dirs.sort();
+            files.sort();
+
+            // Add directories first, then files
+            self.entries.extend(dirs);
+            self.entries.extend(files);
+        }
+
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
+    fn select_next(&mut self) {
+        if !self.entries.is_empty() {
+            self.selected = (self.selected + 1) % self.entries.len();
+        }
+    }
+
+    fn select_prev(&mut self) {
+        if !self.entries.is_empty() {
+            self.selected = if self.selected == 0 {
+                self.entries.len() - 1
+            } else {
+                self.selected - 1
+            };
+        }
+    }
+
+    fn enter_selected(&mut self) -> Option<PathBuf> {
+        let entry = self.entries.get(self.selected)?;
+
+        if entry == &PathBuf::from("..") {
+            // Go to parent directory
+            if let Some(parent) = self.current_path.parent() {
+                self.current_path = parent.to_path_buf();
+                self.refresh_entries();
+            }
+            None
+        } else if entry.is_dir() {
+            // Enter directory
+            self.current_path = entry.clone();
+            self.refresh_entries();
+            None
+        } else {
+            // Select file
+            Some(entry.clone())
+        }
+    }
+}
+
 #[derive(Default)]
 struct CreateModal {
     name: String,
@@ -51,7 +151,8 @@ struct CreateModal {
     disk: String,
     vcpus: String,
     memory_mb: String,
-    focused_field: usize, // 0-4 for fields, 5 for submit
+    user_data: String,
+    focused_field: usize, // 0-5 for fields, 6 for submit
 }
 
 impl CreateModal {
@@ -64,7 +165,7 @@ impl CreateModal {
     }
 
     fn field_count() -> usize {
-        6 // 5 fields + submit button
+        7 // 6 fields + submit button
     }
 
     fn focus_next(&mut self) {
@@ -86,7 +187,28 @@ impl CreateModal {
             2 => Some(&mut self.disk),
             3 => Some(&mut self.vcpus),
             4 => Some(&mut self.memory_mb),
+            5 => Some(&mut self.user_data),
             _ => None,
+        }
+    }
+
+    fn is_file_field(&self) -> bool {
+        matches!(self.focused_field, 1 | 2 | 5) // kernel, disk, user_data
+    }
+
+    fn is_numeric_field(&self) -> bool {
+        matches!(self.focused_field, 3 | 4) // vcpus, memory_mb
+    }
+
+    fn set_field(&mut self, field: usize, value: String) {
+        match field {
+            0 => self.name = value,
+            1 => self.kernel = value,
+            2 => self.disk = value,
+            3 => self.vcpus = value,
+            4 => self.memory_mb = value,
+            5 => self.user_data = value,
+            _ => {}
         }
     }
 
@@ -110,6 +232,11 @@ impl CreateModal {
             disk: self.disk.clone(),
             vcpus,
             memory_mb,
+            user_data: if self.user_data.is_empty() {
+                None
+            } else {
+                Some(self.user_data.clone())
+            },
         })
     }
 }
@@ -125,6 +252,7 @@ pub struct App {
     confirm_delete: Option<String>, // VM ID pending deletion
     last_refresh: Option<chrono::DateTime<chrono::Local>>,
     create_modal: Option<CreateModal>,
+    file_picker: Option<FilePicker>,
 }
 
 impl App {
@@ -143,6 +271,7 @@ impl App {
             confirm_delete: None,
             last_refresh: None,
             create_modal: None,
+            file_picker: None,
         }
     }
 
@@ -279,6 +408,32 @@ impl App {
                     self.status_message = Some(format!("Error: {}", e));
                 }
             }
+        }
+    }
+
+    fn open_file_picker(&mut self) {
+        if let Some(modal) = &self.create_modal
+            && modal.is_file_field()
+        {
+            let start_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+            self.file_picker = Some(FilePicker::new(start_path, modal.focused_field));
+        }
+    }
+
+    fn close_file_picker(&mut self) {
+        self.file_picker = None;
+    }
+
+    fn select_file(&mut self) {
+        if let Some(picker) = &mut self.file_picker
+            && let Some(path) = picker.enter_selected()
+        {
+            let target_field = picker.target_field;
+            let path_str = path.to_string_lossy().to_string();
+            if let Some(modal) = &mut self.create_modal {
+                modal.set_field(target_field, path_str);
+            }
+            self.file_picker = None;
         }
     }
 
@@ -452,12 +607,17 @@ fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(modal) = &app.create_modal {
         draw_create_modal(frame, modal);
     }
+
+    // File Picker (on top of modal)
+    if let Some(picker) = &app.file_picker {
+        draw_file_picker(frame, picker);
+    }
 }
 
 fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
     let area = frame.area();
-    let modal_width = 60.min(area.width.saturating_sub(4));
-    let modal_height = 15.min(area.height.saturating_sub(4));
+    let modal_width = 70.min(area.width.saturating_sub(4));
+    let modal_height = 17.min(area.height.saturating_sub(4));
 
     let modal_area = Rect {
         x: (area.width - modal_width) / 2,
@@ -472,7 +632,7 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
     // Modal block
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Create VM (Tab: next, Esc: cancel) ")
+        .title(" Create VM (Tab: next, Enter: browse, Esc: cancel) ")
         .style(Style::default().bg(Color::DarkGray));
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
@@ -486,35 +646,46 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
             Constraint::Length(2), // Disk
             Constraint::Length(2), // VCPUs
             Constraint::Length(2), // Memory
+            Constraint::Length(2), // User-Data
             Constraint::Length(2), // Submit button
         ])
         .split(inner);
 
-    let fields = [
-        ("Name (optional):", &modal.name),
-        ("Kernel:", &modal.kernel),
-        ("Disk:", &modal.disk),
-        ("VCPUs:", &modal.vcpus),
-        ("Memory (MB):", &modal.memory_mb),
+    // Field definitions: (label, value, is_file_field)
+    let fields: [(&str, &str, bool); 6] = [
+        ("Name:", &modal.name, false),
+        ("Kernel:", &modal.kernel, true),
+        ("Disk:", &modal.disk, true),
+        ("VCPUs:", &modal.vcpus, false),
+        ("Memory (MB):", &modal.memory_mb, false),
+        ("User-Data:", &modal.user_data, true),
     ];
 
-    for (i, (label, value)) in fields.iter().enumerate() {
-        let style = if modal.focused_field == i {
+    for (i, (label, value, is_file)) in fields.iter().enumerate() {
+        let is_focused = modal.focused_field == i;
+        let style = if is_focused {
             Style::default().fg(Color::Yellow).bold()
         } else {
             Style::default()
         };
 
-        let cursor = if modal.focused_field == i { "_" } else { "" };
+        let cursor = if is_focused { "_" } else { "" };
+        let browse_hint = if is_focused && *is_file {
+            Span::styled(" [Enter: browse]", Style::default().fg(Color::Cyan))
+        } else {
+            Span::raw("")
+        };
+
         let line = Line::from(vec![
-            Span::styled(format!("{:<16}", label), style),
+            Span::styled(format!("{:<14}", label), style),
             Span::raw(format!("{}{}", value, cursor)),
+            browse_hint,
         ]);
         frame.render_widget(Paragraph::new(line), field_chunks[i]);
     }
 
     // Submit button
-    let submit_style = if modal.focused_field == 5 {
+    let submit_style = if modal.focused_field == 6 {
         Style::default().fg(Color::Green).bold().reversed()
     } else {
         Style::default().fg(Color::Green)
@@ -524,7 +695,102 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
         submit_style,
     )]))
     .alignment(ratatui::prelude::Alignment::Center);
-    frame.render_widget(submit, field_chunks[5]);
+    frame.render_widget(submit, field_chunks[6]);
+}
+
+fn draw_file_picker(frame: &mut Frame, picker: &FilePicker) {
+    let area = frame.area();
+    let modal_width = 60.min(area.width.saturating_sub(6));
+    let modal_height = 20.min(area.height.saturating_sub(6));
+
+    let modal_area = Rect {
+        x: (area.width - modal_width) / 2,
+        y: (area.height - modal_height) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the modal area
+    frame.render_widget(Clear, modal_area);
+
+    // Modal block with current path in title
+    let title = format!(
+        " {} (Enter: select, Esc: cancel) ",
+        picker.current_path.display()
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    // Calculate visible entries based on scroll
+    let visible_height = inner.height as usize;
+
+    // Adjust scroll to keep selected item visible
+    let scroll_offset = if picker.selected >= visible_height {
+        picker.selected - visible_height + 1
+    } else {
+        0
+    };
+
+    // Render entries
+    for (i, entry) in picker
+        .entries
+        .iter()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .enumerate()
+    {
+        let actual_index = i + scroll_offset;
+        let is_selected = actual_index == picker.selected;
+
+        let (name, style) = if entry == &PathBuf::from("..") {
+            (
+                "..".to_string(),
+                if is_selected {
+                    Style::default().fg(Color::Cyan).bold().reversed()
+                } else {
+                    Style::default().fg(Color::Cyan)
+                },
+            )
+        } else if entry.is_dir() {
+            let name = entry
+                .file_name()
+                .map(|n| format!("{}/", n.to_string_lossy()))
+                .unwrap_or_else(|| "???/".to_string());
+            (
+                name,
+                if is_selected {
+                    Style::default().fg(Color::Blue).bold().reversed()
+                } else {
+                    Style::default().fg(Color::Blue)
+                },
+            )
+        } else {
+            let name = entry
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "???".to_string());
+            (
+                name,
+                if is_selected {
+                    Style::default().reversed()
+                } else {
+                    Style::default()
+                },
+            )
+        };
+
+        let line_area = Rect {
+            x: inner.x,
+            y: inner.y + i as u16,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(Span::styled(name, style)), line_area);
+    }
 }
 
 async fn action_worker(
@@ -579,7 +845,7 @@ async fn action_worker(
                         tap: None,
                         mac: None,
                     }],
-                    user_data: None,
+                    user_data: params.user_data,
                 };
                 match client
                     .create_vm(CreateVmRequest {
@@ -636,8 +902,25 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            // Handle create modal first
-            if app.create_modal.is_some() {
+            // Handle file picker first (highest priority)
+            if app.file_picker.is_some() {
+                match key.code {
+                    KeyCode::Esc => app.close_file_picker(),
+                    KeyCode::Down => {
+                        if let Some(picker) = &mut app.file_picker {
+                            picker.select_next();
+                        }
+                    }
+                    KeyCode::Up => {
+                        if let Some(picker) = &mut app.file_picker {
+                            picker.select_prev();
+                        }
+                    }
+                    KeyCode::Enter => app.select_file(),
+                    _ => {}
+                }
+            } else if app.create_modal.is_some() {
+                // Handle create modal
                 match key.code {
                     KeyCode::Esc => app.close_create_modal(),
                     KeyCode::Tab | KeyCode::Down => {
@@ -652,9 +935,12 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                     }
                     KeyCode::Enter => {
                         if let Some(modal) = &app.create_modal {
-                            if modal.focused_field == 5 {
+                            if modal.focused_field == 6 {
                                 // Submit button focused
                                 app.submit_create();
+                            } else if modal.is_file_field() {
+                                // Open file picker for file fields
+                                app.open_file_picker();
                             } else if let Some(modal) = &mut app.create_modal {
                                 modal.focus_next();
                             }
@@ -668,10 +954,17 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                         }
                     }
                     KeyCode::Char(c) => {
-                        if let Some(modal) = &mut app.create_modal
-                            && let Some(input) = modal.current_input()
-                        {
-                            input.push(c);
+                        if let Some(modal) = &mut app.create_modal {
+                            // Only accept digits for numeric fields
+                            if modal.is_numeric_field() {
+                                if c.is_ascii_digit()
+                                    && let Some(input) = modal.current_input()
+                                {
+                                    input.push(c);
+                                }
+                            } else if let Some(input) = modal.current_input() {
+                                input.push(c);
+                            }
                         }
                     }
                     _ => {}
