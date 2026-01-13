@@ -15,7 +15,11 @@ target/
 *.db-shm
 *.db-wal
 
-# Linux kernel build (keep only config and Makefile)
-/linux/kernel/
-/linux/*.tar.*
-/linux/initramfs/
+# mvirt-os build artifacts
+/mvirt-os/kernel/
+/mvirt-os/*.tar.*
+/mvirt-os/initramfs.cpio.gz
+/mvirt-os/mvirt.efi
+/mvirt-os/target/
+/mvirt-os/initramfs/rootfs/init
+/mvirt-os/initramfs/rootfs/usr/

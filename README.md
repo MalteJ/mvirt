@@ -1,87 +1,125 @@
 # mvirt
 
-Ein leichtgewichtiger VM-Manager in Rust als moderne Alternative zu libvirt.
+Leichtgewichtiger VM-Manager in Rust als moderne Alternative zu libvirt.
 
 ## Features
 
 - **cloud-hypervisor** als Hypervisor (statt QEMU)
 - **gRPC API** für einfache Integration
-- **Rust** für Memory Safety und Performance
+- **TUI** mit ratatui
 - **SQLite** für persistenten State
+- **Statisch gelinkt** mit musl für einfaches Deployment
 
 ## Architektur
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      Clients                            │
-│              (CLI, Web-UI, andere Services)             │
-└─────────────────────┬───────────────────────────────────┘
-                      │ gRPC
-┌─────────────────────▼───────────────────────────────────┐
-│                    mvirt-vmm (Daemon)                   │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │
-│  │ gRPC Server │  │ VM Manager  │  │ Storage Manager │  │
-│  └─────────────┘  └──────┬──────┘  └─────────────────┘  │
-│                          │                              │
-│  ┌───────────────────────▼──────────────────────────┐   │
-│  └──────────────────────────────────────────────────┘   │
-└─────────────────────┬───────────────────────────────────┘
-                      │ HTTP API (Unix Socket)
-┌─────────────────────▼───────────────────────────────────┐
-│              cloud-hypervisor Prozesse                  │
-│     ┌────────┐    ┌────────┐    ┌────────┐              │
-│     │  VM 1  │    │  VM 2  │    │  VM n  │              │
-│     └────────┘    └────────┘    └────────┘              │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                        mvirt (CLI/TUI)                      │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ gRPC
+┌─────────────────────────▼───────────────────────────────────┐
+│                      mvirt-vmm (Daemon)                     │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐   │
+│  │ gRPC Server │  │  Hypervisor  │  │  SQLite Store     │   │
+│  └─────────────┘  └──────┬───────┘  └───────────────────┘   │
+└──────────────────────────┼──────────────────────────────────┘
+                           │ HTTP API (Unix Socket)
+┌──────────────────────────▼──────────────────────────────────┐
+│                 cloud-hypervisor Prozesse                   │
+│       ┌────────┐    ┌────────┐    ┌────────┐                │
+│       │  VM 1  │    │  VM 2  │    │  VM n  │                │
+│       └────────┘    └────────┘    └────────┘                │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Komponenten
 
-| Komponente | Beschreibung |
-|------------|--------------|
-| `mvirt-vmm` | Daemon der VMs verwaltet |
-| `mvirt` | CLI Client (geplant) |
+| Verzeichnis | Beschreibung |
+|-------------|--------------|
+| `mvirt-vmm/` | Daemon der VMs verwaltet |
+| `mvirt-cli/` | CLI und TUI Client |
+| `mvirt-os/` | Linux-Kernel, initramfs, UKI Build-System |
 
 ## Voraussetzungen
 
-- Rust 1.70+
-- cloud-hypervisor (`/usr/bin/cloud-hypervisor`)
-- Linux mit KVM-Unterstützung
+```bash
+# Rust mit musl target
+rustup target add x86_64-unknown-linux-musl
+
+# Build-Tools
+sudo apt install build-essential musl-tools
+
+# Für mvirt-os (Kernel/UKI)
+sudo apt install flex bison libncurses-dev libssl-dev libelf-dev bc dwarves
+sudo apt install systemd-ukify systemd-boot-efi genisoimage
+```
 
 ## Build
 
 ```bash
-cargo build --release
+# Alles bauen (Rust + Kernel + initramfs + UKI)
+make
+
+# Nur Rust-Binaries
+make release
+
+# Nur mvirt-os
+make os
 ```
 
-## Verwendung
+## Entwicklung
 
 ```bash
-# Daemon starten
-./target/release/mvirt-vmm
+# Debug-Build
+cargo build
 
-# VM erstellen (via grpcurl)
-grpcurl -plaintext -d '{
-  "name": "test-vm",
-  "config": {
-    "vcpus": 2,
-    "memory_mb": 1024,
-    "kernel": "/path/to/vmlinux",
-    "disk": "/path/to/disk.raw"
-  }
-}' localhost:50051 mvirt.VmService/CreateVm
+# Daemon starten (Development)
+cargo run --bin mvirt-vmm -- --data-dir ./tmp
+
+# CLI/TUI starten
+cargo run --bin mvirt
+
+# Tests
+cargo test --workspace
+
+# Formatierung & Linting
+cargo fmt && cargo clippy --workspace
 ```
 
-## gRPC API
+## Verzeichnisstruktur
 
-Die API ist in `proto/mvirt.proto` definiert. Hauptendpunkte:
+```
+mvirt/
+├── Cargo.toml              # Workspace
+├── Makefile                # Build-Orchestrierung
+├── mvirt-cli/              # CLI + TUI
+│   ├── src/
+│   │   ├── main.rs         # CLI Commands
+│   │   └── tui.rs          # TUI mit ratatui
+│   └── proto/              # gRPC Proto (Client)
+├── mvirt-vmm/              # Daemon
+│   ├── src/
+│   │   ├── main.rs         # Server-Start
+│   │   ├── grpc.rs         # gRPC Handler
+│   │   ├── hypervisor.rs   # cloud-hypervisor Management
+│   │   └── store.rs        # SQLite Persistence
+│   └── proto/              # gRPC Proto (Server)
+├── mvirt-os/               # OS Build-System
+│   ├── pideins/            # Rust init (PID 1)
+│   ├── initramfs/          # initramfs Skeleton
+│   ├── kernel.config       # Kernel Kconfig Fragment
+│   └── *.mk                # Make-Includes
+├── images/                 # VM Disk Images
+└── tmp/                    # Development Data-Dir
+```
 
-- `CreateVm` - VM erstellen
-- `StartVm` - VM starten
-- `StopVm` - VM stoppen
-- `DeleteVm` - VM löschen
-- `GetVm` - VM-Details abrufen
-- `ListVms` - Alle VMs auflisten
+## Output
+
+| Datei | Beschreibung |
+|-------|--------------|
+| `target/x86_64-unknown-linux-musl/release/mvirt` | CLI Binary |
+| `target/x86_64-unknown-linux-musl/release/mvirt-vmm` | Daemon Binary |
+| `mvirt-os/mvirt.efi` | Bootbares UKI |
 
 ## Lizenz
 
