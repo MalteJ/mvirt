@@ -5,13 +5,15 @@ use std::time::Duration;
 use chrono::Local;
 
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::transport::Channel;
 
 use crate::proto::vm_service_client::VmServiceClient;
@@ -24,7 +26,11 @@ pub(crate) enum Action {
     Stop(String),
     Kill(String),
     Delete(String),
-    Create(CreateVmParams),
+    Create(Box<CreateVmParams>),
+    OpenConsole {
+        vm_id: String,
+        vm_name: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -50,6 +56,28 @@ pub(crate) enum ActionResult {
     Killed(String, Result<(), String>),
     Deleted(String, Result<(), String>),
     Created(Result<String, String>), // Ok(vm_id) or Err(error)
+    ConsoleOpened {
+        vm_id: String,
+        vm_name: Option<String>,
+        input_tx: mpsc::UnboundedSender<Vec<u8>>,
+    },
+    ConsoleOutput(Vec<u8>),
+    ConsoleClosed(Option<String>), // Optional error message
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+enum EscapeState {
+    #[default]
+    Normal,
+    SawCtrlA, // Waiting for 't' to exit
+}
+
+struct ConsoleSession {
+    vm_id: String,
+    vm_name: Option<String>,
+    parser: vt100::Parser,
+    escape_state: EscapeState,
+    input_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 struct FilePicker {
@@ -179,12 +207,12 @@ pub(crate) struct SshKeysConfig {
     source: SshKeySource,
     github_user: String,
     local_path: String,
+    root_password: String,
 }
 
 impl SshKeysConfig {
     fn new() -> Self {
         Self {
-            username: "ubuntu".to_string(),
             local_path: dirs::home_dir()
                 .map(|p| p.join(".ssh/id_rsa.pub").to_string_lossy().to_string())
                 .unwrap_or_else(|| "~/.ssh/id_rsa.pub".to_string()),
@@ -195,7 +223,7 @@ impl SshKeysConfig {
 
 struct SshKeysModal {
     config: SshKeysConfig,
-    focused_field: usize, // 0=username, 1=source, 2=github/path, 3=add, 4=cancel
+    focused_field: usize, // 0=username, 1=source, 2=github/path, 3=root_password, 4=add, 5=cancel
 }
 
 impl SshKeysModal {
@@ -207,7 +235,7 @@ impl SshKeysModal {
     }
 
     fn field_count(&self) -> usize {
-        5 // username, source, github/path, add, cancel
+        6 // username, source, github/path, root_password, add, cancel
     }
 
     fn focus_next(&mut self) {
@@ -236,6 +264,7 @@ impl SshKeysModal {
                 SshKeySource::GitHub => Some(&mut self.config.github_user),
                 SshKeySource::Local => Some(&mut self.config.local_path),
             },
+            3 => Some(&mut self.config.root_password),
             _ => None,
         }
     }
@@ -245,11 +274,11 @@ impl SshKeysModal {
     }
 
     fn is_add_button(&self) -> bool {
-        self.focused_field == 3
+        self.focused_field == 4
     }
 
     fn is_cancel_button(&self) -> bool {
-        self.focused_field == 4
+        self.focused_field == 5
     }
 
     fn validate(&self) -> Result<(), &'static str> {
@@ -328,7 +357,7 @@ impl CreateModal {
     fn is_field_visible(&self, field: usize) -> bool {
         match field {
             // Kernel, Initramfs, Cmdline only visible in Kernel mode
-            2 | 3 | 4 => self.boot_mode == CreateBootMode::Kernel,
+            2..=4 => self.boot_mode == CreateBootMode::Kernel,
             // All other fields always visible
             _ => true,
         }
@@ -521,6 +550,7 @@ pub struct App {
     file_picker_for_user_data: bool, // True if file picker is for user-data, false for create modal fields
     ssh_keys_modal: Option<SshKeysModal>,
     detail_view: Option<String>, // VM ID for detail view
+    console_session: Option<ConsoleSession>,
 }
 
 impl App {
@@ -545,6 +575,7 @@ impl App {
             file_picker_for_user_data: false,
             ssh_keys_modal: None,
             detail_view: None,
+            console_session: None,
         }
     }
 
@@ -618,6 +649,37 @@ impl App {
             ActionResult::Created(Err(e)) => {
                 self.status_message = Some(format!("Error: {}", e));
             }
+            ActionResult::ConsoleOpened {
+                vm_id,
+                vm_name,
+                input_tx,
+            } => {
+                // Create vt100 parser with reasonable terminal size
+                let parser = vt100::Parser::new(24, 80, 10000); // rows, cols, scrollback
+                self.console_session = Some(ConsoleSession {
+                    vm_id,
+                    vm_name,
+                    parser,
+                    escape_state: EscapeState::Normal,
+                    input_tx,
+                });
+                self.status_message = None;
+            }
+            ActionResult::ConsoleOutput(data) => {
+                if let Some(ref mut session) = self.console_session {
+                    session.parser.process(&data);
+                    // Only auto-scroll if already at bottom (not scrolled up)
+                    // This allows user to scroll up without being snapped back
+                }
+            }
+            ActionResult::ConsoleClosed(error) => {
+                self.console_session = None;
+                if let Some(e) = error {
+                    self.status_message = Some(format!("Console error: {}", e));
+                } else {
+                    self.status_message = Some("Console disconnected".to_string());
+                }
+            }
         }
     }
 
@@ -677,6 +739,106 @@ impl App {
         self.confirm_delete = None;
     }
 
+    fn open_console(&mut self) {
+        let Some(vm) = self.selected_vm() else {
+            return;
+        };
+        // Only allow console on running VMs
+        if vm.state != VmState::Running as i32 {
+            self.status_message = Some("Console only available for running VMs".to_string());
+            return;
+        }
+        let vm_id = vm.id.clone();
+        let vm_name = vm.name.clone();
+        self.status_message = Some("Connecting to console...".to_string());
+        self.send_action(Action::OpenConsole { vm_id, vm_name });
+    }
+
+    fn handle_console_key(&mut self, key_code: KeyCode, modifiers: KeyModifiers) {
+        let Some(ref mut session) = self.console_session else {
+            return;
+        };
+
+        // Handle escape sequence: Ctrl+A then 't' to exit
+        match session.escape_state {
+            EscapeState::Normal => {
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && let KeyCode::Char('a') | KeyCode::Char('A') = key_code
+                {
+                    session.escape_state = EscapeState::SawCtrlA;
+                    return;
+                }
+            }
+            EscapeState::SawCtrlA => {
+                session.escape_state = EscapeState::Normal;
+                if let KeyCode::Char('t') | KeyCode::Char('T') = key_code {
+                    // Exit console
+                    self.console_session = None;
+                    self.status_message = Some("Disconnected from console".to_string());
+                    return;
+                }
+                // Not 't', send Ctrl+A then continue with current key
+                let _ = session.input_tx.send(vec![0x01]);
+            }
+        }
+
+        // Map keys to bytes/escape sequences
+        let data: Option<Vec<u8>> = match key_code {
+            KeyCode::Char(c) => {
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    // Ctrl+char: send as control code
+                    let ctrl_char = (c.to_ascii_lowercase() as u8)
+                        .wrapping_sub(b'a')
+                        .wrapping_add(1);
+                    Some(vec![ctrl_char])
+                } else {
+                    // Regular character - encode as UTF-8
+                    let mut buf = [0u8; 4];
+                    let s = c.encode_utf8(&mut buf);
+                    Some(s.as_bytes().to_vec())
+                }
+            }
+            KeyCode::Enter => Some(vec![b'\r']),
+            KeyCode::Backspace => Some(vec![0x7f]),
+            KeyCode::Tab => Some(vec![b'\t']),
+            KeyCode::Esc => Some(vec![0x1b]),
+            KeyCode::Up => Some(b"\x1b[A".to_vec()),
+            KeyCode::Down => Some(b"\x1b[B".to_vec()),
+            KeyCode::Right => Some(b"\x1b[C".to_vec()),
+            KeyCode::Left => Some(b"\x1b[D".to_vec()),
+            KeyCode::Home => Some(b"\x1b[H".to_vec()),
+            KeyCode::End => Some(b"\x1b[F".to_vec()),
+            KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
+            KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
+            KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
+            KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
+            KeyCode::F(n) => {
+                // F1-F12 escape sequences
+                let seq = match n {
+                    1 => b"\x1bOP".to_vec(),
+                    2 => b"\x1bOQ".to_vec(),
+                    3 => b"\x1bOR".to_vec(),
+                    4 => b"\x1bOS".to_vec(),
+                    5 => b"\x1b[15~".to_vec(),
+                    6 => b"\x1b[17~".to_vec(),
+                    7 => b"\x1b[18~".to_vec(),
+                    8 => b"\x1b[19~".to_vec(),
+                    9 => b"\x1b[20~".to_vec(),
+                    10 => b"\x1b[21~".to_vec(),
+                    11 => b"\x1b[23~".to_vec(),
+                    12 => b"\x1b[24~".to_vec(),
+                    _ => return,
+                };
+                Some(seq)
+            }
+            _ => None,
+        };
+
+        if let Some(bytes) = data {
+            let _ = session.input_tx.send(bytes);
+        }
+    }
+
     fn open_create_modal(&mut self) {
         self.create_modal = Some(CreateModal::new());
     }
@@ -690,7 +852,7 @@ impl App {
             match modal.validate() {
                 Ok(params) => {
                     self.status_message = Some("Creating VM...".to_string());
-                    self.send_action(Action::Create(params));
+                    self.send_action(Action::Create(Box::new(params)));
                     self.create_modal = None;
                 }
                 Err(e) => {
@@ -949,7 +1111,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             let state = vm.state;
             let is_selected = selected_idx == Some(idx);
             let bg = if is_selected {
-                Color::DarkGray
+                Color::Indexed(236) // Very dark gray - contrasts with DarkGray text
             } else {
                 Color::Reset
             };
@@ -1012,7 +1174,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     )
-    .row_highlight_style(Style::default().bg(Color::DarkGray));
+    .row_highlight_style(Style::default().bg(Color::Indexed(236)));
 
     frame.render_stateful_widget(table, chunks[1], &mut app.table_state);
 
@@ -1025,8 +1187,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let legend = Line::from(vec![
         Span::styled(" ↵", Style::default().fg(Color::White).bold()),
         Span::styled(" Details ", Style::default().fg(Color::DarkGray)),
+        Span::styled("n", Style::default().fg(Color::Cyan).bold()),
+        Span::styled(" New ", Style::default().fg(Color::DarkGray)),
         Span::styled("c", Style::default().fg(Color::Cyan).bold()),
-        Span::styled(" Create ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Console ", Style::default().fg(Color::DarkGray)),
         Span::styled("s", Style::default().fg(Color::Green).bold()),
         Span::styled(" Start ", Style::default().fg(Color::DarkGray)),
         Span::styled("S", Style::default().fg(Color::Yellow).bold()),
@@ -1119,19 +1283,24 @@ fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(modal) = &app.ssh_keys_modal {
         draw_ssh_keys_modal(frame, modal);
     }
+
+    // Console (takes over the whole screen)
+    if let Some(ref mut session) = app.console_session {
+        draw_console(frame, session);
+    }
 }
 
 fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
     let area = frame.area();
     let modal_width = 70.min(area.width.saturating_sub(4));
 
-    // Dynamic height based on boot mode
+    // Dynamic height based on boot mode (+1 for top padding)
     let field_count = if modal.boot_mode == CreateBootMode::Kernel {
         10
     } else {
         7
     };
-    let modal_height = ((field_count * 2) + 2).min(area.height.saturating_sub(4) as usize) as u16;
+    let modal_height = ((field_count * 2) + 3).min(area.height.saturating_sub(4) as usize) as u16;
 
     let modal_area = Rect {
         x: (area.width - modal_width) / 2,
@@ -1167,6 +1336,7 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
     // Build constraints based on boot mode
     let constraints: Vec<Constraint> = if modal.boot_mode == CreateBootMode::Kernel {
         vec![
+            Constraint::Length(1), // Top padding
             Constraint::Length(2), // Name
             Constraint::Length(2), // Boot Mode
             Constraint::Length(2), // Kernel
@@ -1180,6 +1350,7 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
         ]
     } else {
         vec![
+            Constraint::Length(1), // Top padding
             Constraint::Length(2), // Name
             Constraint::Length(2), // Boot Mode
             Constraint::Length(2), // Disk
@@ -1218,7 +1389,7 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
             frame.render_widget(Paragraph::new(line), area);
         };
 
-    let mut row = 0;
+    let mut row = 1; // Start at 1 to skip top padding
 
     // Name
     render_field(
@@ -1499,7 +1670,7 @@ fn draw_file_picker(frame: &mut Frame, picker: &FilePicker) {
 fn draw_ssh_keys_modal(frame: &mut Frame, modal: &SshKeysModal) {
     let area = frame.area();
     let modal_width = 60.min(area.width.saturating_sub(6));
-    let modal_height = 12.min(area.height.saturating_sub(6));
+    let modal_height = 15.min(area.height.saturating_sub(6)); // +1 for top padding
 
     let modal_area = Rect {
         x: (area.width - modal_width) / 2,
@@ -1535,15 +1706,17 @@ fn draw_ssh_keys_modal(frame: &mut Frame, modal: &SshKeysModal) {
     let field_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1), // Top padding
             Constraint::Length(2), // Username
             Constraint::Length(2), // Source
             Constraint::Length(2), // GitHub user / Local path
+            Constraint::Length(2), // Root password
             Constraint::Length(1), // Spacer
             Constraint::Length(2), // Buttons
         ])
         .split(inner);
 
-    // Username field
+    // Username field (index 1 to skip top padding)
     let username_focused = modal.focused_field == 0;
     let cursor = if username_focused { "▌" } else { "" };
     let username_line = Line::from(vec![
@@ -1564,7 +1737,7 @@ fn draw_ssh_keys_modal(frame: &mut Frame, modal: &SshKeysModal) {
             },
         ),
     ]);
-    frame.render_widget(Paragraph::new(username_line), field_chunks[0]);
+    frame.render_widget(Paragraph::new(username_line), field_chunks[1]);
 
     // Source toggle
     let source_focused = modal.focused_field == 1;
@@ -1595,7 +1768,7 @@ fn draw_ssh_keys_modal(frame: &mut Frame, modal: &SshKeysModal) {
             Span::raw("")
         },
     ]);
-    frame.render_widget(Paragraph::new(source_line), field_chunks[1]);
+    frame.render_widget(Paragraph::new(source_line), field_chunks[2]);
 
     // GitHub username or Local path
     let value_focused_field = modal.focused_field == 2;
@@ -1622,20 +1795,53 @@ fn draw_ssh_keys_modal(frame: &mut Frame, modal: &SshKeysModal) {
             },
         ),
     ]);
-    frame.render_widget(Paragraph::new(value_line), field_chunks[2]);
+    frame.render_widget(Paragraph::new(value_line), field_chunks[3]);
+
+    // Root password field
+    let password_focused = modal.focused_field == 3;
+    let cursor = if password_focused { "▌" } else { "" };
+    let password_display = if modal.config.root_password.is_empty() {
+        "(none)".to_string()
+    } else {
+        "*".repeat(modal.config.root_password.len())
+    };
+    let password_line = Line::from(vec![
+        Span::styled(
+            " Root Pass:  ",
+            if password_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("{}{}", password_display, cursor),
+            if password_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+        if !password_focused && modal.config.root_password.is_empty() {
+            Span::styled(" (optional)", Style::default().fg(Color::DarkGray))
+        } else {
+            Span::raw("")
+        },
+    ]);
+    frame.render_widget(Paragraph::new(password_line), field_chunks[4]);
 
     // Buttons
     let button_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(field_chunks[4]);
+        .split(field_chunks[6]);
 
-    let add_style = if modal.focused_field == 3 {
+    let add_style = if modal.focused_field == 4 {
         Style::default().fg(Color::Black).bg(Color::Green).bold()
     } else {
         Style::default().fg(Color::Green)
     };
-    let cancel_style = if modal.focused_field == 4 {
+    let cancel_style = if modal.focused_field == 5 {
         Style::default().fg(Color::Black).bg(Color::Red).bold()
     } else {
         Style::default().fg(Color::Red)
@@ -1651,6 +1857,119 @@ fn draw_ssh_keys_modal(frame: &mut Frame, modal: &SshKeysModal) {
             .alignment(ratatui::prelude::Alignment::Center),
         button_chunks[1],
     );
+}
+
+/// Convert vt100 color to ratatui color
+fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
+    match color {
+        vt100::Color::Default => Color::Reset,
+        vt100::Color::Idx(i) => Color::Indexed(i),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+fn draw_console(frame: &mut Frame, session: &mut ConsoleSession) {
+    let area = frame.area();
+
+    // Clear the screen with a background
+    frame.render_widget(Clear, area);
+
+    // Title bar
+    let title = Line::from(vec![
+        Span::styled(" Console: ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled(
+            session
+                .vm_name
+                .as_deref()
+                .unwrap_or(&session.vm_id[..8.min(session.vm_id.len())]),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Ctrl+A t", Style::default().fg(Color::Yellow)),
+        Span::styled(": exit", Style::default().fg(Color::DarkGray)),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let view_height = inner.height as usize;
+    let view_width = inner.width as usize;
+
+    // Resize vt100 parser if terminal size changed
+    let (current_rows, current_cols) = session.parser.screen().size();
+    if current_rows as usize != view_height || current_cols as usize != view_width {
+        session
+            .parser
+            .set_size(view_height as u16, view_width as u16);
+    }
+
+    let screen = session.parser.screen();
+    let (cursor_row, cursor_col) = screen.cursor_position();
+
+    // Build lines from vt100 screen
+    let mut lines: Vec<Line> = Vec::with_capacity(view_height);
+
+    for row in 0..view_height {
+        let mut spans: Vec<Span> = Vec::new();
+        let mut current_text = String::new();
+        let mut current_style = Style::default();
+
+        for col in 0..view_width {
+            let cell = screen.cell(row as u16, col as u16);
+            let (ch, cell_fg, cell_bg, bold) = if let Some(cell) = cell {
+                (
+                    cell.contents(),
+                    vt100_color_to_ratatui(cell.fgcolor()),
+                    vt100_color_to_ratatui(cell.bgcolor()),
+                    cell.bold(),
+                )
+            } else {
+                (" ".to_string(), Color::Reset, Color::Reset, false)
+            };
+
+            // Check if this is the cursor position
+            let is_cursor = row == cursor_row as usize && col == cursor_col as usize;
+
+            let cell_style = if is_cursor {
+                Style::default().fg(Color::Black).bg(Color::White)
+            } else {
+                let mut s = Style::default().fg(cell_fg).bg(cell_bg);
+                if bold {
+                    s = s.bold();
+                }
+                s
+            };
+
+            // If style changed, flush current span
+            if cell_style != current_style && !current_text.is_empty() {
+                spans.push(Span::styled(
+                    std::mem::take(&mut current_text),
+                    current_style,
+                ));
+            }
+            current_style = cell_style;
+
+            if ch.is_empty() {
+                current_text.push(' ');
+            } else {
+                current_text.push_str(&ch);
+            }
+        }
+
+        // Flush remaining text
+        if !current_text.is_empty() {
+            spans.push(Span::styled(current_text, current_style));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_splash(frame: &mut Frame) {
@@ -2021,9 +2340,26 @@ async fn action_worker(
                                 .map(|k| format!("      - {}", k))
                                 .collect::<Vec<_>>()
                                 .join("\n");
+
+                            // Build user-data with optional root password
+                            let password_yaml = if !cfg.root_password.is_empty() {
+                                format!(
+                                    "\n    lock_passwd: false\n    plain_text_passwd: {}",
+                                    cfg.root_password
+                                )
+                            } else {
+                                String::new()
+                            };
+
+                            let chpasswd_yaml = if !cfg.root_password.is_empty() {
+                                "\nchpasswd:\n  expire: false\nssh_pwauth: true"
+                            } else {
+                                ""
+                            };
+
                             Some(format!(
-                                "#cloud-config\nusers:\n  - name: {}\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n    ssh_authorized_keys:\n{}",
-                                cfg.username, keys_yaml
+                                "#cloud-config\nusers:\n  - name: {}\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash{}\n    ssh_authorized_keys:\n{}{}",
+                                cfg.username, password_yaml, keys_yaml, chpasswd_yaml
                             ))
                         } else {
                             None
@@ -2057,6 +2393,69 @@ async fn action_worker(
                 {
                     Ok(response) => ActionResult::Created(Ok(response.into_inner().id)),
                     Err(e) => ActionResult::Created(Err(e.message().to_string())),
+                }
+            }
+            Action::OpenConsole { vm_id, vm_name } => {
+                // Create channel for sending input to console
+                let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+                // Convert to gRPC stream - first message has VM ID, rest just have data
+                let vm_id_clone = vm_id.clone();
+                let input_stream = UnboundedReceiverStream::new(input_rx).map(move |data| {
+                    ConsoleInput {
+                        vm_id: String::new(), // VM ID only needed in first message
+                        data,
+                    }
+                });
+
+                // Wrap in a stream that prepends the initial message with VM ID
+                let initial_msg = ConsoleInput {
+                    vm_id: vm_id_clone,
+                    data: vec![],
+                };
+                let full_stream = tokio_stream::once(initial_msg).chain(input_stream);
+
+                // Start console connection
+                match client.console(full_stream).await {
+                    Ok(response) => {
+                        let mut output_stream = response.into_inner();
+                        let result_tx_clone = result_tx.clone();
+                        let vm_id_for_close = vm_id.clone();
+
+                        // Send success with input channel
+                        let _ = result_tx.send(ActionResult::ConsoleOpened {
+                            vm_id,
+                            vm_name,
+                            input_tx,
+                        });
+
+                        // Spawn task to read output and forward to TUI
+                        tokio::spawn(async move {
+                            while let Some(result) = output_stream.next().await {
+                                match result {
+                                    Ok(output) => {
+                                        if result_tx_clone
+                                            .send(ActionResult::ConsoleOutput(output.data))
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = result_tx_clone.send(ActionResult::ConsoleClosed(
+                                            Some(e.message().to_string()),
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                            let _ = result_tx_clone.send(ActionResult::ConsoleClosed(None));
+                            drop(vm_id_for_close); // Silence unused warning
+                        });
+
+                        continue; // Don't send result below, we handled it
+                    }
+                    Err(e) => ActionResult::ConsoleClosed(Some(e.message().to_string())),
                 }
             }
         };
@@ -2107,6 +2506,12 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            // Console mode takes highest priority - all keys go to VM
+            if app.console_session.is_some() {
+                app.handle_console_key(key.code, key.modifiers);
+                continue;
+            }
+
             // Handle SSH keys modal first (highest priority)
             if app.ssh_keys_modal.is_some() {
                 match key.code {
@@ -2281,7 +2686,8 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                     KeyCode::Down => app.next(),
                     KeyCode::Up => app.previous(),
                     KeyCode::Enter => app.open_detail_view(),
-                    KeyCode::Char('c') => app.open_create_modal(),
+                    KeyCode::Char('n') => app.open_create_modal(),
+                    KeyCode::Char('c') => app.open_console(),
                     KeyCode::Char('s') => app.start_selected(),
                     KeyCode::Char('S') => app.stop_selected(),
                     KeyCode::Char('k') => app.kill_selected(),

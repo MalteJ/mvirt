@@ -28,6 +28,9 @@ crossterm = "0.28"
 # TUI
 ratatui = "0.29"
 
+# Virtual terminal emulator for console ANSI handling
+vt100 = "0.15"
+
 # Time formatting
 chrono = "0.4"
 

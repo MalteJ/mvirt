@@ -221,26 +221,28 @@ impl VmService for VmServiceImpl {
         }
 
         // Update state to stopping
-        self.store
-            .update_state(&req.id, VmState::Stopping)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        // Stop the VM via hypervisor
-        let timeout = Duration::from_secs(req.timeout_seconds as u64);
-        if let Err(e) = self.hypervisor.stop(&req.id, timeout).await {
-            return Err(Status::internal(format!("Failed to stop VM: {}", e)));
-        }
-
-        // Update state to stopped
         let entry = self
             .store
-            .update_state(&req.id, VmState::Stopped)
+            .update_state(&req.id, VmState::Stopping)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::internal("Failed to update VM state"))?;
 
-        info!(id = %req.id, "VM stopped");
+        // Spawn background task to stop the VM
+        let hypervisor = Arc::clone(&self.hypervisor);
+        let store = Arc::clone(&self.store);
+        let vm_id = req.id.clone();
+        let timeout = Duration::from_secs(req.timeout_seconds as u64);
+        tokio::spawn(async move {
+            if let Err(e) = hypervisor.stop(&vm_id, timeout).await {
+                error!(id = %vm_id, error = %e, "Failed to stop VM");
+            }
+            if let Err(e) = store.update_state(&vm_id, VmState::Stopped).await {
+                error!(id = %vm_id, error = %e, "Failed to update VM state after stop");
+            }
+            info!(id = %vm_id, "VM stopped");
+        });
+
         Ok(Response::new(entry.to_proto()))
     }
 
@@ -259,20 +261,31 @@ impl VmService for VmServiceImpl {
             return Err(Status::failed_precondition("VM is not running"));
         }
 
-        // Kill the VM via hypervisor
-        if let Err(e) = self.hypervisor.kill(&req.id).await {
-            return Err(Status::internal(format!("Failed to kill VM: {}", e)));
-        }
+        // Update state to stopping (if not already)
+        let entry = if entry.state != VmState::Stopping {
+            self.store
+                .update_state(&req.id, VmState::Stopping)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| Status::internal("Failed to update VM state"))?
+        } else {
+            entry
+        };
 
-        // Update state to stopped
-        let entry = self
-            .store
-            .update_state(&req.id, VmState::Stopped)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .ok_or_else(|| Status::internal("Failed to update VM state"))?;
+        // Spawn background task to kill the VM
+        let hypervisor = Arc::clone(&self.hypervisor);
+        let store = Arc::clone(&self.store);
+        let vm_id = req.id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = hypervisor.kill(&vm_id).await {
+                error!(id = %vm_id, error = %e, "Failed to kill VM");
+            }
+            if let Err(e) = store.update_state(&vm_id, VmState::Stopped).await {
+                error!(id = %vm_id, error = %e, "Failed to update VM state after kill");
+            }
+            info!(id = %vm_id, "VM killed");
+        });
 
-        info!(id = %req.id, "VM killed");
         Ok(Response::new(entry.to_proto()))
     }
 
