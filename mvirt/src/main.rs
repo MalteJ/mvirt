@@ -142,8 +142,16 @@ fn format_state(state: VmState) -> String {
 }
 
 async fn connect(server: &str) -> Result<VmServiceClient<Channel>, Box<dyn std::error::Error>> {
-    let client = VmServiceClient::connect(server.to_string()).await?;
-    Ok(client)
+    VmServiceClient::connect(server.to_string())
+        .await
+        .map_err(|e| {
+            let err_str = format!("{:?}", e);
+            if err_str.contains("ConnectionRefused") || err_str.contains("Connection refused") {
+                format!("Cannot connect to mvirt daemon at {}", server).into()
+            } else {
+                Box::new(e) as Box<dyn std::error::Error>
+            }
+        })
 }
 
 async fn run_console(
@@ -253,7 +261,13 @@ async fn run_console(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let client = connect(&cli.server).await?;
+    let client = match connect(&cli.server).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let Some(command) = cli.command else {
         // No subcommand: start TUI
