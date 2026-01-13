@@ -13,7 +13,7 @@ tonic = "0.12"
 prost = "0.13"
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal", "fs"] }
 tokio-stream = "0.1"
 
 # CLI
