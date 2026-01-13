@@ -261,6 +261,7 @@ pub struct App {
     result_rx: mpsc::UnboundedReceiver<ActionResult>,
     busy: bool,
     confirm_delete: Option<String>, // VM ID pending deletion
+    confirm_kill: Option<String>,   // VM ID pending kill
     last_refresh: Option<chrono::DateTime<chrono::Local>>,
     create_modal: Option<CreateModal>,
     file_picker: Option<FilePicker>,
@@ -282,6 +283,7 @@ impl App {
             result_rx,
             busy: false,
             confirm_delete: None,
+            confirm_kill: None,
             last_refresh: None,
             create_modal: None,
             file_picker: None,
@@ -386,8 +388,18 @@ impl App {
         let Some(id) = self.selected_vm().map(|vm| vm.id.clone()) else {
             return;
         };
-        self.status_message = Some(format!("Killing {}...", id));
-        self.send_action(Action::Kill(id));
+        self.confirm_kill = Some(id);
+    }
+
+    fn confirm_kill(&mut self) {
+        if let Some(id) = self.confirm_kill.take() {
+            self.status_message = Some(format!("Killing {}...", id));
+            self.send_action(Action::Kill(id));
+        }
+    }
+
+    fn cancel_kill(&mut self) {
+        self.confirm_kill = None;
     }
 
     fn delete_selected(&mut self) {
@@ -689,7 +701,20 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
 
     // Status bar / Confirmation
-    if let Some(ref id) = app.confirm_delete {
+    if let Some(ref id) = app.confirm_kill {
+        let confirm_line = Line::from(vec![
+            Span::styled(" ⚠ ", Style::default().fg(Color::Red)),
+            Span::styled(
+                format!("Kill VM {}…? ", &id[..8]),
+                Style::default().fg(Color::Red).bold(),
+            ),
+            Span::styled("[y]", Style::default().fg(Color::Green).bold()),
+            Span::styled("es / ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[n]", Style::default().fg(Color::Red).bold()),
+            Span::styled("o", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(confirm_line), chunks[3]);
+    } else if let Some(ref id) = app.confirm_delete {
         let confirm_line = Line::from(vec![
             Span::styled(" ⚠ ", Style::default().fg(Color::Red)),
             Span::styled(
@@ -1289,8 +1314,15 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                     }
                     _ => {}
                 }
+            } else if app.confirm_kill.is_some() {
+                // Handle kill confirmation dialog
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_kill(),
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_kill(),
+                    _ => {}
+                }
             } else if app.confirm_delete.is_some() {
-                // Handle confirmation dialog
+                // Handle delete confirmation dialog
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete(),
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_delete(),
