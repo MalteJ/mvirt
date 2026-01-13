@@ -30,11 +30,16 @@ pub(crate) enum Action {
 #[derive(Clone)]
 pub(crate) struct CreateVmParams {
     pub name: Option<String>,
-    pub kernel: String,
+    pub boot_mode: i32, // 1=disk, 2=kernel
+    pub kernel: Option<String>,
+    pub initramfs: Option<String>,
+    pub cmdline: Option<String>,
     pub disk: String,
     pub vcpus: u32,
     pub memory_mb: u64,
-    pub user_data: Option<String>,
+    pub user_data_mode: UserDataMode,
+    pub user_data_file: Option<String>,
+    pub ssh_keys_config: Option<SshKeysConfig>,
 }
 
 pub(crate) enum ActionResult {
@@ -146,15 +151,141 @@ impl FilePicker {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Default)]
+enum CreateBootMode {
+    #[default]
+    Disk,
+    Kernel,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+pub(crate) enum UserDataMode {
+    #[default]
+    None,
+    SshKeys,
+    File,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+pub(crate) enum SshKeySource {
+    #[default]
+    GitHub,
+    Local,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct SshKeysConfig {
+    username: String,
+    source: SshKeySource,
+    github_user: String,
+    local_path: String,
+}
+
+impl SshKeysConfig {
+    fn new() -> Self {
+        Self {
+            username: "ubuntu".to_string(),
+            local_path: dirs::home_dir()
+                .map(|p| p.join(".ssh/id_rsa.pub").to_string_lossy().to_string())
+                .unwrap_or_else(|| "~/.ssh/id_rsa.pub".to_string()),
+            ..Default::default()
+        }
+    }
+}
+
+struct SshKeysModal {
+    config: SshKeysConfig,
+    focused_field: usize, // 0=username, 1=source, 2=github/path, 3=add, 4=cancel
+}
+
+impl SshKeysModal {
+    fn new() -> Self {
+        Self {
+            config: SshKeysConfig::new(),
+            focused_field: 0,
+        }
+    }
+
+    fn field_count(&self) -> usize {
+        5 // username, source, github/path, add, cancel
+    }
+
+    fn focus_next(&mut self) {
+        self.focused_field = (self.focused_field + 1) % self.field_count();
+    }
+
+    fn focus_prev(&mut self) {
+        self.focused_field = if self.focused_field == 0 {
+            self.field_count() - 1
+        } else {
+            self.focused_field - 1
+        };
+    }
+
+    fn toggle_source(&mut self) {
+        self.config.source = match self.config.source {
+            SshKeySource::GitHub => SshKeySource::Local,
+            SshKeySource::Local => SshKeySource::GitHub,
+        };
+    }
+
+    fn current_input(&mut self) -> Option<&mut String> {
+        match self.focused_field {
+            0 => Some(&mut self.config.username),
+            2 => match self.config.source {
+                SshKeySource::GitHub => Some(&mut self.config.github_user),
+                SshKeySource::Local => Some(&mut self.config.local_path),
+            },
+            _ => None,
+        }
+    }
+
+    fn is_source_field(&self) -> bool {
+        self.focused_field == 1
+    }
+
+    fn is_add_button(&self) -> bool {
+        self.focused_field == 3
+    }
+
+    fn is_cancel_button(&self) -> bool {
+        self.focused_field == 4
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.config.username.is_empty() {
+            return Err("Username is required");
+        }
+        match self.config.source {
+            SshKeySource::GitHub => {
+                if self.config.github_user.is_empty() {
+                    return Err("GitHub username is required");
+                }
+            }
+            SshKeySource::Local => {
+                if self.config.local_path.is_empty() {
+                    return Err("Key file path is required");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct CreateModal {
     name: String,
+    boot_mode: CreateBootMode,
     kernel: String,
+    initramfs: String,
+    cmdline: String,
     disk: String,
     vcpus: String,
     memory_mb: String,
-    user_data: String,
-    focused_field: usize, // 0-5 for fields, 6 for submit
+    user_data_mode: UserDataMode,
+    user_data_file: String,
+    ssh_keys_config: Option<SshKeysConfig>,
+    focused_field: usize, // 0=name, 1=boot_mode, 2=kernel, 3=initramfs, 4=cmdline, 5=disk, 6=vcpus, 7=memory, 8=user_data_mode, 9=submit
 }
 
 impl CreateModal {
@@ -162,34 +293,58 @@ impl CreateModal {
         Self {
             vcpus: "1".to_string(),
             memory_mb: "512".to_string(),
+            boot_mode: CreateBootMode::Disk,
+            user_data_mode: UserDataMode::None,
             ..Default::default()
         }
     }
 
     fn field_count() -> usize {
-        7 // 6 fields + submit button
+        10 // name, boot_mode, kernel, initramfs, cmdline, disk, vcpus, memory, user_data_mode, submit
     }
 
     fn focus_next(&mut self) {
-        self.focused_field = (self.focused_field + 1) % Self::field_count();
+        loop {
+            self.focused_field = (self.focused_field + 1) % Self::field_count();
+            if self.is_field_visible(self.focused_field) {
+                break;
+            }
+        }
     }
 
     fn focus_prev(&mut self) {
-        self.focused_field = if self.focused_field == 0 {
-            Self::field_count() - 1
-        } else {
-            self.focused_field - 1
-        };
+        loop {
+            self.focused_field = if self.focused_field == 0 {
+                Self::field_count() - 1
+            } else {
+                self.focused_field - 1
+            };
+            if self.is_field_visible(self.focused_field) {
+                break;
+            }
+        }
+    }
+
+    fn is_field_visible(&self, field: usize) -> bool {
+        match field {
+            // Kernel, Initramfs, Cmdline only visible in Kernel mode
+            2 | 3 | 4 => self.boot_mode == CreateBootMode::Kernel,
+            // All other fields always visible
+            _ => true,
+        }
     }
 
     fn current_input(&mut self) -> Option<&mut String> {
         match self.focused_field {
             0 => Some(&mut self.name),
-            1 => Some(&mut self.kernel),
-            2 => Some(&mut self.disk),
-            3 => Some(&mut self.vcpus),
-            4 => Some(&mut self.memory_mb),
-            5 => Some(&mut self.user_data),
+            // 1 is boot_mode toggle, not text input
+            2 => Some(&mut self.kernel),
+            3 => Some(&mut self.initramfs),
+            4 => Some(&mut self.cmdline),
+            5 => Some(&mut self.disk),
+            6 => Some(&mut self.vcpus),
+            7 => Some(&mut self.memory_mb),
+            // 8 is user_data_mode toggle, not text input
             _ => None,
         }
     }
@@ -198,12 +353,47 @@ impl CreateModal {
         self.focused_field == 0
     }
 
+    fn is_boot_mode_field(&self) -> bool {
+        self.focused_field == 1
+    }
+
     fn is_file_field(&self) -> bool {
-        matches!(self.focused_field, 1 | 2 | 5) // kernel, disk, user_data
+        // kernel=2, initramfs=3, disk=5
+        // Only return true if field is visible
+        match self.focused_field {
+            2 | 3 => self.boot_mode == CreateBootMode::Kernel,
+            5 => true,
+            _ => false,
+        }
+    }
+
+    fn is_user_data_mode_field(&self) -> bool {
+        self.focused_field == 8
+    }
+
+    fn cycle_user_data_mode(&mut self) {
+        self.user_data_mode = match self.user_data_mode {
+            UserDataMode::None => UserDataMode::SshKeys,
+            UserDataMode::SshKeys => UserDataMode::File,
+            UserDataMode::File => UserDataMode::None,
+        };
+        // Clear the other mode's data when switching
+        match self.user_data_mode {
+            UserDataMode::None => {
+                self.ssh_keys_config = None;
+                self.user_data_file.clear();
+            }
+            UserDataMode::SshKeys => {
+                self.user_data_file.clear();
+            }
+            UserDataMode::File => {
+                self.ssh_keys_config = None;
+            }
+        }
     }
 
     fn is_numeric_field(&self) -> bool {
-        matches!(self.focused_field, 3 | 4) // vcpus, memory_mb
+        matches!(self.focused_field, 6 | 7) // vcpus, memory_mb
     }
 
     fn is_valid_name_char(c: char) -> bool {
@@ -213,24 +403,70 @@ impl CreateModal {
     fn set_field(&mut self, field: usize, value: String) {
         match field {
             0 => self.name = value,
-            1 => self.kernel = value,
-            2 => self.disk = value,
-            3 => self.vcpus = value,
-            4 => self.memory_mb = value,
-            5 => self.user_data = value,
+            2 => self.kernel = value,
+            3 => self.initramfs = value,
+            4 => self.cmdline = value,
+            5 => self.disk = value,
+            6 => self.vcpus = value,
+            7 => self.memory_mb = value,
             _ => {}
         }
     }
 
+    fn set_user_data_file(&mut self, path: String) {
+        self.user_data_file = path;
+    }
+
+    fn set_ssh_keys_config(&mut self, config: SshKeysConfig) {
+        self.ssh_keys_config = Some(config);
+    }
+
+    fn toggle_boot_mode(&mut self) {
+        self.boot_mode = match self.boot_mode {
+            CreateBootMode::Disk => CreateBootMode::Kernel,
+            CreateBootMode::Kernel => CreateBootMode::Disk,
+        };
+    }
+
     fn validate(&self) -> Result<CreateVmParams, &'static str> {
-        if self.kernel.is_empty() {
-            return Err("Kernel path is required");
+        match self.boot_mode {
+            CreateBootMode::Disk => {
+                if self.disk.is_empty() {
+                    return Err("Disk path is required for disk boot");
+                }
+            }
+            CreateBootMode::Kernel => {
+                if self.kernel.is_empty() {
+                    return Err("Kernel path is required for kernel boot");
+                }
+                if self.disk.is_empty() {
+                    return Err("Disk path is required");
+                }
+            }
         }
-        if self.disk.is_empty() {
-            return Err("Disk path is required");
+
+        // Validate user data mode
+        match self.user_data_mode {
+            UserDataMode::None => {}
+            UserDataMode::SshKeys => {
+                if self.ssh_keys_config.is_none() {
+                    return Err("SSH keys not configured - press Enter to configure");
+                }
+            }
+            UserDataMode::File => {
+                if self.user_data_file.is_empty() {
+                    return Err("User-data file not selected - press Enter to browse");
+                }
+            }
         }
+
         let vcpus: u32 = self.vcpus.parse().map_err(|_| "Invalid vcpus")?;
         let memory_mb: u64 = self.memory_mb.parse().map_err(|_| "Invalid memory")?;
+
+        let boot_mode = match self.boot_mode {
+            CreateBootMode::Disk => 1,
+            CreateBootMode::Kernel => 2,
+        };
 
         Ok(CreateVmParams {
             name: if self.name.is_empty() {
@@ -238,15 +474,32 @@ impl CreateModal {
             } else {
                 Some(self.name.clone())
             },
-            kernel: self.kernel.clone(),
+            boot_mode,
+            kernel: if self.kernel.is_empty() {
+                None
+            } else {
+                Some(self.kernel.clone())
+            },
+            initramfs: if self.initramfs.is_empty() {
+                None
+            } else {
+                Some(self.initramfs.clone())
+            },
+            cmdline: if self.cmdline.is_empty() {
+                None
+            } else {
+                Some(self.cmdline.clone())
+            },
             disk: self.disk.clone(),
             vcpus,
             memory_mb,
-            user_data: if self.user_data.is_empty() {
+            user_data_mode: self.user_data_mode,
+            user_data_file: if self.user_data_file.is_empty() {
                 None
             } else {
-                Some(self.user_data.clone())
+                Some(self.user_data_file.clone())
             },
+            ssh_keys_config: self.ssh_keys_config.clone(),
         })
     }
 }
@@ -265,6 +518,8 @@ pub struct App {
     last_refresh: Option<chrono::DateTime<chrono::Local>>,
     create_modal: Option<CreateModal>,
     file_picker: Option<FilePicker>,
+    file_picker_for_user_data: bool, // True if file picker is for user-data, false for create modal fields
+    ssh_keys_modal: Option<SshKeysModal>,
     detail_view: Option<String>, // VM ID for detail view
 }
 
@@ -287,6 +542,8 @@ impl App {
             last_refresh: None,
             create_modal: None,
             file_picker: None,
+            file_picker_for_user_data: false,
+            ssh_keys_modal: None,
             detail_view: None,
         }
     }
@@ -460,12 +717,50 @@ impl App {
         if let Some(picker) = &mut self.file_picker
             && let Some(path) = picker.enter_selected()
         {
-            let target_field = picker.target_field;
             let path_str = path.to_string_lossy().to_string();
-            if let Some(modal) = &mut self.create_modal {
-                modal.set_field(target_field, path_str);
+            if self.file_picker_for_user_data {
+                if let Some(modal) = &mut self.create_modal {
+                    modal.set_user_data_file(path_str);
+                }
+            } else {
+                let target_field = picker.target_field;
+                if let Some(modal) = &mut self.create_modal {
+                    modal.set_field(target_field, path_str);
+                }
             }
             self.file_picker = None;
+            self.file_picker_for_user_data = false;
+        }
+    }
+
+    fn open_user_data_file_picker(&mut self) {
+        let start_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        self.file_picker = Some(FilePicker::new(start_path, 0)); // field doesn't matter for user-data
+        self.file_picker_for_user_data = true;
+    }
+
+    fn open_ssh_keys_modal(&mut self) {
+        self.ssh_keys_modal = Some(SshKeysModal::new());
+    }
+
+    fn close_ssh_keys_modal(&mut self) {
+        self.ssh_keys_modal = None;
+    }
+
+    fn confirm_ssh_keys(&mut self) {
+        if let Some(modal) = &self.ssh_keys_modal {
+            match modal.validate() {
+                Ok(()) => {
+                    let config = modal.config.clone();
+                    if let Some(create_modal) = &mut self.create_modal {
+                        create_modal.set_ssh_keys_config(config);
+                    }
+                    self.ssh_keys_modal = None;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
         }
     }
 
@@ -609,7 +904,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
     };
     let load_text = if let Some(ref info) = app.system_info {
         Line::from(vec![Span::styled(
-            format!("Load {:.2} {:.2} {:.2} ", info.load_1, info.load_5, info.load_15),
+            format!(
+                "Load {:.2} {:.2} {:.2} ",
+                info.load_1, info.load_5, info.load_15
+            ),
             Style::default().fg(Color::DarkGray),
         )])
     } else {
@@ -641,25 +939,59 @@ fn draw(frame: &mut Frame, app: &mut App) {
     .style(Style::default().bold())
     .bottom_margin(1);
 
+    let selected_idx = app.table_state.selected();
     let rows: Vec<Row> = app
         .vms
         .iter()
-        .map(|vm| {
+        .enumerate()
+        .map(|(idx, vm)| {
             let config = vm.config.as_ref();
             let state = vm.state;
+            let is_selected = selected_idx == Some(idx);
+            let bg = if is_selected {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
+
             Row::new(vec![
                 Cell::from(Span::styled(
                     format!("{}…", &vm.id[..8]), // Show short ID with ellipsis
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::DarkGray).bg(bg),
                 )),
-                Cell::from(vm.name.clone().unwrap_or_else(|| "-".to_string())),
-                Cell::from(format_state(state)).style(state_style(state)),
-                Cell::from(config.map(|c| c.vcpus.to_string()).unwrap_or_default()),
-                Cell::from(
+                Cell::from(Span::styled(
+                    vm.name.clone().unwrap_or_else(|| "-".to_string()),
+                    Style::default()
+                        .fg(if is_selected {
+                            Color::White
+                        } else {
+                            Color::Reset
+                        })
+                        .bg(bg),
+                )),
+                Cell::from(Span::styled(format_state(state), state_style(state).bg(bg))),
+                Cell::from(Span::styled(
+                    config.map(|c| c.vcpus.to_string()).unwrap_or_default(),
+                    Style::default()
+                        .fg(if is_selected {
+                            Color::White
+                        } else {
+                            Color::Reset
+                        })
+                        .bg(bg),
+                )),
+                Cell::from(Span::styled(
                     config
                         .map(|c| format!("{} MB", c.memory_mb))
                         .unwrap_or_default(),
-                ),
+                    Style::default()
+                        .fg(if is_selected {
+                            Color::White
+                        } else {
+                            Color::Reset
+                        })
+                        .bg(bg),
+                )),
             ])
         })
         .collect();
@@ -680,7 +1012,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     )
-    .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    .row_highlight_style(Style::default().bg(Color::DarkGray));
 
     frame.render_stateful_widget(table, chunks[1], &mut app.table_state);
 
@@ -782,12 +1114,24 @@ fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(picker) = &app.file_picker {
         draw_file_picker(frame, picker);
     }
+
+    // SSH Keys Modal (on top of create modal)
+    if let Some(modal) = &app.ssh_keys_modal {
+        draw_ssh_keys_modal(frame, modal);
+    }
 }
 
 fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
     let area = frame.area();
     let modal_width = 70.min(area.width.saturating_sub(4));
-    let modal_height = 17.min(area.height.saturating_sub(4));
+
+    // Dynamic height based on boot mode
+    let field_count = if modal.boot_mode == CreateBootMode::Kernel {
+        10
+    } else {
+        7
+    };
+    let modal_height = ((field_count * 2) + 2).min(area.height.saturating_sub(4) as usize) as u16;
 
     let modal_area = Rect {
         x: (area.width - modal_width) / 2,
@@ -815,60 +1159,236 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
-    // Field layout
-    let field_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let label_focused = Style::default().fg(Color::Cyan).bold();
+    let label_normal = Style::default().fg(Color::DarkGray);
+    let value_focused = Style::default().fg(Color::White);
+    let value_normal = Style::default().fg(Color::Gray);
+
+    // Build constraints based on boot mode
+    let constraints: Vec<Constraint> = if modal.boot_mode == CreateBootMode::Kernel {
+        vec![
             Constraint::Length(2), // Name
+            Constraint::Length(2), // Boot Mode
             Constraint::Length(2), // Kernel
+            Constraint::Length(2), // Initramfs
+            Constraint::Length(2), // Cmdline
             Constraint::Length(2), // Disk
             Constraint::Length(2), // VCPUs
             Constraint::Length(2), // Memory
             Constraint::Length(2), // User-Data
-            Constraint::Length(2), // Submit button
-        ])
+            Constraint::Length(2), // Submit
+        ]
+    } else {
+        vec![
+            Constraint::Length(2), // Name
+            Constraint::Length(2), // Boot Mode
+            Constraint::Length(2), // Disk
+            Constraint::Length(2), // VCPUs
+            Constraint::Length(2), // Memory
+            Constraint::Length(2), // User-Data
+            Constraint::Length(2), // Submit
+        ]
+    };
+
+    let field_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(inner);
 
-    // Field definitions: (label, value, is_file_field)
-    let fields: [(&str, &str, bool); 6] = [
-        ("Name:", &modal.name, false),
-        ("Kernel:", &modal.kernel, true),
-        ("Disk:", &modal.disk, true),
-        ("VCPUs:", &modal.vcpus, false),
-        ("Memory:", &modal.memory_mb, false),
-        ("User-Data:", &modal.user_data, true),
-    ];
-
-    for (i, (label, value, is_file)) in fields.iter().enumerate() {
-        let is_focused = modal.focused_field == i;
-        let label_style = if is_focused {
-            Style::default().fg(Color::Cyan).bold()
-        } else {
-            Style::default().fg(Color::DarkGray)
+    // Helper closure to render a field
+    let render_field =
+        |frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool, hint: &str| {
+            let cursor = if focused { "▌" } else { "" };
+            let hint_span = if focused && !hint.is_empty() {
+                Span::styled(format!(" [{}]", hint), Style::default().fg(Color::Yellow))
+            } else {
+                Span::raw("")
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {:<12}", label),
+                    if focused { label_focused } else { label_normal },
+                ),
+                Span::styled(
+                    format!("{}{}", value, cursor),
+                    if focused { value_focused } else { value_normal },
+                ),
+                hint_span,
+            ]);
+            frame.render_widget(Paragraph::new(line), area);
         };
-        let value_style = if is_focused {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
 
-        let cursor = if is_focused { "▌" } else { "" };
-        let browse_hint = if is_focused && *is_file {
-            Span::styled(" [Enter: browse]", Style::default().fg(Color::Yellow))
+    let mut row = 0;
+
+    // Name
+    render_field(
+        frame,
+        field_chunks[row],
+        "Name:",
+        &modal.name,
+        modal.focused_field == 0,
+        "",
+    );
+    row += 1;
+
+    // Boot Mode (toggle)
+    let boot_str = match modal.boot_mode {
+        CreateBootMode::Disk => "(●) Disk  ( ) Kernel",
+        CreateBootMode::Kernel => "( ) Disk  (●) Kernel",
+    };
+    let boot_focused = modal.focused_field == 1;
+    let boot_line = Line::from(vec![
+        Span::styled(
+            " Boot:       ",
+            if boot_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            boot_str,
+            if boot_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+        if boot_focused {
+            Span::styled(" [Space: toggle]", Style::default().fg(Color::Yellow))
         } else {
             Span::raw("")
-        };
+        },
+    ]);
+    frame.render_widget(Paragraph::new(boot_line), field_chunks[row]);
+    row += 1;
 
-        let line = Line::from(vec![
-            Span::styled(format!(" {:<12}", label), label_style),
-            Span::styled(format!("{}{}", value, cursor), value_style),
-            browse_hint,
-        ]);
-        frame.render_widget(Paragraph::new(line), field_chunks[i]);
+    // Kernel mode specific fields
+    if modal.boot_mode == CreateBootMode::Kernel {
+        render_field(
+            frame,
+            field_chunks[row],
+            "Kernel:",
+            &modal.kernel,
+            modal.focused_field == 2,
+            "Enter: browse",
+        );
+        row += 1;
+        render_field(
+            frame,
+            field_chunks[row],
+            "Initramfs:",
+            &modal.initramfs,
+            modal.focused_field == 3,
+            "Enter: browse",
+        );
+        row += 1;
+        render_field(
+            frame,
+            field_chunks[row],
+            "Cmdline:",
+            &modal.cmdline,
+            modal.focused_field == 4,
+            "",
+        );
+        row += 1;
     }
 
+    // Common fields
+    render_field(
+        frame,
+        field_chunks[row],
+        "Disk:",
+        &modal.disk,
+        modal.focused_field == 5,
+        "Enter: browse",
+    );
+    row += 1;
+    render_field(
+        frame,
+        field_chunks[row],
+        "VCPUs:",
+        &modal.vcpus,
+        modal.focused_field == 6,
+        "",
+    );
+    row += 1;
+    render_field(
+        frame,
+        field_chunks[row],
+        "Memory:",
+        &modal.memory_mb,
+        modal.focused_field == 7,
+        "MB",
+    );
+    row += 1;
+    // User-Data mode (toggle with Space, Enter to configure)
+    let user_data_focused = modal.focused_field == 8;
+    let (user_data_mode_str, user_data_value, user_data_hint) = match modal.user_data_mode {
+        UserDataMode::None => ("None", "".to_string(), "[Space: cycle]"),
+        UserDataMode::SshKeys => {
+            let value = if let Some(ref cfg) = modal.ssh_keys_config {
+                format!(
+                    "{} ({})",
+                    cfg.username,
+                    match cfg.source {
+                        SshKeySource::GitHub => format!("github:{}", cfg.github_user),
+                        SshKeySource::Local => "local".to_string(),
+                    }
+                )
+            } else {
+                "not configured".to_string()
+            };
+            ("SSH Keys", value, "[Space: cycle, Enter: configure]")
+        }
+        UserDataMode::File => {
+            let value = if modal.user_data_file.is_empty() {
+                "not selected".to_string()
+            } else {
+                modal.user_data_file.clone()
+            };
+            ("File", value, "[Space: cycle, Enter: browse]")
+        }
+    };
+    let user_data_line = Line::from(vec![
+        Span::styled(
+            " User-Data:  ",
+            if user_data_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("[{}] ", user_data_mode_str),
+            if user_data_focused {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ),
+        Span::styled(
+            user_data_value,
+            if user_data_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+        if user_data_focused {
+            Span::styled(
+                format!(" {}", user_data_hint),
+                Style::default().fg(Color::Yellow),
+            )
+        } else {
+            Span::raw("")
+        },
+    ]);
+    frame.render_widget(Paragraph::new(user_data_line), field_chunks[row]);
+    row += 1;
+
     // Submit button
-    let submit_style = if modal.focused_field == 6 {
+    let submit_style = if modal.focused_field == 9 {
         Style::default().fg(Color::Black).bg(Color::Green).bold()
     } else {
         Style::default().fg(Color::Green)
@@ -878,7 +1398,7 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
         submit_style,
     )]))
     .alignment(ratatui::prelude::Alignment::Center);
-    frame.render_widget(submit, field_chunks[6]);
+    frame.render_widget(submit, field_chunks[row]);
 }
 
 fn draw_file_picker(frame: &mut Frame, picker: &FilePicker) {
@@ -976,6 +1496,228 @@ fn draw_file_picker(frame: &mut Frame, picker: &FilePicker) {
     }
 }
 
+fn draw_ssh_keys_modal(frame: &mut Frame, modal: &SshKeysModal) {
+    let area = frame.area();
+    let modal_width = 60.min(area.width.saturating_sub(6));
+    let modal_height = 12.min(area.height.saturating_sub(6));
+
+    let modal_area = Rect {
+        x: (area.width - modal_width) / 2,
+        y: (area.height - modal_height) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the modal area
+    frame.render_widget(Clear, modal_area);
+
+    // Modal block
+    let title = Line::from(vec![
+        Span::styled(" SSH Keys ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Tab", Style::default().fg(Color::Yellow)),
+        Span::styled(": next ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Red)),
+        Span::styled(": cancel ", Style::default().fg(Color::DarkGray)),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let label_focused = Style::default().fg(Color::Cyan).bold();
+    let label_normal = Style::default().fg(Color::DarkGray);
+    let value_focused = Style::default().fg(Color::White);
+    let value_normal = Style::default().fg(Color::Gray);
+
+    let field_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Username
+            Constraint::Length(2), // Source
+            Constraint::Length(2), // GitHub user / Local path
+            Constraint::Length(1), // Spacer
+            Constraint::Length(2), // Buttons
+        ])
+        .split(inner);
+
+    // Username field
+    let username_focused = modal.focused_field == 0;
+    let cursor = if username_focused { "▌" } else { "" };
+    let username_line = Line::from(vec![
+        Span::styled(
+            " Username:   ",
+            if username_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("{}{}", modal.config.username, cursor),
+            if username_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(username_line), field_chunks[0]);
+
+    // Source toggle
+    let source_focused = modal.focused_field == 1;
+    let source_str = match modal.config.source {
+        SshKeySource::GitHub => "(●) GitHub  ( ) Local",
+        SshKeySource::Local => "( ) GitHub  (●) Local",
+    };
+    let source_line = Line::from(vec![
+        Span::styled(
+            " Source:     ",
+            if source_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            source_str,
+            if source_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+        if source_focused {
+            Span::styled(" [Space: toggle]", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
+    ]);
+    frame.render_widget(Paragraph::new(source_line), field_chunks[1]);
+
+    // GitHub username or Local path
+    let value_focused_field = modal.focused_field == 2;
+    let cursor = if value_focused_field { "▌" } else { "" };
+    let (label, value) = match modal.config.source {
+        SshKeySource::GitHub => ("GitHub User:", &modal.config.github_user),
+        SshKeySource::Local => ("Key File:", &modal.config.local_path),
+    };
+    let value_line = Line::from(vec![
+        Span::styled(
+            format!(" {:<11}", label),
+            if value_focused_field {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("{}{}", value, cursor),
+            if value_focused_field {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(value_line), field_chunks[2]);
+
+    // Buttons
+    let button_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(field_chunks[4]);
+
+    let add_style = if modal.focused_field == 3 {
+        Style::default().fg(Color::Black).bg(Color::Green).bold()
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    let cancel_style = if modal.focused_field == 4 {
+        Style::default().fg(Color::Black).bg(Color::Red).bold()
+    } else {
+        Style::default().fg(Color::Red)
+    };
+
+    frame.render_widget(
+        Paragraph::new(Span::styled("  ▶ Add  ", add_style))
+            .alignment(ratatui::prelude::Alignment::Center),
+        button_chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled("  ✕ Cancel  ", cancel_style))
+            .alignment(ratatui::prelude::Alignment::Center),
+        button_chunks[1],
+    );
+}
+
+fn draw_splash(frame: &mut Frame) {
+    let area = frame.area();
+
+    // ASCII art for "mvirt"
+    let ascii_art = "
+                              ███             █████   
+                             ░░░             ░░███    
+ █████████████   █████ █████ ████  ████████  ███████  
+░░███░░███░░███ ░░███ ░░███ ░░███ ░░███░░███░░░███░   
+ ░███ ░███ ░███  ░███  ░███  ░███  ░███ ░░░   ░███    
+ ░███ ░███ ░███  ░░███ ███   ░███  ░███       ░███ ███
+ █████░███ █████  ░░█████    █████ █████      ░░█████ 
+░░░░░ ░░░ ░░░░░    ░░░░░    ░░░░░ ░░░░░        ░░░░░  
+                                                      ";
+
+    let art_height = ascii_art.lines().count() as u16;
+
+    // Center vertically
+    let start_y = (area.height.saturating_sub(art_height)) / 2;
+
+    let lines: Vec<Line> = ascii_art.lines().map(Line::from).collect();
+
+    let splash_area = Rect {
+        x: area.x,
+        y: start_y,
+        width: area.width,
+        height: art_height.min(area.height),
+    };
+
+    frame.render_widget(
+        Paragraph::new(lines).alignment(ratatui::prelude::Alignment::Center),
+        splash_area,
+    );
+
+    // Rainbow pride bar at the bottom
+    let rainbow_colors: [Color; 6] = [
+        Color::Indexed(196), // Red
+        Color::Indexed(208), // Orange
+        Color::Indexed(226), // Yellow
+        Color::Indexed(46),  // Green
+        Color::Indexed(21),  // Blue
+        Color::Indexed(129), // Purple
+    ];
+    let section_width = area.width as f32 / rainbow_colors.len() as f32;
+    let make_rainbow_line = || {
+        Line::from(
+            (0..area.width)
+                .map(|i| {
+                    let color_idx = (i as f32 / section_width) as usize;
+                    let color = rainbow_colors[color_idx.min(rainbow_colors.len() - 1)];
+                    Span::styled("█", Style::default().fg(color))
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    let bottom_row = Rect {
+        x: area.x,
+        y: area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(make_rainbow_line()), bottom_row);
+}
+
 fn draw_detail_view(frame: &mut Frame, vm: &Vm) {
     let area = frame.area();
     let modal_width = 70.min(area.width.saturating_sub(4));
@@ -1040,11 +1782,23 @@ fn draw_detail_view(frame: &mut Frame, vm: &Vm) {
             Span::styled(format!("{} MB", cfg.memory_mb), value_style),
         ]));
 
-        // Kernel
+        // Boot mode
+        let boot_mode_str = match BootMode::try_from(cfg.boot_mode) {
+            Ok(BootMode::Disk) | Ok(BootMode::Unspecified) | Err(_) => "Disk (UEFI)",
+            Ok(BootMode::Kernel) => "Kernel (Direct)",
+        };
         lines.push(Line::from(vec![
-            Span::styled(" Kernel:      ", label_style),
-            Span::styled(&cfg.kernel, value_style),
+            Span::styled(" Boot Mode:   ", label_style),
+            Span::styled(boot_mode_str, value_style),
         ]));
+
+        // Kernel (if set)
+        if let Some(ref kernel) = cfg.kernel {
+            lines.push(Line::from(vec![
+                Span::styled(" Kernel:      ", label_style),
+                Span::styled(kernel, value_style),
+            ]));
+        }
 
         // Initramfs (if set)
         if let Some(ref initramfs) = cfg.initramfs {
@@ -1178,28 +1932,109 @@ async fn action_worker(
                 }
             }
             Action::Create(params) => {
-                // Read user_data file content if path is provided
-                let user_data_content = if let Some(path) = &params.user_data {
-                    match tokio::fs::read_to_string(path).await {
-                        Ok(content) => Some(content),
-                        Err(e) => {
-                            let _ = result_tx.send(ActionResult::Created(Err(format!(
-                                "Failed to read user-data file: {}",
-                                e
-                            ))));
-                            continue;
+                // Generate user_data content based on mode
+                let user_data_content = match params.user_data_mode {
+                    UserDataMode::None => None,
+                    UserDataMode::File => {
+                        if let Some(path) = &params.user_data_file {
+                            match tokio::fs::read_to_string(path).await {
+                                Ok(content) => Some(content),
+                                Err(e) => {
+                                    let _ = result_tx.send(ActionResult::Created(Err(format!(
+                                        "Failed to read user-data file: {}",
+                                        e
+                                    ))));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
                         }
                     }
-                } else {
-                    None
+                    UserDataMode::SshKeys => {
+                        if let Some(ref cfg) = params.ssh_keys_config {
+                            // Fetch SSH keys based on source
+                            let ssh_keys = match cfg.source {
+                                SshKeySource::GitHub => {
+                                    let url =
+                                        format!("https://github.com/{}.keys", cfg.github_user);
+                                    match reqwest::get(&url).await {
+                                        Ok(resp) => {
+                                            if resp.status().is_success() {
+                                                match resp.text().await {
+                                                    Ok(keys) => keys
+                                                        .lines()
+                                                        .filter(|l| !l.is_empty())
+                                                        .map(|s| s.to_string())
+                                                        .collect::<Vec<_>>(),
+                                                    Err(e) => {
+                                                        let _ = result_tx.send(
+                                                            ActionResult::Created(Err(format!(
+                                                                "Failed to read GitHub keys: {}",
+                                                                e
+                                                            ))),
+                                                        );
+                                                        continue;
+                                                    }
+                                                }
+                                            } else {
+                                                let _ = result_tx.send(ActionResult::Created(Err(
+                                                    format!(
+                                                        "Failed to fetch GitHub keys: HTTP {}",
+                                                        resp.status()
+                                                    ),
+                                                )));
+                                                continue;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = result_tx.send(ActionResult::Created(Err(
+                                                format!("Failed to fetch GitHub keys: {}", e),
+                                            )));
+                                            continue;
+                                        }
+                                    }
+                                }
+                                SshKeySource::Local => {
+                                    match tokio::fs::read_to_string(&cfg.local_path).await {
+                                        Ok(content) => content
+                                            .lines()
+                                            .filter(|l| !l.is_empty())
+                                            .map(|s| s.to_string())
+                                            .collect::<Vec<_>>(),
+                                        Err(e) => {
+                                            let _ = result_tx.send(ActionResult::Created(Err(
+                                                format!("Failed to read SSH key file: {}", e),
+                                            )));
+                                            continue;
+                                        }
+                                    }
+                                }
+                            };
+
+                            // Generate cloud-init user-data
+                            let keys_yaml = ssh_keys
+                                .iter()
+                                .map(|k| format!("      - {}", k))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            Some(format!(
+                                "#cloud-config\nusers:\n  - name: {}\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n    ssh_authorized_keys:\n{}",
+                                cfg.username, keys_yaml
+                            ))
+                        } else {
+                            None
+                        }
+                    }
                 };
 
                 let config = VmConfig {
                     vcpus: params.vcpus,
                     memory_mb: params.memory_mb,
+                    boot_mode: params.boot_mode,
                     kernel: params.kernel,
-                    initramfs: None,
-                    cmdline: None,
+                    initramfs: params.initramfs,
+                    cmdline: params.cmdline,
                     disks: vec![DiskConfig {
                         path: params.disk,
                         readonly: false,
@@ -1241,6 +2076,10 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
     io::stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
+    // Show splash screen for 1 second
+    terminal.draw(draw_splash)?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
     let mut app = App::new(action_tx, result_rx);
     app.refresh();
 
@@ -1265,8 +2104,56 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            // Handle file picker first (highest priority)
-            if app.file_picker.is_some() {
+            // Handle SSH keys modal first (highest priority)
+            if app.ssh_keys_modal.is_some() {
+                match key.code {
+                    KeyCode::Esc => app.close_ssh_keys_modal(),
+                    KeyCode::Tab | KeyCode::Down => {
+                        if let Some(modal) = &mut app.ssh_keys_modal {
+                            modal.focus_next();
+                        }
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        if let Some(modal) = &mut app.ssh_keys_modal {
+                            modal.focus_prev();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(modal) = &app.ssh_keys_modal {
+                            if modal.is_add_button() {
+                                app.confirm_ssh_keys();
+                            } else if modal.is_cancel_button() {
+                                app.close_ssh_keys_modal();
+                            } else if let Some(modal) = &mut app.ssh_keys_modal {
+                                modal.focus_next();
+                            }
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        if let Some(modal) = &mut app.ssh_keys_modal
+                            && modal.is_source_field()
+                        {
+                            modal.toggle_source();
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(modal) = &mut app.ssh_keys_modal
+                            && let Some(input) = modal.current_input()
+                        {
+                            input.pop();
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        if let Some(modal) = &mut app.ssh_keys_modal
+                            && let Some(input) = modal.current_input()
+                        {
+                            input.push(c);
+                        }
+                    }
+                    _ => {}
+                }
+            } else if app.file_picker.is_some() {
+                // Handle file picker
                 match key.code {
                     KeyCode::Esc => app.close_file_picker(),
                     KeyCode::Down => {
@@ -1304,14 +2191,39 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                     }
                     KeyCode::Enter => {
                         if let Some(modal) = &app.create_modal {
-                            if modal.focused_field == 6 {
+                            if modal.focused_field == 9 {
                                 // Submit button focused
                                 app.submit_create();
                             } else if modal.is_file_field() {
                                 // Open file picker for file fields
                                 app.open_file_picker();
+                            } else if modal.is_user_data_mode_field() {
+                                // Handle user data mode action
+                                match modal.user_data_mode {
+                                    UserDataMode::None => {
+                                        // Just move to next field
+                                        if let Some(modal) = &mut app.create_modal {
+                                            modal.focus_next();
+                                        }
+                                    }
+                                    UserDataMode::SshKeys => {
+                                        app.open_ssh_keys_modal();
+                                    }
+                                    UserDataMode::File => {
+                                        app.open_user_data_file_picker();
+                                    }
+                                }
                             } else if let Some(modal) = &mut app.create_modal {
                                 modal.focus_next();
+                            }
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        if let Some(modal) = &mut app.create_modal {
+                            if modal.is_boot_mode_field() {
+                                modal.toggle_boot_mode();
+                            } else if modal.is_user_data_mode_field() {
+                                modal.cycle_user_data_mode();
                             }
                         }
                     }
