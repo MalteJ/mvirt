@@ -192,12 +192,20 @@ impl CreateModal {
         }
     }
 
+    fn is_name_field(&self) -> bool {
+        self.focused_field == 0
+    }
+
     fn is_file_field(&self) -> bool {
         matches!(self.focused_field, 1 | 2 | 5) // kernel, disk, user_data
     }
 
     fn is_numeric_field(&self) -> bool {
         matches!(self.focused_field, 3 | 4) // vcpus, memory_mb
+    }
+
+    fn is_valid_name_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_'
     }
 
     fn set_field(&mut self, field: usize, value: String) {
@@ -831,6 +839,22 @@ async fn action_worker(
                 }
             }
             Action::Create(params) => {
+                // Read user_data file content if path is provided
+                let user_data_content = if let Some(path) = &params.user_data {
+                    match tokio::fs::read_to_string(path).await {
+                        Ok(content) => Some(content),
+                        Err(e) => {
+                            let _ = result_tx.send(ActionResult::Created(Err(format!(
+                                "Failed to read user-data file: {}",
+                                e
+                            ))));
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let config = VmConfig {
                     vcpus: params.vcpus,
                     memory_mb: params.memory_mb,
@@ -845,7 +869,7 @@ async fn action_worker(
                         tap: None,
                         mac: None,
                     }],
-                    user_data: params.user_data,
+                    user_data: user_data_content,
                 };
                 match client
                     .create_vm(CreateVmRequest {
@@ -955,9 +979,16 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                     }
                     KeyCode::Char(c) => {
                         if let Some(modal) = &mut app.create_modal {
-                            // Only accept digits for numeric fields
                             if modal.is_numeric_field() {
+                                // Only accept digits for numeric fields
                                 if c.is_ascii_digit()
+                                    && let Some(input) = modal.current_input()
+                                {
+                                    input.push(c);
+                                }
+                            } else if modal.is_name_field() {
+                                // Only accept [a-zA-Z0-9-_] for name field
+                                if CreateModal::is_valid_name_char(c)
                                     && let Some(input) = modal.current_input()
                                 {
                                     input.push(c);
