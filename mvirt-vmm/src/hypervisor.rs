@@ -220,6 +220,16 @@ ethernets:
         // Create VM directory
         tokio::fs::create_dir_all(&vm_dir).await?;
 
+        // Clean up any stale socket files from previous runs
+        if api_socket.exists() {
+            debug!(path = %api_socket.display(), "Removing stale API socket");
+            let _ = tokio::fs::remove_file(&api_socket).await;
+        }
+        if serial_socket.exists() {
+            debug!(path = %serial_socket.display(), "Removing stale serial socket");
+            let _ = tokio::fs::remove_file(&serial_socket).await;
+        }
+
         debug!(vm_dir = %vm_dir.display(), "VM directory created");
 
         // Build cloud-hypervisor command
