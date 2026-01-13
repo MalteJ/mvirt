@@ -1,5 +1,8 @@
 # mvirt
 
+> [!WARNING]
+> Dieses Projekt wurde vibe-coded mit Claude Code. Not for production use!
+
 Leichtgewichtiger VM-Manager in Rust als moderne Alternative zu libvirt.
 
 ## Features
