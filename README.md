@@ -5,6 +5,8 @@
 
 Lightweight VM manager in Rust as a modern alternative to libvirt.
 
+![mvirt TUI](docs/assets/tui1.png)
+
 ## Features
 
 - **cloud-hypervisor** as hypervisor (instead of QEMU)
