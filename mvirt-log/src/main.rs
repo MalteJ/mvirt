@@ -19,7 +19,7 @@ struct Args {
     port: u16,
 
     /// Data directory for logs
-    #[arg(long, default_value = "/var/lib/mvirt/logs")]
+    #[arg(long, default_value = "/var/lib/mvirt/log")]
     data_dir: PathBuf,
 }
 
@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Opening log storage at {:?}", args.data_dir);
     let manager = Arc::new(LogManager::new(&args.data_dir)?);
 
-    let addr = format!("0.0.0.0:{}", args.port).parse()?;
+    let addr = format!("[::1]:{}", args.port).parse()?;
     let service = MyLogService { manager };
 
     info!("mvirt-log listening on {}", addr);
