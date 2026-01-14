@@ -277,6 +277,8 @@ struct ProtoDisk {
 struct ProtoNic {
     tap: Option<String>,
     mac: Option<String>,
+    #[serde(default)]
+    vhost_socket: Option<String>,
 }
 
 impl From<VmConfig> for ProtoConfig {
@@ -302,6 +304,7 @@ impl From<VmConfig> for ProtoConfig {
                 .map(|n| ProtoNic {
                     tap: n.tap,
                     mac: n.mac,
+                    vhost_socket: n.vhost_socket,
                 })
                 .collect(),
             user_data: c.user_data,
@@ -334,6 +337,7 @@ impl From<ProtoConfig> for VmConfig {
                 .map(|n| NicConfig {
                     tap: n.tap,
                     mac: n.mac,
+                    vhost_socket: n.vhost_socket,
                 })
                 .collect(),
             user_data: c.user_data,

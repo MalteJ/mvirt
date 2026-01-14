@@ -14,7 +14,7 @@ Daemon for managing VMs via cloud-hypervisor.
 ## Usage
 
 ```bash
-# With default settings (/var/lib/mvirt)
+# With default settings (/var/lib/mvirt/vmm)
 mvirt-vmm
 
 # Development (local directory)
@@ -28,7 +28,7 @@ mvirt-vmm --bridge br0
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--data-dir` | `/var/lib/mvirt` | Directory for DB and sockets |
+| `--data-dir` | `/var/lib/mvirt/vmm` | Directory for DB and sockets |
 | `--bridge` | `mvirt0` | Linux bridge for VM network |
 | `--listen` | `[::1]:50051` | gRPC listen address |
 

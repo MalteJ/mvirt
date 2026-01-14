@@ -13,7 +13,7 @@ use crate::proto::{BootMode, VmConfig};
 use crate::store::VmStore;
 
 const CLOUD_HYPERVISOR_BIN: &str = "/usr/bin/cloud-hypervisor";
-const FIRMWARE_FILENAME: &str = "hypervisor-fw";
+const FIRMWARE_PATH: &str = "/usr/share/mvirt/CLOUDHV.fd";
 const HUGEPAGES_FREE_PATH: &str = "/sys/kernel/mm/hugepages/hugepages-2048kB/free_hugepages";
 const HUGEPAGE_SIZE_KB: u64 = 2048;
 
@@ -110,7 +110,7 @@ impl Hypervisor {
     }
 
     fn firmware_path(&self) -> PathBuf {
-        self.data_dir.join(FIRMWARE_FILENAME)
+        PathBuf::from(FIRMWARE_PATH)
     }
 
     fn tap_name(&self, vm_id: &str) -> String {
@@ -269,7 +269,7 @@ ethernets:
         // Boot configuration based on boot_mode
         match BootMode::try_from(config.boot_mode).unwrap_or(BootMode::Disk) {
             BootMode::Disk | BootMode::Unspecified => {
-                // Disk boot: use firmware, boot from first disk
+                // Disk boot: use rust-hypervisor-firmware (loaded as kernel with PVH entry)
                 cmd.arg("--kernel").arg(self.firmware_path());
             }
             BootMode::Kernel => {
@@ -332,9 +332,36 @@ ethernets:
             }
         }
 
-        // Create TAP device and add network interface
-        let tap_name = self.create_tap(vm_id).await?;
-        cmd.arg("--net").arg(format!("tap={}", tap_name));
+        // Add network interfaces
+        if config.nics.is_empty() {
+            // No NICs configured, create default TAP
+            let tap_name = self.create_tap(vm_id).await?;
+            cmd.arg("--net").arg(format!("tap={}", tap_name));
+        } else {
+            let mut created_tap = false;
+            for nic in &config.nics {
+                if let Some(ref socket) = nic.vhost_socket {
+                    // vhost-user networking (mvirt-net)
+                    let mut net_arg = format!("vhost_user=true,socket={},num_queues=2", socket);
+                    if let Some(ref mac) = nic.mac {
+                        net_arg.push_str(&format!(",mac={}", mac));
+                    }
+                    cmd.arg("--net").arg(net_arg);
+                    info!(vm_id = %vm_id, socket = %socket, "Using vhost-user network");
+                } else {
+                    // TAP networking (legacy)
+                    if !created_tap {
+                        let tap_name = self.create_tap(vm_id).await?;
+                        let mut net_arg = format!("tap={}", tap_name);
+                        if let Some(ref mac) = nic.mac {
+                            net_arg.push_str(&format!(",mac={}", mac));
+                        }
+                        cmd.arg("--net").arg(net_arg);
+                        created_tap = true;
+                    }
+                }
+            }
+        }
 
         info!(vm_id = %vm_id, cmd = ?cmd.as_std(), "Spawning cloud-hypervisor");
 

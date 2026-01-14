@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use mvirt_log::LogServiceClient;
+use mvirt_log::create_audit_logger;
 use tonic::transport::Server;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod grpc;
@@ -25,7 +25,7 @@ use store::VmStore;
 #[command(about = "mvirt Virtual Machine Manager daemon")]
 struct Args {
     /// Data directory for SQLite database and VM runtime files
-    #[arg(short, long, default_value = "/var/lib/mvirt")]
+    #[arg(short, long, default_value = "/var/lib/mvirt/vmm")]
     data_dir: PathBuf,
 
     /// gRPC listen address
@@ -63,20 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn process watcher
     let _watcher_shutdown = hypervisor.clone().spawn_watcher();
 
-    // Connect to mvirt-log (optional)
-    let log_client = match LogServiceClient::connect("http://[::1]:50052").await {
-        Ok(client) => {
-            info!("Connected to mvirt-log audit service");
-            Some(client)
-        }
-        Err(_) => {
-            warn!("mvirt-log unavailable, audit logging disabled");
-            None
-        }
-    };
+    // Create audit logger (connects lazily to mvirt-log)
+    let audit = create_audit_logger("http://[::1]:50052", "vmm");
 
     // Create gRPC service
-    let service = VmServiceImpl::new(store, hypervisor, log_client);
+    let service = VmServiceImpl::new(store, hypervisor, audit);
 
     let addr = args.listen.parse()?;
     info!(addr = %addr, "Starting gRPC server");
