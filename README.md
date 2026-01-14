@@ -74,6 +74,9 @@ make os
 # Bootable ISO (BIOS + UEFI)
 make iso
 
+# Build in Docker (no local dependencies needed)
+make docker
+
 # Check build dependencies
 make check
 ```
@@ -103,6 +106,7 @@ cargo fmt && cargo clippy --workspace
 mvirt/
 ├── Cargo.toml              # Workspace
 ├── Makefile                # Build orchestration
+├── Dockerfile              # Build environment
 ├── mvirt-cli/              # CLI + TUI
 │   ├── src/
 │   │   ├── main.rs         # CLI commands

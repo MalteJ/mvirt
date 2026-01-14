@@ -3,7 +3,7 @@
 
 MUSL_TARGET := x86_64-unknown-linux-musl
 
-.PHONY: all build release os kernel initramfs uki iso menuconfig clean distclean check
+.PHONY: all build release os kernel initramfs uki iso menuconfig clean distclean check docker
 
 # Include mvirt-os subsystem
 include mvirt-os/mvirt-os.mk
@@ -82,3 +82,15 @@ check:
 	else \
 		echo "Some dependencies missing!"; exit 1; \
 	fi
+
+# ============ DOCKER BUILD ============
+
+DOCKER_IMAGE := mvirt-builder
+
+docker:
+	docker build -t $(DOCKER_IMAGE) .
+	docker run --rm \
+		--user $$(id -u):$$(id -g) \
+		-v $(CURDIR):/work \
+		$(DOCKER_IMAGE) \
+		make iso

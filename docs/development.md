@@ -33,6 +33,7 @@ The build system uses GNU Make with a dependency-based approach. Targets only re
 | `make clean` | Remove build artifacts |
 | `make distclean` | Remove everything including kernel source |
 | `make check` | Verify build dependencies are installed |
+| `make docker` | Build ISO in Docker (no local deps needed) |
 
 ### Dependency Chain
 
@@ -118,6 +119,37 @@ apt install build-essential flex bison libelf-dev libssl-dev
 apt install systemd-ukify          # For UKI building
 apt install isolinux syslinux-common xorriso  # For ISO building
 rustup target add x86_64-unknown-linux-musl   # Rust musl target
+```
+
+## Docker Build
+
+Build without installing dependencies locally:
+
+```bash
+make docker
+```
+
+This builds a Docker image with all dependencies (Rust, musl, kernel build tools, etc.) and runs `make iso` inside the container. Files are owned by your user, not root.
+
+The Docker image is cached, so subsequent builds are fast.
+
+### What's in the Container
+
+- Debian Trixie
+- Rust + musl target
+- Kernel build tools (flex, bison, libelf, etc.)
+- UKI tools (systemd-ukify)
+- ISO tools (isolinux, xorriso)
+- protobuf compiler
+
+### Manual Docker Usage
+
+```bash
+# Build image only
+docker build -t mvirt-builder .
+
+# Run any make target
+docker run --rm --user $(id -u):$(id -g) -v $(pwd):/work mvirt-builder make os
 ```
 
 ## Code Quality

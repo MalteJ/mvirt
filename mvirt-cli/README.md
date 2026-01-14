@@ -24,17 +24,9 @@ mvirt console <id>
 
 ## TUI
 
-```
-┌─────────────────────────────────────────────────────────┐
-│ mvirt │ CPU 2/16 │ RAM 1.0/31.2 GiB                     │
-├─────────────────────────────────────────────────────────┤
-│ ID        NAME      STATE       CPU   MEM               │
-│ a1b2c3d4… test-vm   ● running   2     1024MB            │
-│ e5f6g7h8… other     ○ stopped   1     512MB             │
-├─────────────────────────────────────────────────────────┤
-│ ↵ Details  c Create  s Start  S Stop  k Kill  d Delete  │
-└─────────────────────────────────────────────────────────┘
-```
+![TUI Main View](../docs/assets/tui1.png)
+
+![TUI Create Modal](../docs/assets/tui2.png)
 
 ### Keyboard Shortcuts
 
