@@ -2,10 +2,7 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::ExecutableCommand;
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-    MouseEventKind,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -166,9 +163,7 @@ pub async fn run(
     ));
 
     enable_raw_mode()?;
-    io::stdout()
-        .execute(EnterAlternateScreen)?
-        .execute(EnableMouseCapture)?;
+    io::stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     // Show splash screen for 1 second
@@ -232,78 +227,66 @@ pub async fn run(
             last_refresh = std::time::Instant::now();
         }
 
-        let term_size = terminal.size()?;
-        let term_rect = Rect::new(0, 0, term_size.width, term_size.height);
         terminal.draw(|frame| draw(frame, &mut app))?;
 
-        if event::poll(Duration::from_millis(50))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
 
-                    // Console mode takes highest priority
-                    if let Some(ref mut session) = app.console_session {
-                        if session.handle_key(key.code, key.modifiers) {
-                            app.close_console();
-                        }
-                        continue;
-                    }
+            // Console mode takes highest priority
+            if let Some(ref mut session) = app.console_session {
+                if session.handle_key(key.code, key.modifiers) {
+                    app.close_console();
+                }
+                continue;
+            }
 
-                    // Handle SSH keys modal
-                    if app.ssh_keys_modal.is_some() {
-                        handle_ssh_keys_modal_input(&mut app, key.code);
-                    } else if app.file_picker.is_some() {
-                        handle_file_picker_input(&mut app, key.code);
-                    } else if app.detail_view.is_some() {
-                        handle_detail_view_input(&mut app, key.code);
-                    } else if app.create_modal.is_some() {
-                        handle_create_modal_input(&mut app, key.code);
-                    } else if app.confirm_kill.is_some() {
-                        handle_confirm_kill_input(&mut app, key.code);
-                    } else if app.confirm_delete.is_some() {
-                        handle_confirm_delete_input(&mut app, key.code);
-                    } else if app.confirm_delete_volume.is_some() {
-                        handle_storage_confirm_delete_volume(&mut app, key.code);
-                    } else if app.confirm_delete_template.is_some() {
-                        handle_storage_confirm_delete_template(&mut app, key.code);
-                    } else if app.volume_create_modal.is_some() {
-                        handle_volume_create_modal_input(&mut app, key.code);
-                    } else if app.volume_import_modal.is_some() {
-                        handle_volume_import_modal_input(&mut app, key.code);
-                    } else if app.volume_resize_modal.is_some() {
-                        handle_volume_resize_modal_input(&mut app, key.code);
-                    } else if app.volume_snapshot_modal.is_some() {
-                        handle_volume_snapshot_modal_input(&mut app, key.code);
-                    } else if app.volume_template_modal.is_some() {
-                        handle_volume_template_modal_input(&mut app, key.code);
-                    } else if app.volume_clone_modal.is_some() {
-                        handle_volume_clone_modal_input(&mut app, key.code);
-                    } else if app.network_create_modal.is_some() {
-                        handle_network_create_modal_input(&mut app, key.code);
-                    } else if app.nic_create_modal.is_some() {
-                        handle_nic_create_modal_input(&mut app, key.code);
-                    } else if app.confirm_delete_network.is_some() {
-                        handle_confirm_delete_network(&mut app, key.code);
-                    } else if app.confirm_delete_nic.is_some() {
-                        handle_confirm_delete_nic(&mut app, key.code);
-                    } else if app.log_detail_index.is_some() {
-                        handle_log_detail_input(&mut app, key.code);
-                    } else if app.volume_detail_view.is_some() {
-                        handle_volume_detail_input(&mut app, key.code);
-                    } else {
-                        handle_normal_input(&mut app, key.code);
-                    }
-                }
-                Event::Mouse(mouse) => {
-                    // Ignore mouse events when modals are open or in console mode
-                    if app.console_session.is_some() || app.has_modal_open() {
-                        continue;
-                    }
-                    handle_mouse_input(&mut app, mouse, term_rect);
-                }
-                _ => {}
+            // Handle SSH keys modal
+            if app.ssh_keys_modal.is_some() {
+                handle_ssh_keys_modal_input(&mut app, key.code);
+            } else if app.file_picker.is_some() {
+                handle_file_picker_input(&mut app, key.code);
+            } else if app.detail_view.is_some() {
+                handle_detail_view_input(&mut app, key.code);
+            } else if app.create_modal.is_some() {
+                handle_create_modal_input(&mut app, key.code);
+            } else if app.confirm_kill.is_some() {
+                handle_confirm_kill_input(&mut app, key.code);
+            } else if app.confirm_delete.is_some() {
+                handle_confirm_delete_input(&mut app, key.code);
+            } else if app.confirm_delete_volume.is_some() {
+                handle_storage_confirm_delete_volume(&mut app, key.code);
+            } else if app.confirm_delete_template.is_some() {
+                handle_storage_confirm_delete_template(&mut app, key.code);
+            } else if app.volume_create_modal.is_some() {
+                handle_volume_create_modal_input(&mut app, key.code);
+            } else if app.volume_import_modal.is_some() {
+                handle_volume_import_modal_input(&mut app, key.code);
+            } else if app.volume_resize_modal.is_some() {
+                handle_volume_resize_modal_input(&mut app, key.code);
+            } else if app.volume_snapshot_modal.is_some() {
+                handle_volume_snapshot_modal_input(&mut app, key.code);
+            } else if app.volume_template_modal.is_some() {
+                handle_volume_template_modal_input(&mut app, key.code);
+            } else if app.volume_clone_modal.is_some() {
+                handle_volume_clone_modal_input(&mut app, key.code);
+            } else if app.network_create_modal.is_some() {
+                handle_network_create_modal_input(&mut app, key.code);
+            } else if app.nic_create_modal.is_some() {
+                handle_nic_create_modal_input(&mut app, key.code);
+            } else if app.confirm_delete_network.is_some() {
+                handle_confirm_delete_network(&mut app, key.code);
+            } else if app.confirm_delete_nic.is_some() {
+                handle_confirm_delete_nic(&mut app, key.code);
+            } else if app.log_detail_index.is_some() {
+                handle_log_detail_input(&mut app, key.code);
+            } else if app.volume_detail_view.is_some() {
+                handle_volume_detail_input(&mut app, key.code);
+            } else {
+                handle_normal_input(&mut app, key.code);
             }
         }
 
@@ -313,9 +296,7 @@ pub async fn run(
     }
 
     disable_raw_mode()?;
-    io::stdout()
-        .execute(DisableMouseCapture)?
-        .execute(LeaveAlternateScreen)?;
+    io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
 }
 
@@ -1044,111 +1025,5 @@ fn handle_confirm_delete_nic(app: &mut App, key_code: KeyCode) {
         KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_nic(),
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_delete_nic(),
         _ => {}
-    }
-}
-
-// === Mouse Input Handler ===
-
-fn handle_mouse_input(app: &mut App, mouse: event::MouseEvent, term_size: Rect) {
-    let x = mouse.column;
-    let y = mouse.row;
-
-    match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            // Title bar area (first 3 rows including border)
-            if y < 3 {
-                handle_tab_click(app, x);
-            } else {
-                // Table area - calculate which row was clicked
-                handle_table_click(app, y, term_size);
-            }
-        }
-        MouseEventKind::ScrollUp => {
-            // Scroll up in current view
-            match app.active_view {
-                View::Vm => app.previous(),
-                View::Storage => app.storage_previous(),
-                View::Logs => app.logs_previous(),
-                View::Network => app.network_previous(),
-            }
-        }
-        MouseEventKind::ScrollDown => {
-            // Scroll down in current view
-            match app.active_view {
-                View::Vm => app.next(),
-                View::Storage => app.storage_next(),
-                View::Logs => app.logs_next(),
-                View::Network => app.network_next(),
-            }
-        }
-        _ => {}
-    }
-}
-
-fn handle_tab_click(app: &mut App, x: u16) {
-    // Tab positions in title bar (approximate positions):
-    // " mvirt [1:VMs] [2:Storage] [3:Networks] [4:Logs]"
-    // Positions:  7-14   16-27      29-40       42-49
-    if (7..=14).contains(&x) {
-        app.set_view(View::Vm);
-    } else if (16..=27).contains(&x) {
-        app.set_view(View::Storage);
-    } else if (29..=40).contains(&x) {
-        app.set_view(View::Network);
-    } else if (42..=49).contains(&x) {
-        app.set_view(View::Logs);
-    }
-}
-
-fn handle_table_click(app: &mut App, y: u16, term_size: Rect) {
-    // Layout: Title (3) + Table + Legend (1) + Status (1)
-    // Table starts at row 3, has header row, then data rows
-    // Table header is at row 4 (after border), data starts at row 5
-    let table_start = 4; // After title block border + header
-    let table_end = term_size.height.saturating_sub(3); // Before legend and status
-
-    if y >= table_start && y < table_end {
-        let row_index = (y - table_start) as usize;
-
-        match app.active_view {
-            View::Vm => {
-                if row_index < app.vms.len() {
-                    app.table_state.select(Some(row_index));
-                }
-            }
-            View::Storage => {
-                // Storage view has two tables, need to determine which one
-                // For simplicity, assume click is on the focused table
-                match app.storage_focus {
-                    StorageFocus::Volumes => {
-                        if row_index < app.storage.volumes.len() {
-                            app.volume_table_state.select(Some(row_index));
-                        }
-                    }
-                    StorageFocus::Templates => {
-                        if row_index < app.storage.templates.len() {
-                            app.template_table_state.select(Some(row_index));
-                        }
-                    }
-                }
-            }
-            View::Logs => {
-                if row_index < app.logs.len() {
-                    app.logs_table_state.select(Some(row_index));
-                }
-            }
-            View::Network => match app.network_focus {
-                NetworkFocus::Networks => {
-                    if row_index < app.network.networks.len() {
-                        app.networks_table_state.select(Some(row_index));
-                    }
-                }
-                NetworkFocus::Nics => {
-                    if row_index < app.network.nics.len() {
-                        app.nics_table_state.select(Some(row_index));
-                    }
-                }
-            },
-        }
     }
 }

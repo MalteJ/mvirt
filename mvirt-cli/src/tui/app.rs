@@ -722,29 +722,6 @@ impl App {
         self.vms.iter().find(|vm| vm.id == id)
     }
 
-    pub fn has_modal_open(&self) -> bool {
-        self.detail_view.is_some()
-            || self.create_modal.is_some()
-            || self.file_picker.is_some()
-            || self.ssh_keys_modal.is_some()
-            || self.confirm_delete.is_some()
-            || self.confirm_kill.is_some()
-            || self.confirm_delete_volume.is_some()
-            || self.confirm_delete_template.is_some()
-            || self.volume_detail_view.is_some()
-            || self.volume_create_modal.is_some()
-            || self.volume_import_modal.is_some()
-            || self.volume_resize_modal.is_some()
-            || self.volume_snapshot_modal.is_some()
-            || self.volume_template_modal.is_some()
-            || self.volume_clone_modal.is_some()
-            || self.network_create_modal.is_some()
-            || self.nic_create_modal.is_some()
-            || self.confirm_delete_network.is_some()
-            || self.confirm_delete_nic.is_some()
-            || self.log_detail_index.is_some()
-    }
-
     pub fn handle_user_data_mode_action(&mut self) {
         if let Some(modal) = &self.create_modal {
             match modal.user_data_mode {
