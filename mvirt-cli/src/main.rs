@@ -13,8 +13,14 @@ pub mod zfs_proto {
     tonic::include_proto!("mvirt.zfs");
 }
 
+pub mod net_proto {
+    tonic::include_proto!("mvirt.net");
+}
+
 mod tui;
 
+use mvirt_log::LogServiceClient;
+use net_proto::net_service_client::NetServiceClient;
 use proto::vm_service_client::VmServiceClient;
 use proto::*;
 use zfs_proto::zfs_service_client::ZfsServiceClient;
@@ -30,6 +36,14 @@ struct Cli {
     /// gRPC server address for mvirt-zfs (storage)
     #[arg(long, default_value = "http://[::1]:50053")]
     zfs_server: String,
+
+    /// gRPC server address for mvirt-log (logging)
+    #[arg(long, default_value = "http://[::1]:50052")]
+    log_server: String,
+
+    /// gRPC server address for mvirt-net (networking)
+    #[arg(long, default_value = "http://[::1]:50054")]
+    net_server: String,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -276,9 +290,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Try to connect to mvirt-zfs (optional - doesn't fail if unavailable)
     let zfs_client = ZfsServiceClient::connect(cli.zfs_server.clone()).await.ok();
 
+    // Try to connect to mvirt-log (optional - doesn't fail if unavailable)
+    let log_client = LogServiceClient::connect(cli.log_server.clone()).await.ok();
+
+    // Try to connect to mvirt-net (optional - doesn't fail if unavailable)
+    let net_client = NetServiceClient::connect(cli.net_server.clone()).await.ok();
+
     let Some(command) = cli.command else {
         // No subcommand: start TUI (works even without connections)
-        tui::run(vm_client, zfs_client).await?;
+        tui::run(vm_client, zfs_client, log_client, net_client).await?;
         return Ok(());
     };
 

@@ -1,22 +1,28 @@
-//! Modal for importing a template from file or URL
+//! Modal for creating a new NIC
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 #[derive(Default)]
-pub struct VolumeImportModal {
+pub struct NicCreateModal {
+    pub network_id: String,
+    pub network_name: String,
     pub name: String,
-    pub source: String, // URL to import from
     pub focused_field: usize,
 }
 
-impl VolumeImportModal {
-    pub fn new() -> Self {
-        Self::default()
+impl NicCreateModal {
+    pub fn new(network_id: String, network_name: String) -> Self {
+        Self {
+            network_id,
+            network_name,
+            name: String::new(),
+            focused_field: 0,
+        }
     }
 
     pub fn field_count() -> usize {
-        3 // name, source, submit
+        2 // name, submit (network is readonly)
     }
 
     pub fn focus_next(&mut self) {
@@ -34,7 +40,6 @@ impl VolumeImportModal {
     pub fn current_input(&mut self) -> Option<&mut String> {
         match self.focused_field {
             0 => Some(&mut self.name),
-            1 => Some(&mut self.source),
             _ => None,
         }
     }
@@ -43,45 +48,39 @@ impl VolumeImportModal {
         self.focused_field == 0
     }
 
-    #[allow(dead_code)]
-    pub fn is_source_field(&self) -> bool {
+    pub fn is_submit_field(&self) -> bool {
         self.focused_field == 1
     }
 
-    // For compatibility with generic field handling code
-    pub fn is_size_field(&self) -> bool {
-        false // VolumeImportModal has no size field
-    }
-
-    pub fn is_submit_field(&self) -> bool {
-        self.focused_field == 2
-    }
-
-    pub fn validate(&self) -> Result<(String, String), String> {
-        if self.name.is_empty() {
-            return Err("Name is required".to_string());
-        }
-        if !self
-            .name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err("Name must be alphanumeric with - or _".to_string());
-        }
-        if self.source.is_empty() {
-            return Err("Source is required".to_string());
+    /// Returns (network_id, name or None)
+    pub fn validate(&self) -> Result<(String, Option<String>), String> {
+        if self.network_id.is_empty() {
+            return Err("Network ID is required".to_string());
         }
 
-        Ok((self.name.clone(), self.source.clone()))
+        let name = if self.name.is_empty() {
+            None
+        } else {
+            if !self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err("Name must be alphanumeric with - or _".to_string());
+            }
+            Some(self.name.clone())
+        };
+
+        Ok((self.network_id.clone(), name))
     }
 }
 
-pub fn draw(frame: &mut Frame, modal: &VolumeImportModal) {
-    let area = centered_rect(60, 10, frame.area());
+pub fn draw(frame: &mut Frame, modal: &NicCreateModal) {
+    let area = centered_rect(50, 12, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(" Import Template ")
+        .title(" Create NIC ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     frame.render_widget(block.clone(), area);
@@ -91,56 +90,52 @@ pub fn draw(frame: &mut Frame, modal: &VolumeImportModal) {
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
+            Constraint::Length(2), // Network (readonly)
             Constraint::Length(2), // Name
-            Constraint::Length(2), // Source
+            Constraint::Length(1), // Spacing
             Constraint::Length(2), // Submit
         ])
         .split(inner);
 
+    // Network field (readonly)
+    let network_line = Line::from(vec![
+        Span::styled(" Network: ", Style::default().fg(Color::Cyan)),
+        Span::styled(&modal.network_name, Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(network_line), chunks[0]);
+
     // Name field
-    let name_style = field_style(modal.focused_field == 0);
+    let name_style = if modal.focused_field == 0 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::White)
+    };
     let name_line = Line::from(vec![
         Span::styled(" Name: ", Style::default().fg(Color::Cyan)),
         Span::styled(&modal.name, name_style),
-        cursor_span(modal.focused_field == 0),
+        if modal.focused_field == 0 {
+            Span::styled("_", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
+        if modal.name.is_empty() && modal.focused_field != 0 {
+            Span::styled(" (optional)", Style::default().fg(Color::DarkGray))
+        } else {
+            Span::raw("")
+        },
     ]);
-    frame.render_widget(Paragraph::new(name_line), chunks[0]);
-
-    // URL field
-    let source_style = field_style(modal.focused_field == 1);
-    let source_line = Line::from(vec![
-        Span::styled(" URL: ", Style::default().fg(Color::Cyan)),
-        Span::styled(&modal.source, source_style),
-        cursor_span(modal.focused_field == 1),
-    ]);
-    frame.render_widget(Paragraph::new(source_line), chunks[1]);
+    frame.render_widget(Paragraph::new(name_line), chunks[1]);
 
     // Submit button
-    let submit_style = if modal.focused_field == 2 {
+    let submit_style = if modal.focused_field == 1 {
         Style::default().fg(Color::Black).bg(Color::Cyan)
     } else {
         Style::default().fg(Color::Cyan)
     };
     frame.render_widget(
-        Paragraph::new(Span::styled(" [ Import ] ", submit_style)).alignment(Alignment::Center),
-        chunks[2],
+        Paragraph::new(Span::styled(" [ Create ] ", submit_style)).alignment(Alignment::Center),
+        chunks[3],
     );
-}
-
-fn field_style(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::White)
-    }
-}
-
-fn cursor_span(show: bool) -> Span<'static> {
-    if show {
-        Span::styled("_", Style::default().fg(Color::Yellow))
-    } else {
-        Span::raw("")
-    }
 }
 
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {

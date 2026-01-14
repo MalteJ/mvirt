@@ -159,14 +159,24 @@ pub fn draw(
 }
 
 fn draw_pool_stats(frame: &mut Frame, area: Rect, storage: &StorageState) {
-    // Title (left side): mvirt VMs [Storage]
-    let title = Line::from(vec![
+    // Title (left side): mvirt [1:VMs] [2:Storage] [3:Logs]
+    let mut tabs = vec![
         Span::styled(" mvirt ", Style::default().fg(Color::Cyan).bold()),
-        Span::styled(" VMs ", Style::default().fg(Color::DarkGray)),
-        Span::styled("[", Style::default().fg(Color::DarkGray)),
+        Span::styled("[1:VMs]", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled("[2:", Style::default().fg(Color::DarkGray)),
         Span::styled("Storage", Style::default().fg(Color::White).bold()),
         Span::styled("]", Style::default().fg(Color::DarkGray)),
-    ]);
+    ];
+    tabs.push(Span::styled(
+        " [3:Logs]",
+        Style::default().fg(Color::DarkGray),
+    ));
+    tabs.push(Span::styled(
+        " [4:Networks]",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let title = Line::from(tabs);
 
     // Stats (right side): pool info
     let stats = if let Some(ref pool) = storage.pool {
@@ -325,7 +335,7 @@ fn draw_volumes_table(
 
             rows.push(Row::new(vec![
                 Cell::from(Span::styled(
-                    format!("[{}] {}", state_str, job.volume_name),
+                    format!("[{}] {}", state_str, job.template_name),
                     Style::default().fg(Color::Yellow),
                 )),
                 Cell::from(Span::styled(

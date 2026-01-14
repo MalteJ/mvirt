@@ -1,3 +1,4 @@
+pub mod log_detail;
 pub mod ssh_keys;
 pub mod vm_create;
 pub mod vm_detail;
@@ -9,3 +10,7 @@ pub mod volume_import;
 pub mod volume_resize;
 pub mod volume_snapshot;
 pub mod volume_template;
+
+// Network modals
+pub mod network_create;
+pub mod nic_create;

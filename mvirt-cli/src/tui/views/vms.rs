@@ -14,7 +14,6 @@ pub fn draw(
     confirm_delete: Option<&str>,
     confirm_kill: Option<&str>,
     last_refresh: Option<chrono::DateTime<chrono::Local>>,
-    zfs_available: bool,
 ) {
     let get_vm_by_id = |id: &str| vms.iter().find(|vm| vm.id == id);
     let chunks = Layout::default()
@@ -28,20 +27,23 @@ pub fn draw(
         .split(frame.area());
 
     // Title bar with system resource info and tabs
-    let tabs = if zfs_available {
-        vec![
-            Span::styled("[", Style::default().fg(Color::DarkGray)),
-            Span::styled("VMs", Style::default().fg(Color::White).bold()),
-            Span::styled("]", Style::default().fg(Color::DarkGray)),
-            Span::styled(" Storage ", Style::default().fg(Color::DarkGray)),
-        ]
-    } else {
-        vec![
-            Span::styled("[", Style::default().fg(Color::DarkGray)),
-            Span::styled("VMs", Style::default().fg(Color::White).bold()),
-            Span::styled("]", Style::default().fg(Color::DarkGray)),
-        ]
-    };
+    let mut tabs = vec![
+        Span::styled("[1:", Style::default().fg(Color::DarkGray)),
+        Span::styled("VMs", Style::default().fg(Color::White).bold()),
+        Span::styled("]", Style::default().fg(Color::DarkGray)),
+    ];
+    tabs.push(Span::styled(
+        " [2:Storage]",
+        Style::default().fg(Color::DarkGray),
+    ));
+    tabs.push(Span::styled(
+        " [3:Logs]",
+        Style::default().fg(Color::DarkGray),
+    ));
+    tabs.push(Span::styled(
+        " [4:Networks]",
+        Style::default().fg(Color::DarkGray),
+    ));
 
     // Title (left side): mvirt [VMs] Storage
     let mut title_spans = vec![Span::styled(

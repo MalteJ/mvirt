@@ -3,6 +3,11 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::transport::Channel;
 
+use crate::net_proto::net_service_client::NetServiceClient;
+use crate::net_proto::{
+    CreateNetworkRequest, CreateNicRequest, DeleteNetworkRequest, DeleteNicRequest,
+    ListNetworksRequest, ListNicsRequest,
+};
 use crate::proto::vm_service_client::VmServiceClient;
 use crate::proto::*;
 use crate::tui::types::{
@@ -11,6 +16,7 @@ use crate::tui::types::{
 };
 use crate::zfs_proto::zfs_service_client::ZfsServiceClient;
 use crate::zfs_proto::*;
+use mvirt_log::{LogServiceClient, QueryRequest};
 
 async fn generate_user_data(
     params: &CreateVmParams,
@@ -177,6 +183,8 @@ async fn refresh_storage(
 pub async fn action_worker(
     mut vm_client: Option<VmServiceClient<Channel>>,
     mut zfs_client: Option<ZfsServiceClient<Channel>>,
+    mut log_client: Option<LogServiceClient<Channel>>,
+    mut net_client: Option<NetServiceClient<Channel>>,
     mut action_rx: mpsc::UnboundedReceiver<Action>,
     result_tx: mpsc::UnboundedSender<ActionResult>,
 ) {
@@ -261,26 +269,12 @@ pub async fn action_worker(
 
                     // Resolve disk path from ZFS volume/template
                     let disk_path = if let Some(ref mut zfs) = zfs_client {
-                        // Get pool name
-                        let pool_name = match zfs.get_pool_stats(GetPoolStatsRequest {}).await {
-                            Ok(resp) => resp.into_inner().name,
-                            Err(e) => {
-                                let _ = result_tx.send(ActionResult::Created(Err(format!(
-                                    "Failed to get pool info: {}",
-                                    e.message()
-                                ))));
-                                continue;
-                            }
-                        };
-
-                        // For templates, clone to a new volume first
-                        let volume_name = match params.disk_source_type {
+                        match params.disk_source_type {
                             DiskSourceType::Template => {
                                 // Generate volume name from VM name or template name
                                 let new_vol_name = if let Some(ref vm_name) = params.name {
                                     vm_name.clone()
                                 } else {
-                                    // Generate a unique name based on template
                                     format!(
                                         "{}-{}",
                                         params.disk_name,
@@ -288,26 +282,42 @@ pub async fn action_worker(
                                     )
                                 };
 
-                                // Clone the template
-                                if let Err(e) = zfs
+                                // Clone the template - returns volume with correct device path
+                                match zfs
                                     .clone_from_template(CloneFromTemplateRequest {
                                         template_name: params.disk_name.clone(),
                                         new_volume_name: new_vol_name.clone(),
+                                        size_bytes: None,
                                     })
                                     .await
                                 {
-                                    let _ = result_tx.send(ActionResult::Created(Err(format!(
-                                        "Failed to clone template: {}",
-                                        e.message()
-                                    ))));
-                                    continue;
+                                    Ok(response) => response.into_inner().path,
+                                    Err(e) => {
+                                        let _ = result_tx.send(ActionResult::Created(Err(
+                                            format!("Failed to clone template: {}", e.message()),
+                                        )));
+                                        continue;
+                                    }
                                 }
-                                new_vol_name
                             }
-                            DiskSourceType::Volume => params.disk_name.clone(),
-                        };
-
-                        format!("/dev/zvol/{}/{}", pool_name, volume_name)
+                            DiskSourceType::Volume => {
+                                // Look up the volume to get its device path
+                                match zfs
+                                    .get_volume(GetVolumeRequest {
+                                        name: params.disk_name.clone(),
+                                    })
+                                    .await
+                                {
+                                    Ok(response) => response.into_inner().path,
+                                    Err(e) => {
+                                        let _ = result_tx.send(ActionResult::Created(Err(
+                                            format!("Failed to get volume: {}", e.message()),
+                                        )));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         // No ZFS client - can't resolve disk
                         let _ = result_tx.send(ActionResult::Created(Err(
@@ -332,6 +342,7 @@ pub async fn action_worker(
                         nics: vec![NicConfig {
                             tap: None,
                             mac: None,
+                            vhost_socket: None,
                         }],
                         user_data: user_data_content,
                         nested_virt: params.nested_virt,
@@ -466,17 +477,13 @@ pub async fn action_worker(
                     ActionResult::VolumeResized(Err("ZFS service not available".to_string()))
                 }
             }
-            Action::ImportVolume {
-                name,
-                source,
-                size_bytes,
-            } => {
+            Action::ImportVolume { name, source } => {
                 if let Some(ref mut client) = zfs_client {
                     match client
-                        .import_volume(ImportVolumeRequest {
+                        .import_template(ImportTemplateRequest {
                             name,
                             source,
-                            size_bytes,
+                            size_bytes: None,
                         })
                         .await
                     {
@@ -548,12 +555,17 @@ pub async fn action_worker(
                     ActionResult::SnapshotRolledBack(Err("ZFS service not available".to_string()))
                 }
             }
-            Action::CreateTemplate { volume, name } => {
+            Action::PromoteSnapshot {
+                volume,
+                snapshot,
+                template_name,
+            } => {
                 if let Some(ref mut client) = zfs_client {
                     match client
-                        .create_template(CreateTemplateRequest {
+                        .promote_snapshot_to_template(PromoteSnapshotRequest {
                             volume_name: volume,
-                            template_name: name,
+                            snapshot_name: snapshot,
+                            template_name,
                         })
                         .await
                     {
@@ -577,12 +589,14 @@ pub async fn action_worker(
             Action::CloneTemplate {
                 template,
                 new_volume,
+                size_bytes,
             } => {
                 if let Some(ref mut client) = zfs_client {
                     match client
                         .clone_from_template(CloneFromTemplateRequest {
                             template_name: template,
                             new_volume_name: new_volume,
+                            size_bytes,
                         })
                         .await
                     {
@@ -591,6 +605,138 @@ pub async fn action_worker(
                     }
                 } else {
                     ActionResult::VolumeCloned(Err("ZFS service not available".to_string()))
+                }
+            }
+
+            // === Log Actions ===
+            Action::RefreshLogs { limit } => {
+                if let Some(ref mut client) = log_client {
+                    match client
+                        .query(QueryRequest {
+                            object_id: None,
+                            start_time_ns: None,
+                            end_time_ns: None,
+                            limit,
+                            follow: false,
+                        })
+                        .await
+                    {
+                        Ok(response) => {
+                            let mut stream = response.into_inner();
+                            let mut logs = Vec::new();
+                            while let Some(result) = stream.next().await {
+                                match result {
+                                    Ok(entry) => logs.push(entry),
+                                    Err(e) => {
+                                        return result_tx
+                                            .send(ActionResult::LogsRefreshed(Err(e
+                                                .message()
+                                                .to_string())))
+                                            .ok()
+                                            .map(|_| ())
+                                            .unwrap_or(());
+                                    }
+                                }
+                            }
+                            // Sort by timestamp descending (newest first)
+                            logs.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+                            ActionResult::LogsRefreshed(Ok(logs))
+                        }
+                        Err(e) => ActionResult::LogsRefreshed(Err(e.message().to_string())),
+                    }
+                } else {
+                    ActionResult::LogsRefreshed(Err("Log service not available".to_string()))
+                }
+            }
+
+            // === Network Actions ===
+            Action::RefreshNetworks => {
+                if let Some(ref mut client) = net_client {
+                    match client.list_networks(ListNetworksRequest {}).await {
+                        Ok(response) => {
+                            ActionResult::NetworksRefreshed(Ok(response.into_inner().networks))
+                        }
+                        Err(e) => ActionResult::NetworksRefreshed(Err(e.message().to_string())),
+                    }
+                } else {
+                    ActionResult::NetworksRefreshed(
+                        Err("Network service not available".to_string()),
+                    )
+                }
+            }
+            Action::CreateNetwork {
+                name,
+                ipv4_subnet,
+                ipv6_prefix,
+            } => {
+                if let Some(ref mut client) = net_client {
+                    let req = CreateNetworkRequest {
+                        name,
+                        ipv4_enabled: ipv4_subnet.is_some(),
+                        ipv4_subnet: ipv4_subnet.unwrap_or_default(),
+                        ipv6_enabled: ipv6_prefix.is_some(),
+                        ipv6_prefix: ipv6_prefix.unwrap_or_default(),
+                        dns_servers: vec![],
+                        ntp_servers: vec![],
+                    };
+                    match client.create_network(req).await {
+                        Ok(response) => ActionResult::NetworkCreated(Ok(response.into_inner())),
+                        Err(e) => ActionResult::NetworkCreated(Err(e.message().to_string())),
+                    }
+                } else {
+                    ActionResult::NetworkCreated(Err("Network service not available".to_string()))
+                }
+            }
+            Action::DeleteNetwork { id } => {
+                if let Some(ref mut client) = net_client {
+                    match client
+                        .delete_network(DeleteNetworkRequest { id, force: false })
+                        .await
+                    {
+                        Ok(_) => ActionResult::NetworkDeleted(Ok(())),
+                        Err(e) => ActionResult::NetworkDeleted(Err(e.message().to_string())),
+                    }
+                } else {
+                    ActionResult::NetworkDeleted(Err("Network service not available".to_string()))
+                }
+            }
+            Action::LoadNics { network_id } => {
+                if let Some(ref mut client) = net_client {
+                    match client.list_nics(ListNicsRequest { network_id }).await {
+                        Ok(response) => ActionResult::NicsLoaded(Ok(response.into_inner().nics)),
+                        Err(e) => ActionResult::NicsLoaded(Err(e.message().to_string())),
+                    }
+                } else {
+                    ActionResult::NicsLoaded(Err("Network service not available".to_string()))
+                }
+            }
+            Action::CreateNic { network_id, name } => {
+                if let Some(ref mut client) = net_client {
+                    let req = CreateNicRequest {
+                        network_id,
+                        name: name.unwrap_or_default(),
+                        mac_address: String::new(),
+                        ipv4_address: String::new(),
+                        ipv6_address: String::new(),
+                        routed_ipv4_prefixes: vec![],
+                        routed_ipv6_prefixes: vec![],
+                    };
+                    match client.create_nic(req).await {
+                        Ok(response) => ActionResult::NicCreated(Ok(response.into_inner())),
+                        Err(e) => ActionResult::NicCreated(Err(e.message().to_string())),
+                    }
+                } else {
+                    ActionResult::NicCreated(Err("Network service not available".to_string()))
+                }
+            }
+            Action::DeleteNic { id } => {
+                if let Some(ref mut client) = net_client {
+                    match client.delete_nic(DeleteNicRequest { id }).await {
+                        Ok(_) => ActionResult::NicDeleted(Ok(())),
+                        Err(e) => ActionResult::NicDeleted(Err(e.message().to_string())),
+                    }
+                } else {
+                    ActionResult::NicDeleted(Err("Network service not available".to_string()))
                 }
             }
         };

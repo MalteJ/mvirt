@@ -5,6 +5,8 @@ use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
 
 use crate::proto::{SystemInfo, Vm, VmState};
+use crate::tui::modals::network_create::NetworkCreateModal;
+use crate::tui::modals::nic_create::NicCreateModal;
 use crate::tui::modals::ssh_keys::SshKeysModal;
 use crate::tui::modals::vm_create::CreateModal;
 use crate::tui::modals::volume_clone::VolumeCloneModal;
@@ -13,10 +15,14 @@ use crate::tui::modals::volume_import::VolumeImportModal;
 use crate::tui::modals::volume_resize::VolumeResizeModal;
 use crate::tui::modals::volume_snapshot::VolumeSnapshotModal;
 use crate::tui::modals::volume_template::VolumeTemplateModal;
-use crate::tui::types::{Action, ActionResult, StorageFocus, StorageState, UserDataMode, View};
+use crate::tui::types::{
+    Action, ActionResult, NetworkFocus, NetworkState, StorageFocus, StorageState, UserDataMode,
+    View,
+};
 use crate::tui::widgets::console::ConsoleSession;
 use crate::tui::widgets::file_picker::FilePicker;
 use crate::zfs_proto::{Template, Volume};
+use mvirt_log::LogEntry;
 
 pub struct App {
     // VM state
@@ -36,6 +42,13 @@ pub struct App {
     pub active_view: View,
     pub vm_available: bool,
     pub zfs_available: bool,
+    pub log_available: bool,
+    pub net_available: bool,
+
+    // Logs state
+    pub logs: Vec<LogEntry>,
+    pub logs_table_state: TableState,
+    pub log_detail_index: Option<usize>,
 
     // VM-specific state
     pub confirm_delete: Option<String>,
@@ -62,6 +75,18 @@ pub struct App {
     pub volume_snapshot_modal: Option<VolumeSnapshotModal>,
     pub volume_template_modal: Option<VolumeTemplateModal>,
     pub volume_clone_modal: Option<VolumeCloneModal>,
+
+    // Network state
+    pub network: NetworkState,
+    pub networks_table_state: TableState,
+    pub nics_table_state: TableState,
+    pub network_focus: NetworkFocus,
+    pub confirm_delete_network: Option<String>,
+    pub confirm_delete_nic: Option<String>,
+
+    // Network modals
+    pub network_create_modal: Option<NetworkCreateModal>,
+    pub nic_create_modal: Option<NicCreateModal>,
 }
 
 impl App {
@@ -70,6 +95,8 @@ impl App {
         result_rx: mpsc::UnboundedReceiver<ActionResult>,
         vm_available: bool,
         zfs_available: bool,
+        log_available: bool,
+        net_available: bool,
     ) -> Self {
         Self {
             // VM state
@@ -89,6 +116,13 @@ impl App {
             active_view: View::Vm,
             vm_available,
             zfs_available,
+            log_available,
+            net_available,
+
+            // Logs state
+            logs: Vec::new(),
+            logs_table_state: TableState::default(),
+            log_detail_index: None,
 
             // VM-specific state
             confirm_delete: None,
@@ -115,6 +149,18 @@ impl App {
             volume_snapshot_modal: None,
             volume_template_modal: None,
             volume_clone_modal: None,
+
+            // Network state
+            network: NetworkState::default(),
+            networks_table_state: TableState::default(),
+            nics_table_state: TableState::default(),
+            network_focus: NetworkFocus::Networks,
+            confirm_delete_network: None,
+            confirm_delete_nic: None,
+
+            // Network modals
+            network_create_modal: None,
+            nic_create_modal: None,
         }
     }
 
@@ -308,6 +354,86 @@ impl App {
                 self.refresh_storage();
             }
             ActionResult::VolumeCloned(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+
+            // Log results
+            ActionResult::LogsRefreshed(Ok(logs)) => {
+                self.logs = logs;
+                self.status_message = None;
+                self.last_refresh = Some(Local::now());
+                if self.logs.is_empty() {
+                    self.logs_table_state.select(None);
+                } else if self.logs_table_state.selected().is_none() {
+                    self.logs_table_state.select(Some(0));
+                }
+            }
+            ActionResult::LogsRefreshed(Err(e)) => {
+                self.status_message = Some(format!("Log error: {}", e));
+            }
+
+            // Network results
+            ActionResult::NetworksRefreshed(Ok(networks)) => {
+                self.network.networks = networks;
+                self.status_message = None;
+                self.last_refresh = Some(Local::now());
+                if self.network.networks.is_empty() {
+                    self.networks_table_state.select(None);
+                } else if self.networks_table_state.selected().is_none() {
+                    self.networks_table_state.select(Some(0));
+                }
+            }
+            ActionResult::NetworksRefreshed(Err(e)) => {
+                self.status_message = Some(format!("Network error: {}", e));
+            }
+            ActionResult::NetworkCreated(Ok(net)) => {
+                self.status_message = Some(format!("Network {} created", net.name));
+                self.refresh_networks();
+            }
+            ActionResult::NetworkCreated(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::NetworkDeleted(Ok(())) => {
+                self.status_message = Some("Network deleted".to_string());
+                self.refresh_networks();
+            }
+            ActionResult::NetworkDeleted(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::NicsLoaded(Ok(nics)) => {
+                self.network.nics = nics;
+                self.last_refresh = Some(Local::now());
+                if self.network.nics.is_empty() {
+                    self.nics_table_state.select(None);
+                } else if self.nics_table_state.selected().is_none() {
+                    self.nics_table_state.select(Some(0));
+                }
+            }
+            ActionResult::NicsLoaded(Err(e)) => {
+                self.status_message = Some(format!("Error loading NICs: {}", e));
+            }
+            ActionResult::NicCreated(Ok(nic)) => {
+                let name = if nic.name.is_empty() {
+                    &nic.id[..8]
+                } else {
+                    &nic.name
+                };
+                self.status_message = Some(format!("NIC {} created", name));
+                // Reload NICs for the selected network
+                if let Some(ref net_id) = self.network.selected_network_id {
+                    self.load_nics(net_id.clone());
+                }
+            }
+            ActionResult::NicCreated(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::NicDeleted(Ok(())) => {
+                self.status_message = Some("NIC deleted".to_string());
+                if let Some(ref net_id) = self.network.selected_network_id {
+                    self.load_nics(net_id.clone());
+                }
+            }
+            ActionResult::NicDeleted(Err(e)) => {
                 self.status_message = Some(format!("Error: {}", e));
             }
         }
@@ -544,29 +670,51 @@ impl App {
     // === View Navigation ===
 
     pub fn toggle_view(&mut self) {
-        if !self.zfs_available {
-            self.status_message =
-                Some("Storage not available (mvirt-zfs not connected)".to_string());
-            return;
-        }
         self.active_view = match self.active_view {
-            View::Vm => View::Storage,
-            View::Storage => View::Vm,
+            View::Vm => {
+                if self.zfs_available {
+                    View::Storage
+                } else if self.log_available {
+                    View::Logs
+                } else if self.net_available {
+                    View::Network
+                } else {
+                    View::Vm
+                }
+            }
+            View::Storage => {
+                if self.log_available {
+                    View::Logs
+                } else if self.net_available {
+                    View::Network
+                } else {
+                    View::Vm
+                }
+            }
+            View::Logs => {
+                if self.net_available {
+                    View::Network
+                } else {
+                    View::Vm
+                }
+            }
+            View::Network => View::Vm,
         };
-        if self.active_view == View::Storage {
-            self.refresh_storage();
+        match self.active_view {
+            View::Storage => self.refresh_storage(),
+            View::Logs => self.refresh_logs(),
+            View::Network => self.refresh_networks(),
+            View::Vm => {}
         }
     }
 
     pub fn set_view(&mut self, view: View) {
-        if view == View::Storage && !self.zfs_available {
-            self.status_message =
-                Some("Storage not available (mvirt-zfs not connected)".to_string());
-            return;
-        }
         self.active_view = view;
-        if view == View::Storage {
-            self.refresh_storage();
+        match view {
+            View::Storage => self.refresh_storage(),
+            View::Logs => self.refresh_logs(),
+            View::Network => self.refresh_networks(),
+            View::Vm => {}
         }
     }
 
@@ -747,13 +895,9 @@ impl App {
     pub fn submit_volume_import(&mut self) {
         if let Some(modal) = &self.volume_import_modal {
             match modal.validate() {
-                Ok((name, source, size_bytes)) => {
-                    self.status_message = Some(format!("Importing volume {}...", name));
-                    self.send_action(Action::ImportVolume {
-                        name,
-                        source,
-                        size_bytes,
-                    });
+                Ok((name, source)) => {
+                    self.status_message = Some(format!("Importing template {}...", name));
+                    self.send_action(Action::ImportVolume { name, source });
                     self.volume_import_modal = None;
                 }
                 Err(e) => {
@@ -822,10 +966,11 @@ impl App {
         }
     }
 
-    // Volume Template Modal
+    // Volume Template Modal (Promote Snapshot to Template)
     pub fn open_volume_template_modal(&mut self) {
         if let Some(vol) = self.selected_volume() {
-            self.volume_template_modal = Some(VolumeTemplateModal::new(vol.name.clone()));
+            self.volume_template_modal =
+                Some(VolumeTemplateModal::new_for_volume(vol.name.clone()));
         }
     }
 
@@ -836,15 +981,16 @@ impl App {
     pub fn submit_volume_template(&mut self) {
         if let Some(modal) = &self.volume_template_modal {
             match modal.validate() {
-                Ok(template_name) => {
+                Ok((snapshot_name, template_name)) => {
                     let volume = modal.volume_name.clone();
                     self.status_message = Some(format!(
-                        "Creating template {} from {}...",
-                        template_name, volume
+                        "Promoting snapshot {}@{} to template {}...",
+                        volume, snapshot_name, template_name
                     ));
-                    self.send_action(Action::CreateTemplate {
+                    self.send_action(Action::PromoteSnapshot {
                         volume,
-                        name: template_name,
+                        snapshot: snapshot_name,
+                        template_name,
                     });
                     self.volume_template_modal = None;
                 }
@@ -869,7 +1015,7 @@ impl App {
     pub fn submit_volume_clone(&mut self) {
         if let Some(modal) = &self.volume_clone_modal {
             match modal.validate() {
-                Ok(new_volume) => {
+                Ok((new_volume, size_bytes)) => {
                     let template = modal.template_name.clone();
                     self.status_message = Some(format!(
                         "Cloning {} from template {}...",
@@ -878,6 +1024,7 @@ impl App {
                     self.send_action(Action::CloneTemplate {
                         template,
                         new_volume,
+                        size_bytes,
                     });
                     self.volume_clone_modal = None;
                 }
@@ -897,5 +1044,303 @@ impl App {
             || self.volume_snapshot_modal.is_some()
             || self.volume_template_modal.is_some()
             || self.volume_clone_modal.is_some()
+    }
+
+    // === Logs Methods ===
+
+    pub fn refresh_logs(&mut self) {
+        if self.log_available {
+            let _ = self.action_tx.send(Action::RefreshLogs { limit: 100 });
+        }
+    }
+
+    pub fn logs_next(&mut self) {
+        if self.logs.is_empty() {
+            return;
+        }
+        let i = match self.logs_table_state.selected() {
+            Some(i) => {
+                if i >= self.logs.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.logs_table_state.select(Some(i));
+    }
+
+    pub fn logs_previous(&mut self) {
+        if self.logs.is_empty() {
+            return;
+        }
+        let i = match self.logs_table_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.logs.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.logs_table_state.select(Some(i));
+    }
+
+    #[allow(dead_code)]
+    pub fn selected_log(&self) -> Option<&LogEntry> {
+        self.logs_table_state
+            .selected()
+            .and_then(|i| self.logs.get(i))
+    }
+
+    pub fn open_log_detail(&mut self) {
+        if let Some(idx) = self.logs_table_state.selected() {
+            self.log_detail_index = Some(idx);
+        }
+    }
+
+    pub fn close_log_detail(&mut self) {
+        self.log_detail_index = None;
+    }
+
+    // === Network Methods ===
+
+    pub fn refresh_networks(&mut self) {
+        if self.net_available {
+            let _ = self.action_tx.send(Action::RefreshNetworks);
+        }
+    }
+
+    pub fn load_nics(&mut self, network_id: String) {
+        if self.net_available {
+            let _ = self.action_tx.send(Action::LoadNics { network_id });
+        }
+    }
+
+    pub fn toggle_network_focus(&mut self) {
+        self.network_focus = match self.network_focus {
+            NetworkFocus::Networks => NetworkFocus::Nics,
+            NetworkFocus::Nics => NetworkFocus::Networks,
+        };
+    }
+
+    pub fn network_next(&mut self) {
+        match self.network_focus {
+            NetworkFocus::Networks => {
+                if self.network.networks.is_empty() {
+                    return;
+                }
+                let i = match self.networks_table_state.selected() {
+                    Some(i) => {
+                        if i >= self.network.networks.len() - 1 {
+                            0
+                        } else {
+                            i + 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.networks_table_state.select(Some(i));
+            }
+            NetworkFocus::Nics => {
+                if self.network.nics.is_empty() {
+                    return;
+                }
+                let i = match self.nics_table_state.selected() {
+                    Some(i) => {
+                        if i >= self.network.nics.len() - 1 {
+                            0
+                        } else {
+                            i + 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.nics_table_state.select(Some(i));
+            }
+        }
+    }
+
+    pub fn network_previous(&mut self) {
+        match self.network_focus {
+            NetworkFocus::Networks => {
+                if self.network.networks.is_empty() {
+                    return;
+                }
+                let i = match self.networks_table_state.selected() {
+                    Some(i) => {
+                        if i == 0 {
+                            self.network.networks.len() - 1
+                        } else {
+                            i - 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.networks_table_state.select(Some(i));
+            }
+            NetworkFocus::Nics => {
+                if self.network.nics.is_empty() {
+                    return;
+                }
+                let i = match self.nics_table_state.selected() {
+                    Some(i) => {
+                        if i == 0 {
+                            self.network.nics.len() - 1
+                        } else {
+                            i - 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.nics_table_state.select(Some(i));
+            }
+        }
+    }
+
+    pub fn select_network(&mut self) {
+        if let Some(idx) = self.networks_table_state.selected()
+            && let Some(net) = self.network.networks.get(idx)
+        {
+            self.network.selected_network_id = Some(net.id.clone());
+            self.load_nics(net.id.clone());
+            self.network_focus = NetworkFocus::Nics;
+        }
+    }
+
+    pub fn selected_network_name(&self) -> Option<&str> {
+        self.networks_table_state
+            .selected()
+            .and_then(|i| self.network.networks.get(i))
+            .map(|n| n.name.as_str())
+    }
+
+    pub fn selected_network_id(&self) -> Option<&str> {
+        self.networks_table_state
+            .selected()
+            .and_then(|i| self.network.networks.get(i))
+            .map(|n| n.id.as_str())
+    }
+
+    pub fn selected_nic_id(&self) -> Option<&str> {
+        self.nics_table_state
+            .selected()
+            .and_then(|i| self.network.nics.get(i))
+            .map(|n| n.id.as_str())
+    }
+
+    pub fn selected_nic_name(&self) -> Option<String> {
+        self.nics_table_state
+            .selected()
+            .and_then(|i| self.network.nics.get(i))
+            .map(|n| {
+                if n.name.is_empty() {
+                    n.id[..8].to_string()
+                } else {
+                    n.name.clone()
+                }
+            })
+    }
+
+    // Network delete confirmations
+    pub fn delete_selected_network(&mut self) {
+        if let Some(name) = self.selected_network_name() {
+            self.confirm_delete_network = Some(name.to_string());
+        }
+    }
+
+    pub fn confirm_delete_network(&mut self) {
+        if let Some(_name) = self.confirm_delete_network.take() {
+            let id = self.selected_network_id().map(|s| s.to_string());
+            if let Some(id) = id {
+                self.status_message = Some("Deleting network...".to_string());
+                self.send_action(Action::DeleteNetwork { id });
+            }
+        }
+    }
+
+    pub fn cancel_delete_network(&mut self) {
+        self.confirm_delete_network = None;
+    }
+
+    pub fn delete_selected_nic(&mut self) {
+        if let Some(name) = self.selected_nic_name() {
+            self.confirm_delete_nic = Some(name);
+        }
+    }
+
+    pub fn confirm_delete_nic(&mut self) {
+        if let Some(_name) = self.confirm_delete_nic.take() {
+            let id = self.selected_nic_id().map(|s| s.to_string());
+            if let Some(id) = id {
+                self.status_message = Some("Deleting NIC...".to_string());
+                self.send_action(Action::DeleteNic { id });
+            }
+        }
+    }
+
+    pub fn cancel_delete_nic(&mut self) {
+        self.confirm_delete_nic = None;
+    }
+
+    // Network modals
+    pub fn open_network_create_modal(&mut self) {
+        self.network_create_modal = Some(NetworkCreateModal::new());
+    }
+
+    pub fn close_network_create_modal(&mut self) {
+        self.network_create_modal = None;
+    }
+
+    pub fn submit_network_create(&mut self) {
+        if let Some(modal) = &self.network_create_modal {
+            match modal.validate() {
+                Ok((name, ipv4_subnet, ipv6_prefix)) => {
+                    self.status_message = Some(format!("Creating network {}...", name));
+                    self.send_action(Action::CreateNetwork {
+                        name,
+                        ipv4_subnet,
+                        ipv6_prefix,
+                    });
+                    self.network_create_modal = None;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    pub fn open_nic_create_modal(&mut self) {
+        if let Some(net) = self
+            .networks_table_state
+            .selected()
+            .and_then(|i| self.network.networks.get(i))
+        {
+            self.nic_create_modal = Some(NicCreateModal::new(net.id.clone(), net.name.clone()));
+        } else {
+            self.status_message = Some("Select a network first".to_string());
+        }
+    }
+
+    pub fn close_nic_create_modal(&mut self) {
+        self.nic_create_modal = None;
+    }
+
+    pub fn submit_nic_create(&mut self) {
+        if let Some(modal) = &self.nic_create_modal {
+            match modal.validate() {
+                Ok((network_id, name)) => {
+                    self.status_message = Some("Creating NIC...".to_string());
+                    self.send_action(Action::CreateNic { network_id, name });
+                    self.nic_create_modal = None;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
     }
 }

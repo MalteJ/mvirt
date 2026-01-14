@@ -1,4 +1,4 @@
-//! Modal for creating a template from a volume
+//! Modal for promoting a snapshot to a template
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -6,23 +6,36 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 #[derive(Default)]
 pub struct VolumeTemplateModal {
     pub volume_name: String,
+    pub snapshot_name: String,
     pub template_name: String,
     pub focused_field: usize,
 }
 
 impl VolumeTemplateModal {
-    pub fn new(volume_name: String) -> Self {
-        // Default template name based on volume name
-        let template_name = format!("{}-template", volume_name);
+    #[allow(dead_code)]
+    pub fn new(volume_name: String, snapshot_name: String) -> Self {
+        // Default template name based on snapshot name
+        let template_name = format!("{}-template", snapshot_name);
         Self {
             volume_name,
+            snapshot_name,
             template_name,
             focused_field: 0,
         }
     }
 
+    /// Create modal with snapshot name to be entered by user
+    pub fn new_for_volume(volume_name: String) -> Self {
+        Self {
+            volume_name,
+            snapshot_name: String::new(),
+            template_name: String::new(),
+            focused_field: 0,
+        }
+    }
+
     pub fn field_count() -> usize {
-        2 // name, submit
+        3 // snapshot name, template name, submit
     }
 
     pub fn focus_next(&mut self) {
@@ -39,20 +52,29 @@ impl VolumeTemplateModal {
 
     pub fn current_input(&mut self) -> Option<&mut String> {
         match self.focused_field {
-            0 => Some(&mut self.template_name),
+            0 => Some(&mut self.snapshot_name),
+            1 => Some(&mut self.template_name),
             _ => None,
         }
     }
 
-    pub fn is_name_field(&self) -> bool {
+    #[allow(dead_code)]
+    pub fn is_snapshot_field(&self) -> bool {
         self.focused_field == 0
     }
 
-    pub fn is_submit_field(&self) -> bool {
+    pub fn is_name_field(&self) -> bool {
         self.focused_field == 1
     }
 
-    pub fn validate(&self) -> Result<String, String> {
+    pub fn is_submit_field(&self) -> bool {
+        self.focused_field == 2
+    }
+
+    pub fn validate(&self) -> Result<(String, String), String> {
+        if self.snapshot_name.is_empty() {
+            return Err("Snapshot name is required".to_string());
+        }
         if self.template_name.is_empty() {
             return Err("Template name is required".to_string());
         }
@@ -63,16 +85,19 @@ impl VolumeTemplateModal {
         {
             return Err("Name must be alphanumeric with - or _".to_string());
         }
-        Ok(self.template_name.clone())
+        Ok((self.snapshot_name.clone(), self.template_name.clone()))
     }
 }
 
 pub fn draw(frame: &mut Frame, modal: &VolumeTemplateModal) {
-    let area = centered_rect(50, 10, frame.area());
+    let area = centered_rect(55, 14, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(format!(" Create Template from: {} ", modal.volume_name))
+        .title(format!(
+            " Promote Snapshot to Template: {} ",
+            modal.volume_name
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     frame.render_widget(block.clone(), area);
@@ -82,13 +107,31 @@ pub fn draw(frame: &mut Frame, modal: &VolumeTemplateModal) {
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
-            Constraint::Length(2), // Name
+            Constraint::Length(2), // Snapshot name
+            Constraint::Length(2), // Template name
             Constraint::Length(2), // Submit
         ])
         .split(inner);
 
-    // Name field
-    let name_style = if modal.focused_field == 0 {
+    // Snapshot name field
+    let snap_style = if modal.focused_field == 0 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let snap_line = Line::from(vec![
+        Span::styled(" Snapshot Name: ", Style::default().fg(Color::Cyan)),
+        Span::styled(&modal.snapshot_name, snap_style),
+        if modal.focused_field == 0 {
+            Span::styled("_", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
+    ]);
+    frame.render_widget(Paragraph::new(snap_line), chunks[0]);
+
+    // Template name field
+    let name_style = if modal.focused_field == 1 {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::White)
@@ -96,24 +139,24 @@ pub fn draw(frame: &mut Frame, modal: &VolumeTemplateModal) {
     let name_line = Line::from(vec![
         Span::styled(" Template Name: ", Style::default().fg(Color::Cyan)),
         Span::styled(&modal.template_name, name_style),
-        if modal.focused_field == 0 {
+        if modal.focused_field == 1 {
             Span::styled("_", Style::default().fg(Color::Yellow))
         } else {
             Span::raw("")
         },
     ]);
-    frame.render_widget(Paragraph::new(name_line), chunks[0]);
+    frame.render_widget(Paragraph::new(name_line), chunks[1]);
 
     // Submit button
-    let submit_style = if modal.focused_field == 1 {
+    let submit_style = if modal.focused_field == 2 {
         Style::default().fg(Color::Black).bg(Color::Cyan)
     } else {
         Style::default().fg(Color::Cyan)
     };
     frame.render_widget(
-        Paragraph::new(Span::styled(" [ Create Template ] ", submit_style))
+        Paragraph::new(Span::styled(" [ Promote to Template ] ", submit_style))
             .alignment(Alignment::Center),
-        chunks[1],
+        chunks[2],
     );
 }
 

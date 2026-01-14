@@ -10,8 +10,10 @@ use ratatui::prelude::*;
 use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
+use crate::net_proto::net_service_client::NetServiceClient;
 use crate::proto::vm_service_client::VmServiceClient;
 use crate::zfs_proto::zfs_service_client::ZfsServiceClient;
+use mvirt_log::LogServiceClient;
 
 mod app;
 pub mod modals;
@@ -21,7 +23,7 @@ pub mod widgets;
 mod worker;
 
 use app::App;
-use types::{Action, StorageFocus, View};
+use types::{Action, NetworkFocus, StorageFocus, View};
 
 fn draw(frame: &mut Frame, app: &mut App) {
     // Draw base view based on active view
@@ -36,7 +38,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 app.confirm_delete.as_deref(),
                 app.confirm_kill.as_deref(),
                 app.last_refresh,
-                app.zfs_available,
             );
         }
         View::Storage => {
@@ -49,6 +50,28 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 app.status_message.as_deref(),
                 app.confirm_delete_volume.as_deref(),
                 app.confirm_delete_template.as_deref(),
+                app.last_refresh,
+            );
+        }
+        View::Logs => {
+            views::logs::draw(
+                frame,
+                &app.logs,
+                &mut app.logs_table_state,
+                app.status_message.as_deref(),
+                app.last_refresh,
+            );
+        }
+        View::Network => {
+            views::network::draw(
+                frame,
+                &app.network,
+                &mut app.networks_table_state,
+                &mut app.nics_table_state,
+                app.network_focus,
+                app.status_message.as_deref(),
+                app.confirm_delete_network.as_deref(),
+                app.confirm_delete_nic.as_deref(),
                 app.last_refresh,
             );
         }
@@ -96,6 +119,21 @@ fn draw(frame: &mut Frame, app: &mut App) {
         modals::volume_clone::draw(frame, modal);
     }
 
+    // Network modals
+    if let Some(modal) = &app.network_create_modal {
+        modals::network_create::draw(frame, modal);
+    }
+    if let Some(modal) = &app.nic_create_modal {
+        modals::nic_create::draw(frame, modal);
+    }
+
+    // Log detail modal
+    if let Some(idx) = app.log_detail_index
+        && let Some(entry) = app.logs.get(idx)
+    {
+        modals::log_detail::draw(frame, entry);
+    }
+
     // Console takes over the whole screen
     if let Some(ref mut session) = app.console_session {
         widgets::console::draw(frame, session);
@@ -105,14 +143,18 @@ fn draw(frame: &mut Frame, app: &mut App) {
 pub async fn run(
     vm_client: Option<VmServiceClient<Channel>>,
     zfs_client: Option<ZfsServiceClient<Channel>>,
+    log_client: Option<LogServiceClient<Channel>>,
+    net_client: Option<NetServiceClient<Channel>>,
 ) -> io::Result<()> {
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let (result_tx, result_rx) = mpsc::unbounded_channel();
 
     let vm_available = vm_client.is_some();
     let zfs_available = zfs_client.is_some();
+    let log_available = log_client.is_some();
+    let net_available = net_client.is_some();
     tokio::spawn(worker::action_worker(
-        vm_client, zfs_client, action_rx, result_tx,
+        vm_client, zfs_client, log_client, net_client, action_rx, result_tx,
     ));
 
     enable_raw_mode()?;
@@ -123,7 +165,14 @@ pub async fn run(
     terminal.draw(views::splash::draw)?;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let mut app = App::new(action_tx, result_rx, vm_available, zfs_available);
+    let mut app = App::new(
+        action_tx,
+        result_rx,
+        vm_available,
+        zfs_available,
+        log_available,
+        net_available,
+    );
     if !vm_available {
         app.status_message = Some("Not connected to mvirt-vmm".to_string());
     }
@@ -151,6 +200,16 @@ pub async fn run(
                 View::Storage => {
                     if app.zfs_available {
                         app.send_action(Action::RefreshStorage);
+                    }
+                }
+                View::Logs => {
+                    if app.log_available {
+                        app.send_action(Action::RefreshLogs { limit: 100 });
+                    }
+                }
+                View::Network => {
+                    if app.net_available {
+                        app.send_action(Action::RefreshNetworks);
                     }
                 }
             }
@@ -203,6 +262,16 @@ pub async fn run(
                 handle_volume_template_modal_input(&mut app, key.code);
             } else if app.volume_clone_modal.is_some() {
                 handle_volume_clone_modal_input(&mut app, key.code);
+            } else if app.network_create_modal.is_some() {
+                handle_network_create_modal_input(&mut app, key.code);
+            } else if app.nic_create_modal.is_some() {
+                handle_nic_create_modal_input(&mut app, key.code);
+            } else if app.confirm_delete_network.is_some() {
+                handle_confirm_delete_network(&mut app, key.code);
+            } else if app.confirm_delete_nic.is_some() {
+                handle_confirm_delete_nic(&mut app, key.code);
+            } else if app.log_detail_index.is_some() {
+                handle_log_detail_input(&mut app, key.code);
             } else {
                 handle_normal_input(&mut app, key.code);
             }
@@ -394,7 +463,7 @@ fn handle_confirm_delete_input(app: &mut App, key_code: KeyCode) {
 }
 
 fn handle_normal_input(app: &mut App, key_code: KeyCode) {
-    // Global keys (both views)
+    // Global keys (all views)
     match key_code {
         KeyCode::Char('q') => {
             app.should_quit = true;
@@ -412,6 +481,14 @@ fn handle_normal_input(app: &mut App, key_code: KeyCode) {
             app.set_view(View::Storage);
             return;
         }
+        KeyCode::Char('3') => {
+            app.set_view(View::Logs);
+            return;
+        }
+        KeyCode::Char('4') => {
+            app.set_view(View::Network);
+            return;
+        }
         _ => {}
     }
 
@@ -419,6 +496,8 @@ fn handle_normal_input(app: &mut App, key_code: KeyCode) {
     match app.active_view {
         View::Vm => handle_vm_input(app, key_code),
         View::Storage => handle_storage_input(app, key_code),
+        View::Logs => handle_logs_input(app, key_code),
+        View::Network => handle_network_input(app, key_code),
     }
 }
 
@@ -468,6 +547,23 @@ fn handle_storage_input(app: &mut App, key_code: KeyCode) {
                 app.open_volume_clone_modal();
             }
         }
+        _ => {}
+    }
+}
+
+fn handle_logs_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Down => app.logs_next(),
+        KeyCode::Up => app.logs_previous(),
+        KeyCode::Enter => app.open_log_detail(),
+        KeyCode::Char('r') => app.refresh_logs(),
+        _ => {}
+    }
+}
+
+fn handle_log_detail_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc | KeyCode::Enter => app.close_log_detail(),
         _ => {}
     }
 }
@@ -764,6 +860,141 @@ fn handle_volume_clone_modal_input(app: &mut App, key_code: KeyCode) {
                 input.push(c);
             }
         }
+        _ => {}
+    }
+}
+
+// === Network Input Handlers ===
+
+fn handle_network_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Down => app.network_next(),
+        KeyCode::Up => app.network_previous(),
+        KeyCode::Tab | KeyCode::BackTab => app.toggle_network_focus(),
+        KeyCode::Enter => {
+            if app.network_focus == NetworkFocus::Networks {
+                app.select_network();
+            }
+        }
+        KeyCode::Char('n') => {
+            if app.network_focus == NetworkFocus::Networks {
+                app.open_network_create_modal();
+            }
+        }
+        KeyCode::Char('c') => {
+            if app.network_focus == NetworkFocus::Nics {
+                app.open_nic_create_modal();
+            }
+        }
+        KeyCode::Char('d') => match app.network_focus {
+            NetworkFocus::Networks => app.delete_selected_network(),
+            NetworkFocus::Nics => app.delete_selected_nic(),
+        },
+        KeyCode::Char('r') => app.refresh_networks(),
+        _ => {}
+    }
+}
+
+fn handle_network_create_modal_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc => app.close_network_create_modal(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Some(modal) = &mut app.network_create_modal {
+                modal.focus_next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Some(modal) = &mut app.network_create_modal {
+                modal.focus_prev();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(modal) = &app.network_create_modal {
+                if modal.is_submit_field() {
+                    app.submit_network_create();
+                } else if let Some(modal) = &mut app.network_create_modal {
+                    modal.focus_next();
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(modal) = &mut app.network_create_modal
+                && let Some(input) = modal.current_input()
+            {
+                input.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(modal) = &mut app.network_create_modal {
+                if modal.is_name_field()
+                    && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && let Some(input) = modal.current_input()
+                {
+                    input.push(c);
+                } else if let Some(input) = modal.current_input() {
+                    // IPv4/IPv6 fields accept more characters
+                    input.push(c);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_nic_create_modal_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc => app.close_nic_create_modal(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Some(modal) = &mut app.nic_create_modal {
+                modal.focus_next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Some(modal) = &mut app.nic_create_modal {
+                modal.focus_prev();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(modal) = &app.nic_create_modal {
+                if modal.is_submit_field() {
+                    app.submit_nic_create();
+                } else if let Some(modal) = &mut app.nic_create_modal {
+                    modal.focus_next();
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(modal) = &mut app.nic_create_modal
+                && let Some(input) = modal.current_input()
+            {
+                input.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(modal) = &mut app.nic_create_modal
+                && modal.is_name_field()
+                && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                && let Some(input) = modal.current_input()
+            {
+                input.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_confirm_delete_network(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_network(),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_delete_network(),
+        _ => {}
+    }
+}
+
+fn handle_confirm_delete_nic(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_nic(),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_delete_nic(),
         _ => {}
     }
 }
