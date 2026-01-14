@@ -264,7 +264,12 @@ ethernets:
             }
         }
 
-        cmd.arg("--cpus").arg(format!("boot={}", config.vcpus));
+        let cpus_arg = if config.nested_virt {
+            format!("boot={},nested=on", config.vcpus)
+        } else {
+            format!("boot={}", config.vcpus)
+        };
+        cmd.arg("--cpus").arg(cpus_arg);
 
         cmd.arg("--memory")
             .arg(format!("size={}M", config.memory_mb));

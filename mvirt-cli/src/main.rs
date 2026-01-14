@@ -65,6 +65,10 @@ enum Commands {
         /// Path to cloud-init user-data file
         #[arg(long)]
         user_data: Option<std::path::PathBuf>,
+
+        /// Enable nested virtualization
+        #[arg(long)]
+        nested_virt: bool,
     },
 
     /// List all VMs
@@ -295,6 +299,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cmdline,
             disk,
             user_data,
+            nested_virt,
         } => {
             // Parse boot mode
             let boot_mode = match boot.to_lowercase().as_str() {
@@ -348,6 +353,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     disks,
                     nics: vec![],
                     user_data: user_data_content,
+                    nested_virt,
                 }),
             };
 

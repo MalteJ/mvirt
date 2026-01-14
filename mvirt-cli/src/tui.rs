@@ -43,6 +43,7 @@ pub(crate) struct CreateVmParams {
     pub disk: String,
     pub vcpus: u32,
     pub memory_mb: u64,
+    pub nested_virt: bool,
     pub user_data_mode: UserDataMode,
     pub user_data_file: Option<String>,
     pub ssh_keys_config: Option<SshKeysConfig>,
@@ -311,10 +312,11 @@ struct CreateModal {
     disk: String,
     vcpus: String,
     memory_mb: String,
+    nested_virt: bool,
     user_data_mode: UserDataMode,
     user_data_file: String,
     ssh_keys_config: Option<SshKeysConfig>,
-    focused_field: usize, // 0=name, 1=boot_mode, 2=kernel, 3=initramfs, 4=cmdline, 5=disk, 6=vcpus, 7=memory, 8=user_data_mode, 9=submit
+    focused_field: usize, // 0=name, 1=boot_mode, 2=kernel, 3=initramfs, 4=cmdline, 5=disk, 6=vcpus, 7=memory, 8=nested_virt, 9=user_data_mode, 10=submit
 }
 
 impl CreateModal {
@@ -329,7 +331,7 @@ impl CreateModal {
     }
 
     fn field_count() -> usize {
-        10 // name, boot_mode, kernel, initramfs, cmdline, disk, vcpus, memory, user_data_mode, submit
+        11 // name, boot_mode, kernel, initramfs, cmdline, disk, vcpus, memory, nested_virt, user_data_mode, submit
     }
 
     fn focus_next(&mut self) {
@@ -373,7 +375,8 @@ impl CreateModal {
             5 => Some(&mut self.disk),
             6 => Some(&mut self.vcpus),
             7 => Some(&mut self.memory_mb),
-            // 8 is user_data_mode toggle, not text input
+            // 8 is nested_virt toggle, not text input
+            // 9 is user_data_mode toggle, not text input
             _ => None,
         }
     }
@@ -396,8 +399,16 @@ impl CreateModal {
         }
     }
 
-    fn is_user_data_mode_field(&self) -> bool {
+    fn is_nested_virt_field(&self) -> bool {
         self.focused_field == 8
+    }
+
+    fn toggle_nested_virt(&mut self) {
+        self.nested_virt = !self.nested_virt;
+    }
+
+    fn is_user_data_mode_field(&self) -> bool {
+        self.focused_field == 9
     }
 
     fn cycle_user_data_mode(&mut self) {
@@ -468,9 +479,6 @@ impl CreateModal {
                 if self.kernel.is_empty() {
                     return Err("Kernel path is required for kernel boot");
                 }
-                if self.disk.is_empty() {
-                    return Err("Disk path is required");
-                }
             }
         }
 
@@ -522,6 +530,7 @@ impl CreateModal {
             disk: self.disk.clone(),
             vcpus,
             memory_mb,
+            nested_virt: self.nested_virt,
             user_data_mode: self.user_data_mode,
             user_data_file: if self.user_data_file.is_empty() {
                 None
@@ -1296,9 +1305,9 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
 
     // Dynamic height based on boot mode (+1 for top padding)
     let field_count = if modal.boot_mode == CreateBootMode::Kernel {
-        10
+        11
     } else {
-        7
+        8
     };
     let modal_height = ((field_count * 2) + 3).min(area.height.saturating_sub(4) as usize) as u16;
 
@@ -1345,6 +1354,7 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
             Constraint::Length(2), // Disk
             Constraint::Length(2), // VCPUs
             Constraint::Length(2), // Memory
+            Constraint::Length(2), // Nested Virt
             Constraint::Length(2), // User-Data
             Constraint::Length(2), // Submit
         ]
@@ -1356,6 +1366,7 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
             Constraint::Length(2), // Disk
             Constraint::Length(2), // VCPUs
             Constraint::Length(2), // Memory
+            Constraint::Length(2), // Nested Virt
             Constraint::Length(2), // User-Data
             Constraint::Length(2), // Submit
         ]
@@ -1493,8 +1504,42 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
         "MB",
     );
     row += 1;
+
+    // Nested Virtualization toggle
+    let nested_focused = modal.focused_field == 8;
+    let nested_str = if modal.nested_virt {
+        "[x] Enabled"
+    } else {
+        "[ ] Disabled"
+    };
+    let nested_line = Line::from(vec![
+        Span::styled(
+            " Nested Virt:",
+            if nested_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            nested_str,
+            if nested_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+        if nested_focused {
+            Span::styled(" [Space: toggle]", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
+    ]);
+    frame.render_widget(Paragraph::new(nested_line), field_chunks[row]);
+    row += 1;
+
     // User-Data mode (toggle with Space, Enter to configure)
-    let user_data_focused = modal.focused_field == 8;
+    let user_data_focused = modal.focused_field == 9;
     let (user_data_mode_str, user_data_value, user_data_hint) = match modal.user_data_mode {
         UserDataMode::None => ("None", "".to_string(), "[Space: cycle]"),
         UserDataMode::SshKeys => {
@@ -1559,7 +1604,7 @@ fn draw_create_modal(frame: &mut Frame, modal: &CreateModal) {
     row += 1;
 
     // Submit button
-    let submit_style = if modal.focused_field == 9 {
+    let submit_style = if modal.focused_field == 10 {
         Style::default().fg(Color::Black).bg(Color::Green).bold()
     } else {
         Style::default().fg(Color::Green)
@@ -2367,6 +2412,14 @@ async fn action_worker(
                     }
                 };
 
+                let disks = if params.disk.is_empty() {
+                    vec![]
+                } else {
+                    vec![DiskConfig {
+                        path: params.disk,
+                        readonly: false,
+                    }]
+                };
                 let config = VmConfig {
                     vcpus: params.vcpus,
                     memory_mb: params.memory_mb,
@@ -2374,15 +2427,13 @@ async fn action_worker(
                     kernel: params.kernel,
                     initramfs: params.initramfs,
                     cmdline: params.cmdline,
-                    disks: vec![DiskConfig {
-                        path: params.disk,
-                        readonly: false,
-                    }],
+                    disks,
                     nics: vec![NicConfig {
                         tap: None,
                         mac: None,
                     }],
                     user_data: user_data_content,
+                    nested_virt: params.nested_virt,
                 };
                 match client
                     .create_vm(CreateVmRequest {
@@ -2599,7 +2650,7 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                     }
                     KeyCode::Enter => {
                         if let Some(modal) = &app.create_modal {
-                            if modal.focused_field == 9 {
+                            if modal.focused_field == 10 {
                                 // Submit button focused
                                 app.submit_create();
                             } else if modal.is_file_field() {
@@ -2630,6 +2681,8 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                         if let Some(modal) = &mut app.create_modal {
                             if modal.is_boot_mode_field() {
                                 modal.toggle_boot_mode();
+                            } else if modal.is_nested_virt_field() {
+                                modal.toggle_nested_virt();
                             } else if modal.is_user_data_mode_field() {
                                 modal.cycle_user_data_mode();
                             }

@@ -41,6 +41,9 @@ message VmConfig {
   repeated DiskConfig disks = 6;
   repeated NicConfig nics = 7;
   optional string user_data = 8;  // cloud-init user-data (YAML content)
+
+  // CPU features
+  bool nested_virt = 10;          // Enable nested virtualization
 }
 
 message DiskConfig {

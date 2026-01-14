@@ -263,6 +263,8 @@ struct ProtoConfig {
     nics: Vec<ProtoNic>,
     #[serde(default)]
     user_data: Option<String>,
+    #[serde(default)]
+    nested_virt: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -303,6 +305,7 @@ impl From<VmConfig> for ProtoConfig {
                 })
                 .collect(),
             user_data: c.user_data,
+            nested_virt: c.nested_virt,
         }
     }
 }
@@ -334,6 +337,7 @@ impl From<ProtoConfig> for VmConfig {
                 })
                 .collect(),
             user_data: c.user_data,
+            nested_virt: c.nested_virt,
         }
     }
 }
