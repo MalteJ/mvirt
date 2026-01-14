@@ -331,6 +331,57 @@ pub async fn action_worker(
                         readonly: false,
                     }];
 
+                    // Create NIC if a network was selected
+                    let nic_config = if let Some(network_id) = params.network_id {
+                        if let Some(ref mut net) = net_client {
+                            let nic_name = params
+                                .name
+                                .as_ref()
+                                .map(|n| format!("{}-nic", n))
+                                .unwrap_or_default();
+                            match net
+                                .create_nic(CreateNicRequest {
+                                    network_id,
+                                    name: nic_name,
+                                    mac_address: String::new(),
+                                    ipv4_address: String::new(),
+                                    ipv6_address: String::new(),
+                                    routed_ipv4_prefixes: vec![],
+                                    routed_ipv6_prefixes: vec![],
+                                })
+                                .await
+                            {
+                                Ok(response) => {
+                                    let nic = response.into_inner();
+                                    NicConfig {
+                                        tap: None,
+                                        mac: None,
+                                        vhost_socket: Some(nic.socket_path),
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = result_tx.send(ActionResult::Created(Err(format!(
+                                        "Failed to create NIC: {}",
+                                        e.message()
+                                    ))));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            let _ = result_tx.send(ActionResult::Created(Err(
+                                "Network service not available".to_string(),
+                            )));
+                            continue;
+                        }
+                    } else {
+                        // No network selected - create VM without network
+                        NicConfig {
+                            tap: None,
+                            mac: None,
+                            vhost_socket: None,
+                        }
+                    };
+
                     let config = VmConfig {
                         vcpus: params.vcpus,
                         memory_mb: params.memory_mb,
@@ -339,11 +390,7 @@ pub async fn action_worker(
                         initramfs: None,
                         cmdline: None,
                         disks,
-                        nics: vec![NicConfig {
-                            tap: None,
-                            mac: None,
-                            vhost_socket: None,
-                        }],
+                        nics: vec![nic_config],
                         user_data: user_data_content,
                         nested_virt: params.nested_virt,
                     };
@@ -646,6 +693,111 @@ pub async fn action_worker(
                     }
                 } else {
                     ActionResult::LogsRefreshed(Err("Log service not available".to_string()))
+                }
+            }
+
+            // === Modal Preparation ===
+            Action::PrepareVmDetailModal { vm_id } => {
+                // Fetch logs for this VM
+                let logs = if let Some(ref mut log) = log_client {
+                    match log
+                        .query(QueryRequest {
+                            object_id: Some(vm_id.clone()),
+                            start_time_ns: None,
+                            end_time_ns: None,
+                            limit: 50,
+                            follow: false,
+                        })
+                        .await
+                    {
+                        Ok(response) => {
+                            let mut stream = response.into_inner();
+                            let mut entries = Vec::new();
+                            while let Some(result) = stream.next().await {
+                                if let Ok(entry) = result {
+                                    entries.push(entry);
+                                }
+                            }
+                            // Sort by timestamp descending (newest first)
+                            entries.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+                            entries
+                        }
+                        Err(_) => vec![],
+                    }
+                } else {
+                    vec![]
+                };
+
+                ActionResult::VmDetailModalReady { vm_id, logs }
+            }
+
+            Action::PrepareVolumeDetailModal { volume_name } => {
+                // Fetch logs for this volume
+                let logs = if let Some(ref mut log) = log_client {
+                    match log
+                        .query(QueryRequest {
+                            object_id: Some(volume_name.clone()),
+                            start_time_ns: None,
+                            end_time_ns: None,
+                            limit: 50,
+                            follow: false,
+                        })
+                        .await
+                    {
+                        Ok(response) => {
+                            let mut stream = response.into_inner();
+                            let mut entries = Vec::new();
+                            while let Some(result) = stream.next().await {
+                                if let Ok(entry) = result {
+                                    entries.push(entry);
+                                }
+                            }
+                            // Sort by timestamp descending (newest first)
+                            entries.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+                            entries
+                        }
+                        Err(_) => vec![],
+                    }
+                } else {
+                    vec![]
+                };
+
+                ActionResult::VolumeDetailModalReady { volume_name, logs }
+            }
+
+            Action::PrepareCreateVmModal => {
+                // Fetch fresh data for the create VM modal
+                let templates = if let Some(ref mut zfs) = zfs_client {
+                    match zfs.list_templates(ListTemplatesRequest {}).await {
+                        Ok(response) => response.into_inner().templates,
+                        Err(_) => vec![],
+                    }
+                } else {
+                    vec![]
+                };
+
+                let volumes = if let Some(ref mut zfs) = zfs_client {
+                    match zfs.list_volumes(ListVolumesRequest {}).await {
+                        Ok(response) => response.into_inner().volumes,
+                        Err(_) => vec![],
+                    }
+                } else {
+                    vec![]
+                };
+
+                let networks = if let Some(ref mut net) = net_client {
+                    match net.list_networks(ListNetworksRequest {}).await {
+                        Ok(response) => response.into_inner().networks,
+                        Err(_) => vec![],
+                    }
+                } else {
+                    vec![]
+                };
+
+                ActionResult::CreateVmModalReady {
+                    templates,
+                    volumes,
+                    networks,
                 }
             }
 

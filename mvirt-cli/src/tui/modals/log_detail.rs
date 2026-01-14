@@ -86,12 +86,6 @@ pub fn draw(frame: &mut Frame, entry: &LogEntry) {
         ]));
     }
 
-    // ID
-    lines.push(Line::from(vec![
-        Span::styled(" ID:        ", label_style),
-        Span::styled(&entry.id, Style::default().fg(Color::DarkGray)),
-    ]));
-
     // Separator
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(" Message:", label_style)]));
@@ -108,16 +102,16 @@ pub fn draw(frame: &mut Frame, entry: &LogEntry) {
     // Split inner area for header and message
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(1)])
+        .constraints([Constraint::Length(6), Constraint::Min(1)])
         .split(inner);
 
     // Render header lines
-    let header_text = Text::from(lines[..7.min(lines.len())].to_vec());
+    let header_text = Text::from(lines[..6.min(lines.len())].to_vec());
     frame.render_widget(Paragraph::new(header_text), chunks[0]);
 
     // Render message with wrapping
-    if lines.len() > 7 {
-        let message_lines: Vec<Line> = lines[7..].to_vec();
+    if lines.len() > 6 {
+        let message_lines: Vec<Line> = lines[6..].to_vec();
         let message_text = Text::from(message_lines);
         frame.render_widget(
             Paragraph::new(message_text).wrap(Wrap { trim: false }),

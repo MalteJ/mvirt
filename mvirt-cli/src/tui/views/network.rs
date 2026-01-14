@@ -72,7 +72,7 @@ pub fn draw(
             Span::styled(":create ", Style::default().fg(Color::DarkGray)),
             Span::styled("d", Style::default().fg(Color::Red).bold()),
             Span::styled(":delete ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Tab", Style::default().fg(Color::Magenta).bold()),
+            Span::styled("S-Tab", Style::default().fg(Color::Magenta).bold()),
             Span::styled(":Networks ", Style::default().fg(Color::DarkGray)),
             Span::styled("q", Style::default().fg(Color::Magenta).bold()),
             Span::styled(":quit", Style::default().fg(Color::DarkGray)),
@@ -120,9 +120,14 @@ pub fn draw(
         ]);
         frame.render_widget(Paragraph::new(confirm_line), chunks[4]);
     } else if let Some(status) = status_message {
+        let color = if status.starts_with("Loading") {
+            Color::DarkGray
+        } else {
+            Color::Yellow
+        };
         let status_line = Line::from(vec![Span::styled(
             format!(" {}", status),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(color),
         )]);
         frame.render_widget(Paragraph::new(status_line), chunks[4]);
     }
@@ -135,17 +140,17 @@ fn draw_title_bar(frame: &mut Frame, area: Rect) {
         Span::raw(" "),
         Span::styled("[2:Storage]", Style::default().fg(Color::DarkGray)),
     ];
-    tabs.push(Span::styled(
-        " [3:Logs]",
-        Style::default().fg(Color::DarkGray),
-    ));
     tabs.push(Span::raw(" "));
-    tabs.push(Span::styled("[4:", Style::default().fg(Color::DarkGray)));
+    tabs.push(Span::styled("[3:", Style::default().fg(Color::DarkGray)));
     tabs.push(Span::styled(
         "Networks",
         Style::default().fg(Color::White).bold(),
     ));
     tabs.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    tabs.push(Span::styled(
+        " [4:Logs]",
+        Style::default().fg(Color::DarkGray),
+    ));
     let title = Line::from(tabs);
 
     let block = Block::default()

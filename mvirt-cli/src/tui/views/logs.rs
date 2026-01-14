@@ -9,7 +9,7 @@ fn format_timestamp(timestamp_ns: i64) -> String {
     let nanos = (timestamp_ns % 1_000_000_000) as u32;
     if let Some(dt) = DateTime::from_timestamp(secs, nanos) {
         let local: DateTime<Local> = dt.into();
-        local.format("%Y-%m-%d %H:%M:%S").to_string()
+        local.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
     } else {
         "Invalid time".to_string()
     }
@@ -77,17 +77,17 @@ fn draw_title(frame: &mut Frame, area: Rect, log_count: usize) {
         " [2:Storage]",
         Style::default().fg(Color::DarkGray),
     ));
+    tabs.push(Span::styled(
+        " [3:Networks]",
+        Style::default().fg(Color::DarkGray),
+    ));
     tabs.push(Span::raw(" "));
-    tabs.push(Span::styled("[3:", Style::default().fg(Color::DarkGray)));
+    tabs.push(Span::styled("[4:", Style::default().fg(Color::DarkGray)));
     tabs.push(Span::styled(
         "Logs",
         Style::default().fg(Color::White).bold(),
     ));
     tabs.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
-    tabs.push(Span::styled(
-        " [4:Networks]",
-        Style::default().fg(Color::DarkGray),
-    ));
     let title = Line::from(tabs);
 
     // Right: Log count

@@ -84,7 +84,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(ref vm_id) = app.detail_view
         && let Some(vm) = app.get_vm_by_id(vm_id)
     {
-        modals::vm_detail::draw(frame, vm);
+        modals::vm_detail::draw(frame, vm, &app.vm_detail_logs);
     }
 
     // Create VM Modal overlay
@@ -103,6 +103,11 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     // Storage modals
+    if let Some(ref volume_name) = app.volume_detail_view
+        && let Some(volume) = app.get_volume_by_name(volume_name)
+    {
+        modals::volume_detail::draw(frame, volume, &app.volume_detail_logs);
+    }
     if let Some(modal) = &app.volume_create_modal {
         modals::volume_create::draw(frame, modal);
     }
@@ -179,7 +184,7 @@ pub async fn run(
         net_available,
     );
     if !vm_available {
-        app.status_message = Some("Not connected to mvirt-vmm".to_string());
+        app.set_status("Not connected to mvirt-vmm");
     }
     if vm_available {
         app.refresh();
@@ -215,6 +220,12 @@ pub async fn run(
                 View::Network => {
                     if app.net_available {
                         app.send_action(Action::RefreshNetworks);
+                        // Also refresh NICs if a network is selected
+                        if let Some(ref net_id) = app.network.selected_network_id {
+                            app.send_action(Action::LoadNics {
+                                network_id: net_id.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -279,6 +290,8 @@ pub async fn run(
                         handle_confirm_delete_nic(&mut app, key.code);
                     } else if app.log_detail_index.is_some() {
                         handle_log_detail_input(&mut app, key.code);
+                    } else if app.volume_detail_view.is_some() {
+                        handle_volume_detail_input(&mut app, key.code);
                     } else {
                         handle_normal_input(&mut app, key.code);
                     }
@@ -396,8 +409,9 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
         KeyCode::Down => {
             if let Some(modal) = &mut app.create_modal {
                 if modal.is_disk_field() {
-                    // Navigate disk list
                     modal.disk_select_next();
+                } else if modal.is_network_field() {
+                    modal.network_select_next();
                 } else {
                     modal.focus_next();
                 }
@@ -406,8 +420,9 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
         KeyCode::Up => {
             if let Some(modal) = &mut app.create_modal {
                 if modal.is_disk_field() {
-                    // Navigate disk list
                     modal.disk_select_prev();
+                } else if modal.is_network_field() {
+                    modal.network_select_prev();
                 } else {
                     modal.focus_prev();
                 }
@@ -501,11 +516,11 @@ fn handle_normal_input(app: &mut App, key_code: KeyCode) {
             return;
         }
         KeyCode::Char('3') => {
-            app.set_view(View::Logs);
+            app.set_view(View::Network);
             return;
         }
         KeyCode::Char('4') => {
-            app.set_view(View::Network);
+            app.set_view(View::Logs);
             return;
         }
         _ => {}
@@ -540,6 +555,11 @@ fn handle_storage_input(app: &mut App, key_code: KeyCode) {
         KeyCode::Down => app.storage_next(),
         KeyCode::Up => app.storage_previous(),
         KeyCode::BackTab => app.toggle_storage_focus(),
+        KeyCode::Enter => {
+            if app.storage_focus == StorageFocus::Volumes {
+                app.open_volume_detail_view();
+            }
+        }
         KeyCode::Char('d') => match app.storage_focus {
             StorageFocus::Volumes => app.delete_selected_volume(),
             StorageFocus::Templates => app.delete_selected_template(),
@@ -574,6 +594,8 @@ fn handle_logs_input(app: &mut App, key_code: KeyCode) {
     match key_code {
         KeyCode::Down => app.logs_next(),
         KeyCode::Up => app.logs_previous(),
+        KeyCode::PageDown => app.logs_page_down(),
+        KeyCode::PageUp => app.logs_page_up(),
         KeyCode::Enter => app.open_log_detail(),
         KeyCode::Char('r') => app.refresh_logs(),
         _ => {}
@@ -583,6 +605,13 @@ fn handle_logs_input(app: &mut App, key_code: KeyCode) {
 fn handle_log_detail_input(app: &mut App, key_code: KeyCode) {
     match key_code {
         KeyCode::Esc | KeyCode::Enter => app.close_log_detail(),
+        _ => {}
+    }
+}
+
+fn handle_volume_detail_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc | KeyCode::Enter => app.close_volume_detail_view(),
         _ => {}
     }
 }
@@ -1058,16 +1087,16 @@ fn handle_mouse_input(app: &mut App, mouse: event::MouseEvent, term_size: Rect) 
 
 fn handle_tab_click(app: &mut App, x: u16) {
     // Tab positions in title bar (approximate positions):
-    // " mvirt [1:VMs] [2:Storage] [3:Logs] [4:Networks]"
-    // Positions:  7-14   16-27      29-37    39-51
+    // " mvirt [1:VMs] [2:Storage] [3:Networks] [4:Logs]"
+    // Positions:  7-14   16-27      29-40       42-49
     if (7..=14).contains(&x) {
         app.set_view(View::Vm);
     } else if (16..=27).contains(&x) {
         app.set_view(View::Storage);
-    } else if (29..=37).contains(&x) {
-        app.set_view(View::Logs);
-    } else if (39..=51).contains(&x) {
+    } else if (29..=40).contains(&x) {
         app.set_view(View::Network);
+    } else if (42..=49).contains(&x) {
+        app.set_view(View::Logs);
     }
 }
 

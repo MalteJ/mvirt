@@ -66,6 +66,14 @@ pub struct CreateVmParams {
     pub user_data_mode: UserDataMode,
     pub user_data_file: Option<String>,
     pub ssh_keys_config: Option<SshKeysConfig>,
+    pub network_id: Option<String>, // Network to join (creates vNIC automatically)
+}
+
+/// Network item for selection in VM create modal
+#[derive(Clone)]
+pub struct NetworkItem {
+    pub id: String,
+    pub name: String,
 }
 
 /// Active view in the TUI
@@ -74,8 +82,8 @@ pub enum View {
     #[default]
     Vm,
     Storage,
-    Logs,
     Network,
+    Logs,
 }
 
 /// Focus within storage view
@@ -171,6 +179,15 @@ pub enum Action {
         limit: u32,
     },
 
+    // Modal preparation
+    PrepareCreateVmModal,
+    PrepareVmDetailModal {
+        vm_id: String,
+    },
+    PrepareVolumeDetailModal {
+        volume_name: String,
+    },
+
     // Network actions
     RefreshNetworks,
     CreateNetwork {
@@ -226,6 +243,21 @@ pub enum ActionResult {
 
     // Log results
     LogsRefreshed(Result<Vec<LogEntry>, String>),
+
+    // Modal preparation results
+    CreateVmModalReady {
+        templates: Vec<Template>,
+        volumes: Vec<Volume>,
+        networks: Vec<Network>,
+    },
+    VmDetailModalReady {
+        vm_id: String,
+        logs: Vec<LogEntry>,
+    },
+    VolumeDetailModalReady {
+        volume_name: String,
+        logs: Vec<LogEntry>,
+    },
 
     // Network results
     NetworksRefreshed(Result<Vec<Network>, String>),

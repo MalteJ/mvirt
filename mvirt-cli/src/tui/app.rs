@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use ratatui::widgets::TableState;
@@ -16,8 +17,8 @@ use crate::tui::modals::volume_resize::VolumeResizeModal;
 use crate::tui::modals::volume_snapshot::VolumeSnapshotModal;
 use crate::tui::modals::volume_template::VolumeTemplateModal;
 use crate::tui::types::{
-    Action, ActionResult, NetworkFocus, NetworkState, StorageFocus, StorageState, UserDataMode,
-    View,
+    Action, ActionResult, NetworkFocus, NetworkItem, NetworkState, StorageFocus, StorageState,
+    UserDataMode, View,
 };
 use crate::tui::widgets::console::ConsoleSession;
 use crate::tui::widgets::file_picker::FilePicker;
@@ -33,6 +34,7 @@ pub struct App {
     // Common state
     pub should_quit: bool,
     pub status_message: Option<String>,
+    status_message_time: Option<Instant>,
     pub action_tx: mpsc::UnboundedSender<Action>,
     pub result_rx: mpsc::UnboundedReceiver<ActionResult>,
     pub busy: bool,
@@ -58,6 +60,7 @@ pub struct App {
     pub file_picker_for_user_data: bool,
     pub ssh_keys_modal: Option<SshKeysModal>,
     pub detail_view: Option<String>,
+    pub vm_detail_logs: Vec<LogEntry>,
     pub console_session: Option<ConsoleSession>,
 
     // Storage state
@@ -67,6 +70,8 @@ pub struct App {
     pub storage_focus: StorageFocus,
     pub confirm_delete_volume: Option<String>,
     pub confirm_delete_template: Option<String>,
+    pub volume_detail_view: Option<String>,
+    pub volume_detail_logs: Vec<LogEntry>,
 
     // Storage modals
     pub volume_create_modal: Option<VolumeCreateModal>,
@@ -107,6 +112,7 @@ impl App {
             // Common state
             should_quit: false,
             status_message: None,
+            status_message_time: None,
             action_tx,
             result_rx,
             busy: false,
@@ -132,6 +138,7 @@ impl App {
             file_picker_for_user_data: false,
             ssh_keys_modal: None,
             detail_view: None,
+            vm_detail_logs: Vec::new(),
             console_session: None,
 
             // Storage state
@@ -141,6 +148,8 @@ impl App {
             storage_focus: StorageFocus::Volumes,
             confirm_delete_volume: None,
             confirm_delete_template: None,
+            volume_detail_view: None,
+            volume_detail_logs: Vec::new(),
 
             // Storage modals
             volume_create_modal: None,
@@ -172,12 +181,28 @@ impl App {
         let _ = self.action_tx.send(action);
     }
 
+    /// Set a status message with timestamp
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some(msg.into());
+        self.status_message_time = Some(Instant::now());
+    }
+
+    /// Clear status message only if it's older than 3 seconds
+    pub fn clear_status_if_expired(&mut self) {
+        if let Some(time) = self.status_message_time
+            && time.elapsed() > Duration::from_secs(3)
+        {
+            self.status_message = None;
+            self.status_message_time = None;
+        }
+    }
+
     pub fn handle_result(&mut self, result: ActionResult) {
         self.busy = false;
         match result {
             ActionResult::Refreshed(Ok(vms)) => {
                 self.vms = vms;
-                self.status_message = None;
+                self.clear_status_if_expired();
                 self.last_refresh = Some(Local::now());
                 if self.vms.is_empty() {
                     self.table_state.select(None);
@@ -191,46 +216,46 @@ impl App {
                 }
             }
             ActionResult::Refreshed(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::SystemInfoRefreshed(Ok(info)) => {
                 self.system_info = Some(info);
             }
             ActionResult::SystemInfoRefreshed(Err(_)) => {}
             ActionResult::Started(id, Ok(())) => {
-                self.status_message = Some(format!("Started {}", id));
+                self.set_status(format!("Started {}", id));
                 self.send_refresh();
             }
             ActionResult::Started(_, Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::Stopped(id, Ok(())) => {
-                self.status_message = Some(format!("Stopped {}", id));
+                self.set_status(format!("Stopped {}", id));
                 self.send_refresh();
             }
             ActionResult::Stopped(_, Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::Killed(id, Ok(())) => {
-                self.status_message = Some(format!("Killed {}", id));
+                self.set_status(format!("Killed {}", id));
                 self.send_refresh();
             }
             ActionResult::Killed(_, Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::Deleted(id, Ok(())) => {
-                self.status_message = Some(format!("Deleted {}", id));
+                self.set_status(format!("Deleted {}", id));
                 self.send_refresh();
             }
             ActionResult::Deleted(_, Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::Created(Ok(id)) => {
-                self.status_message = Some(format!("Created {}", id));
+                self.set_status(format!("Created {}", id));
                 self.send_refresh();
             }
             ActionResult::Created(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::ConsoleOpened {
                 vm_id,
@@ -248,16 +273,16 @@ impl App {
             ActionResult::ConsoleClosed(error) => {
                 self.console_session = None;
                 if let Some(e) = error {
-                    self.status_message = Some(format!("Console error: {}", e));
+                    self.set_status(format!("Console error: {}", e));
                 } else {
-                    self.status_message = Some("Console disconnected".to_string());
+                    self.set_status("Console disconnected".to_string());
                 }
             }
 
             // Storage results
             ActionResult::StorageRefreshed(Ok(state)) => {
                 self.storage = state;
-                self.status_message = None;
+                self.clear_status_if_expired();
                 self.last_refresh = Some(Local::now());
                 // Update table selections
                 if self.storage.volumes.is_empty() {
@@ -277,90 +302,90 @@ impl App {
                 }
             }
             ActionResult::StorageRefreshed(Err(e)) => {
-                self.status_message = Some(format!("Storage error: {}", e));
+                self.set_status(format!("Storage error: {}", e));
             }
             ActionResult::VolumeCreated(Ok(())) => {
-                self.status_message = Some("Volume created".to_string());
+                self.set_status("Volume created".to_string());
                 self.refresh_storage();
             }
             ActionResult::VolumeCreated(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::VolumeDeleted(Ok(())) => {
-                self.status_message = Some("Volume deleted".to_string());
+                self.set_status("Volume deleted".to_string());
                 self.refresh_storage();
             }
             ActionResult::VolumeDeleted(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::VolumeResized(Ok(())) => {
-                self.status_message = Some("Volume resized".to_string());
+                self.set_status("Volume resized".to_string());
                 self.refresh_storage();
             }
             ActionResult::VolumeResized(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::ImportStarted(Ok(job_id)) => {
-                self.status_message = Some(format!("Import started: {}", &job_id[..8]));
+                self.set_status(format!("Import started: {}", &job_id[..8]));
                 self.refresh_storage();
             }
             ActionResult::ImportStarted(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::ImportCancelled(Ok(())) => {
-                self.status_message = Some("Import cancelled".to_string());
+                self.set_status("Import cancelled".to_string());
                 self.refresh_storage();
             }
             ActionResult::ImportCancelled(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::SnapshotCreated(Ok(())) => {
-                self.status_message = Some("Snapshot created".to_string());
+                self.set_status("Snapshot created".to_string());
                 self.refresh_storage();
             }
             ActionResult::SnapshotCreated(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::SnapshotDeleted(Ok(())) => {
-                self.status_message = Some("Snapshot deleted".to_string());
+                self.set_status("Snapshot deleted".to_string());
                 self.refresh_storage();
             }
             ActionResult::SnapshotDeleted(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::SnapshotRolledBack(Ok(())) => {
-                self.status_message = Some("Snapshot rolled back".to_string());
+                self.set_status("Snapshot rolled back".to_string());
                 self.refresh_storage();
             }
             ActionResult::SnapshotRolledBack(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::TemplateCreated(Ok(())) => {
-                self.status_message = Some("Template created".to_string());
+                self.set_status("Template created".to_string());
                 self.refresh_storage();
             }
             ActionResult::TemplateCreated(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::TemplateDeleted(Ok(())) => {
-                self.status_message = Some("Template deleted".to_string());
+                self.set_status("Template deleted".to_string());
                 self.refresh_storage();
             }
             ActionResult::TemplateDeleted(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::VolumeCloned(Ok(())) => {
-                self.status_message = Some("Volume cloned".to_string());
+                self.set_status("Volume cloned".to_string());
                 self.refresh_storage();
             }
             ActionResult::VolumeCloned(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
 
             // Log results
             ActionResult::LogsRefreshed(Ok(logs)) => {
                 self.logs = logs;
-                self.status_message = None;
+                self.clear_status_if_expired();
                 self.last_refresh = Some(Local::now());
                 if self.logs.is_empty() {
                     self.logs_table_state.select(None);
@@ -369,13 +394,34 @@ impl App {
                 }
             }
             ActionResult::LogsRefreshed(Err(e)) => {
-                self.status_message = Some(format!("Log error: {}", e));
+                self.set_status(format!("Log error: {}", e));
+            }
+
+            // Modal preparation results
+            ActionResult::CreateVmModalReady {
+                templates,
+                volumes,
+                networks,
+            } => {
+                self.open_create_modal_with_data(templates, volumes, networks);
+            }
+            ActionResult::VmDetailModalReady { vm_id, logs } => {
+                self.detail_view = Some(vm_id);
+                self.vm_detail_logs = logs;
+                self.status_message = None;
+                self.status_message_time = None;
+            }
+            ActionResult::VolumeDetailModalReady { volume_name, logs } => {
+                self.volume_detail_view = Some(volume_name);
+                self.volume_detail_logs = logs;
+                self.status_message = None;
+                self.status_message_time = None;
             }
 
             // Network results
             ActionResult::NetworksRefreshed(Ok(networks)) => {
                 self.network.networks = networks;
-                self.status_message = None;
+                self.clear_status_if_expired();
                 self.last_refresh = Some(Local::now());
                 if self.network.networks.is_empty() {
                     self.networks_table_state.select(None);
@@ -384,21 +430,21 @@ impl App {
                 }
             }
             ActionResult::NetworksRefreshed(Err(e)) => {
-                self.status_message = Some(format!("Network error: {}", e));
+                self.set_status(format!("Network error: {}", e));
             }
             ActionResult::NetworkCreated(Ok(net)) => {
-                self.status_message = Some(format!("Network {} created", net.name));
+                self.set_status(format!("Network {} created", net.name));
                 self.refresh_networks();
             }
             ActionResult::NetworkCreated(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::NetworkDeleted(Ok(())) => {
-                self.status_message = Some("Network deleted".to_string());
+                self.set_status("Network deleted".to_string());
                 self.refresh_networks();
             }
             ActionResult::NetworkDeleted(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::NicsLoaded(Ok(nics)) => {
                 self.network.nics = nics;
@@ -410,7 +456,7 @@ impl App {
                 }
             }
             ActionResult::NicsLoaded(Err(e)) => {
-                self.status_message = Some(format!("Error loading NICs: {}", e));
+                self.set_status(format!("Error loading NICs: {}", e));
             }
             ActionResult::NicCreated(Ok(nic)) => {
                 let name = if nic.name.is_empty() {
@@ -418,23 +464,23 @@ impl App {
                 } else {
                     &nic.name
                 };
-                self.status_message = Some(format!("NIC {} created", name));
+                self.set_status(format!("NIC {} created", name));
                 // Reload NICs for the selected network
                 if let Some(ref net_id) = self.network.selected_network_id {
                     self.load_nics(net_id.clone());
                 }
             }
             ActionResult::NicCreated(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
             ActionResult::NicDeleted(Ok(())) => {
-                self.status_message = Some("NIC deleted".to_string());
+                self.set_status("NIC deleted".to_string());
                 if let Some(ref net_id) = self.network.selected_network_id {
                     self.load_nics(net_id.clone());
                 }
             }
             ActionResult::NicDeleted(Err(e)) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.set_status(format!("Error: {}", e));
             }
         }
     }
@@ -447,7 +493,7 @@ impl App {
         let Some(id) = self.selected_vm().map(|vm| vm.id.clone()) else {
             return;
         };
-        self.status_message = Some(format!("Starting {}...", id));
+        self.set_status(format!("Starting {}...", id));
         self.send_action(Action::Start(id));
     }
 
@@ -455,7 +501,7 @@ impl App {
         let Some(id) = self.selected_vm().map(|vm| vm.id.clone()) else {
             return;
         };
-        self.status_message = Some(format!("Stopping {}...", id));
+        self.set_status(format!("Stopping {}...", id));
         self.send_action(Action::Stop(id));
     }
 
@@ -468,7 +514,7 @@ impl App {
 
     pub fn confirm_kill(&mut self) {
         if let Some(id) = self.confirm_kill.take() {
-            self.status_message = Some(format!("Killing {}...", id));
+            self.set_status(format!("Killing {}...", id));
             self.send_action(Action::Kill(id));
         }
     }
@@ -486,7 +532,7 @@ impl App {
 
     pub fn confirm_delete(&mut self) {
         if let Some(id) = self.confirm_delete.take() {
-            self.status_message = Some(format!("Deleting {}...", id));
+            self.set_status(format!("Deleting {}...", id));
             self.send_action(Action::Delete(id));
         }
     }
@@ -500,26 +546,50 @@ impl App {
             return;
         };
         if vm.state != VmState::Running as i32 {
-            self.status_message = Some("Console only available for running VMs".to_string());
+            self.set_status("Console only available for running VMs".to_string());
             return;
         }
         let vm_id = vm.id.clone();
         let vm_name = vm.name.clone();
-        self.status_message = Some("Connecting to console...".to_string());
+        self.set_status("Connecting to console...".to_string());
         self.send_action(Action::OpenConsole { vm_id, vm_name });
     }
 
     pub fn close_console(&mut self) {
         self.console_session = None;
-        self.status_message = Some("Disconnected from console".to_string());
+        self.set_status("Disconnected from console".to_string());
     }
 
     pub fn open_create_modal(&mut self) {
-        // Pass storage data so user can select boot disk from templates/volumes
-        self.create_modal = Some(CreateModal::with_storage(
-            &self.storage.templates,
-            &self.storage.volumes,
+        // Request fresh data before opening the modal
+        self.set_status("Loading...");
+        self.send_action(Action::PrepareCreateVmModal);
+    }
+
+    /// Called when CreateVmModalReady is received with fresh data
+    pub fn open_create_modal_with_data(
+        &mut self,
+        templates: Vec<crate::zfs_proto::Template>,
+        volumes: Vec<crate::zfs_proto::Volume>,
+        networks: Vec<crate::net_proto::Network>,
+    ) {
+        // Convert networks to NetworkItems
+        let network_items: Vec<NetworkItem> = networks
+            .iter()
+            .map(|n| NetworkItem {
+                id: n.id.clone(),
+                name: n.name.clone(),
+            })
+            .collect();
+
+        // Pass storage and network data
+        self.create_modal = Some(CreateModal::with_storage_and_networks(
+            &templates,
+            &volumes,
+            &network_items,
         ));
+        self.status_message = None;
+        self.status_message_time = None;
     }
 
     pub fn close_create_modal(&mut self) {
@@ -530,12 +600,12 @@ impl App {
         if let Some(modal) = &self.create_modal {
             match modal.validate() {
                 Ok(params) => {
-                    self.status_message = Some("Creating VM...".to_string());
+                    self.set_status("Creating VM...".to_string());
                     self.send_action(Action::Create(Box::new(params)));
                     self.create_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }
@@ -585,7 +655,7 @@ impl App {
                     self.ssh_keys_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }
@@ -597,7 +667,7 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        self.status_message = Some("Refreshing...".to_string());
+        self.set_status("Refreshing...".to_string());
         self.send_refresh();
     }
 
@@ -637,12 +707,15 @@ impl App {
 
     pub fn open_detail_view(&mut self) {
         if let Some(vm) = self.selected_vm() {
-            self.detail_view = Some(vm.id.clone());
+            let vm_id = vm.id.clone();
+            self.set_status("Loading...");
+            self.send_action(Action::PrepareVmDetailModal { vm_id });
         }
     }
 
     pub fn close_detail_view(&mut self) {
         self.detail_view = None;
+        self.vm_detail_logs.clear();
     }
 
     pub fn get_vm_by_id(&self, id: &str) -> Option<&Vm> {
@@ -658,6 +731,7 @@ impl App {
             || self.confirm_kill.is_some()
             || self.confirm_delete_volume.is_some()
             || self.confirm_delete_template.is_some()
+            || self.volume_detail_view.is_some()
             || self.volume_create_modal.is_some()
             || self.volume_import_modal.is_some()
             || self.volume_resize_modal.is_some()
@@ -696,36 +770,36 @@ impl App {
             View::Vm => {
                 if self.zfs_available {
                     View::Storage
-                } else if self.log_available {
-                    View::Logs
                 } else if self.net_available {
                     View::Network
+                } else if self.log_available {
+                    View::Logs
                 } else {
                     View::Vm
                 }
             }
             View::Storage => {
-                if self.log_available {
-                    View::Logs
-                } else if self.net_available {
-                    View::Network
-                } else {
-                    View::Vm
-                }
-            }
-            View::Logs => {
                 if self.net_available {
                     View::Network
+                } else if self.log_available {
+                    View::Logs
                 } else {
                     View::Vm
                 }
             }
-            View::Network => View::Vm,
+            View::Network => {
+                if self.log_available {
+                    View::Logs
+                } else {
+                    View::Vm
+                }
+            }
+            View::Logs => View::Vm,
         };
         match self.active_view {
             View::Storage => self.refresh_storage(),
-            View::Logs => self.refresh_logs(),
             View::Network => self.refresh_networks(),
+            View::Logs => self.refresh_logs(),
             View::Vm => {}
         }
     }
@@ -843,7 +917,7 @@ impl App {
 
     pub fn confirm_delete_volume(&mut self) {
         if let Some(name) = self.confirm_delete_volume.take() {
-            self.status_message = Some(format!("Deleting volume {}...", name));
+            self.set_status(format!("Deleting volume {}...", name));
             self.send_action(Action::DeleteVolume(name));
         }
     }
@@ -864,7 +938,7 @@ impl App {
 
     pub fn confirm_delete_template(&mut self) {
         if let Some(name) = self.confirm_delete_template.take() {
-            self.status_message = Some(format!("Deleting template {}...", name));
+            self.set_status(format!("Deleting template {}...", name));
             self.send_action(Action::DeleteTemplate(name));
         }
     }
@@ -877,6 +951,23 @@ impl App {
         self.template_table_state
             .selected()
             .and_then(|i| self.storage.templates.get(i))
+    }
+
+    pub fn open_volume_detail_view(&mut self) {
+        if let Some(vol) = self.selected_volume() {
+            let volume_name = vol.name.clone();
+            self.set_status("Loading...");
+            self.send_action(Action::PrepareVolumeDetailModal { volume_name });
+        }
+    }
+
+    pub fn close_volume_detail_view(&mut self) {
+        self.volume_detail_view = None;
+        self.volume_detail_logs.clear();
+    }
+
+    pub fn get_volume_by_name(&self, name: &str) -> Option<&Volume> {
+        self.storage.volumes.iter().find(|v| v.name == name)
     }
 
     // === Storage Modal Methods ===
@@ -894,12 +985,12 @@ impl App {
         if let Some(modal) = &self.volume_create_modal {
             match modal.validate() {
                 Ok((name, size_bytes)) => {
-                    self.status_message = Some(format!("Creating volume {}...", name));
+                    self.set_status(format!("Creating volume {}...", name));
                     self.send_action(Action::CreateVolume { name, size_bytes });
                     self.volume_create_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }
@@ -918,12 +1009,12 @@ impl App {
         if let Some(modal) = &self.volume_import_modal {
             match modal.validate() {
                 Ok((name, source)) => {
-                    self.status_message = Some(format!("Importing template {}...", name));
+                    self.set_status(format!("Importing template {}...", name));
                     self.send_action(Action::ImportVolume { name, source });
                     self.volume_import_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }
@@ -946,12 +1037,12 @@ impl App {
             match modal.validate() {
                 Ok(new_size) => {
                     let name = modal.volume_name.clone();
-                    self.status_message = Some(format!("Resizing volume {}...", name));
+                    self.set_status(format!("Resizing volume {}...", name));
                     self.send_action(Action::ResizeVolume { name, new_size });
                     self.volume_resize_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }
@@ -973,8 +1064,7 @@ impl App {
             match modal.validate() {
                 Ok(snapshot_name) => {
                     let volume = modal.volume_name.clone();
-                    self.status_message =
-                        Some(format!("Creating snapshot {}@{}...", volume, snapshot_name));
+                    self.set_status(format!("Creating snapshot {}@{}...", volume, snapshot_name));
                     self.send_action(Action::CreateSnapshot {
                         volume,
                         name: snapshot_name,
@@ -982,7 +1072,7 @@ impl App {
                     self.volume_snapshot_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }
@@ -1005,7 +1095,7 @@ impl App {
             match modal.validate() {
                 Ok((snapshot_name, template_name)) => {
                     let volume = modal.volume_name.clone();
-                    self.status_message = Some(format!(
+                    self.set_status(format!(
                         "Promoting snapshot {}@{} to template {}...",
                         volume, snapshot_name, template_name
                     ));
@@ -1017,7 +1107,7 @@ impl App {
                     self.volume_template_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }
@@ -1039,7 +1129,7 @@ impl App {
             match modal.validate() {
                 Ok((new_volume, size_bytes)) => {
                     let template = modal.template_name.clone();
-                    self.status_message = Some(format!(
+                    self.set_status(format!(
                         "Cloning {} from template {}...",
                         new_volume, template
                     ));
@@ -1051,7 +1141,7 @@ impl App {
                     self.volume_clone_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }
@@ -1105,6 +1195,30 @@ impl App {
                     i - 1
                 }
             }
+            None => 0,
+        };
+        self.logs_table_state.select(Some(i));
+    }
+
+    pub fn logs_page_down(&mut self) {
+        if self.logs.is_empty() {
+            return;
+        }
+        let page_size = 10;
+        let i = match self.logs_table_state.selected() {
+            Some(i) => (i + page_size).min(self.logs.len() - 1),
+            None => 0,
+        };
+        self.logs_table_state.select(Some(i));
+    }
+
+    pub fn logs_page_up(&mut self) {
+        if self.logs.is_empty() {
+            return;
+        }
+        let page_size = 10;
+        let i = match self.logs_table_state.selected() {
+            Some(i) => i.saturating_sub(page_size),
             None => 0,
         };
         self.logs_table_state.select(Some(i));
@@ -1277,7 +1391,7 @@ impl App {
         if let Some(_name) = self.confirm_delete_network.take() {
             let id = self.selected_network_id().map(|s| s.to_string());
             if let Some(id) = id {
-                self.status_message = Some("Deleting network...".to_string());
+                self.set_status("Deleting network...".to_string());
                 self.send_action(Action::DeleteNetwork { id });
             }
         }
@@ -1297,7 +1411,7 @@ impl App {
         if let Some(_name) = self.confirm_delete_nic.take() {
             let id = self.selected_nic_id().map(|s| s.to_string());
             if let Some(id) = id {
-                self.status_message = Some("Deleting NIC...".to_string());
+                self.set_status("Deleting NIC...".to_string());
                 self.send_action(Action::DeleteNic { id });
             }
         }
@@ -1320,7 +1434,7 @@ impl App {
         if let Some(modal) = &self.network_create_modal {
             match modal.validate() {
                 Ok((name, ipv4_subnet, ipv6_prefix)) => {
-                    self.status_message = Some(format!("Creating network {}...", name));
+                    self.set_status(format!("Creating network {}...", name));
                     self.send_action(Action::CreateNetwork {
                         name,
                         ipv4_subnet,
@@ -1329,7 +1443,7 @@ impl App {
                     self.network_create_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }
@@ -1343,7 +1457,7 @@ impl App {
         {
             self.nic_create_modal = Some(NicCreateModal::new(net.id.clone(), net.name.clone()));
         } else {
-            self.status_message = Some("Select a network first".to_string());
+            self.set_status("Select a network first".to_string());
         }
     }
 
@@ -1355,12 +1469,12 @@ impl App {
         if let Some(modal) = &self.nic_create_modal {
             match modal.validate() {
                 Ok((network_id, name)) => {
-                    self.status_message = Some("Creating NIC...".to_string());
+                    self.set_status("Creating NIC...".to_string());
                     self.send_action(Action::CreateNic { network_id, name });
                     self.nic_create_modal = None;
                 }
                 Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.set_status(format!("Error: {}", e));
                 }
             }
         }

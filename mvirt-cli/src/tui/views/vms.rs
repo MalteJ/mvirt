@@ -37,11 +37,11 @@ pub fn draw(
         Style::default().fg(Color::DarkGray),
     ));
     tabs.push(Span::styled(
-        " [3:Logs]",
+        " [3:Networks]",
         Style::default().fg(Color::DarkGray),
     ));
     tabs.push(Span::styled(
-        " [4:Networks]",
+        " [4:Logs]",
         Style::default().fg(Color::DarkGray),
     ));
 
@@ -289,9 +289,14 @@ pub fn draw(
         ]);
         frame.render_widget(Paragraph::new(confirm_line), chunks[3]);
     } else if let Some(status) = status_message {
+        let color = if status.starts_with("Loading") {
+            Color::DarkGray
+        } else {
+            Color::Yellow
+        };
         let status_line = Line::from(vec![Span::styled(
             format!(" {}", status),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(color),
         )]);
         frame.render_widget(Paragraph::new(status_line), chunks[3]);
     }

@@ -1,7 +1,9 @@
+use chrono::{DateTime, Local};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::proto::{BootMode, Vm, VmState};
+use mvirt_log::{LogEntry, LogLevel};
 
 pub fn format_state(state: i32) -> &'static str {
     match VmState::try_from(state).unwrap_or(VmState::Unspecified) {
@@ -22,10 +24,32 @@ pub fn state_style(state: i32) -> Style {
     }
 }
 
-pub fn draw(frame: &mut Frame, vm: &Vm) {
+fn format_log_timestamp(timestamp_ns: i64) -> String {
+    let secs = timestamp_ns / 1_000_000_000;
+    let nanos = (timestamp_ns % 1_000_000_000) as u32;
+    if let Some(dt) = DateTime::from_timestamp(secs, nanos) {
+        let local: DateTime<Local> = dt.into();
+        local.format("%m-%d %H:%M:%S").to_string()
+    } else {
+        "??".to_string()
+    }
+}
+
+fn level_style(level: i32) -> (String, Color) {
+    match LogLevel::try_from(level) {
+        Ok(LogLevel::Info) => ("I".to_string(), Color::Green),
+        Ok(LogLevel::Warn) => ("W".to_string(), Color::Yellow),
+        Ok(LogLevel::Error) => ("E".to_string(), Color::Red),
+        Ok(LogLevel::Debug) => ("D".to_string(), Color::DarkGray),
+        Ok(LogLevel::Audit) => ("A".to_string(), Color::Cyan),
+        Err(_) => ("?".to_string(), Color::White),
+    }
+}
+
+pub fn draw(frame: &mut Frame, vm: &Vm, logs: &[LogEntry]) {
     let area = frame.area();
-    let modal_width = 70.min(area.width.saturating_sub(4));
-    let modal_height = 22.min(area.height.saturating_sub(4));
+    let modal_width = 80.min(area.width.saturating_sub(4));
+    let modal_height = 30.min(area.height.saturating_sub(4));
 
     let modal_area = Rect {
         x: (area.width - modal_width) / 2,
@@ -52,6 +76,15 @@ pub fn draw(frame: &mut Frame, vm: &Vm) {
         .title(title);
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
+
+    // Split inner area: top for VM details, bottom for logs
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(10),    // VM details
+            Constraint::Length(10), // Logs section
+        ])
+        .split(inner);
 
     let config = vm.config.as_ref();
     let label_style = Style::default().fg(Color::DarkGray);
@@ -175,5 +208,48 @@ pub fn draw(frame: &mut Frame, vm: &Vm) {
     }
 
     let text = Text::from(lines);
-    frame.render_widget(Paragraph::new(text), inner);
+    frame.render_widget(Paragraph::new(text), chunks[0]);
+
+    // Logs section
+    let logs_block = Block::default()
+        .title(" Logs ")
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let logs_inner = logs_block.inner(chunks[1]);
+    frame.render_widget(logs_block, chunks[1]);
+
+    if logs.is_empty() {
+        let no_logs = Paragraph::new(Span::styled(
+            " No logs found",
+            Style::default().fg(Color::DarkGray),
+        ));
+        frame.render_widget(no_logs, logs_inner);
+    } else {
+        let log_lines: Vec<Line> = logs
+            .iter()
+            .take(logs_inner.height as usize)
+            .map(|entry| {
+                let (level_char, level_color) = level_style(entry.level);
+                let timestamp = format_log_timestamp(entry.timestamp_ns);
+                let max_msg_len = logs_inner.width.saturating_sub(20) as usize;
+                let message = if entry.message.len() > max_msg_len {
+                    format!("{}\u{2026}", &entry.message[..max_msg_len])
+                } else {
+                    entry.message.clone()
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", level_char),
+                        Style::default().fg(level_color),
+                    ),
+                    Span::styled(
+                        format!("{} ", timestamp),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(message, Style::default().fg(Color::White)),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(log_lines), logs_inner);
+    }
 }

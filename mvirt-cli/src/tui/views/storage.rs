@@ -150,16 +150,21 @@ pub fn draw(
         ]);
         frame.render_widget(Paragraph::new(confirm_line), chunks[4]);
     } else if let Some(status) = status_message {
+        let color = if status.starts_with("Loading") {
+            Color::DarkGray
+        } else {
+            Color::Yellow
+        };
         let status_line = Line::from(vec![Span::styled(
             format!(" {}", status),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(color),
         )]);
         frame.render_widget(Paragraph::new(status_line), chunks[4]);
     }
 }
 
 fn draw_pool_stats(frame: &mut Frame, area: Rect, storage: &StorageState) {
-    // Title (left side): mvirt [1:VMs] [2:Storage] [3:Logs]
+    // Title (left side): mvirt [1:VMs] [2:Storage] [3:Networks] [4:Logs]
     let mut tabs = vec![
         Span::styled(" mvirt ", Style::default().fg(Color::Cyan).bold()),
         Span::styled("[1:VMs]", Style::default().fg(Color::DarkGray)),
@@ -169,11 +174,11 @@ fn draw_pool_stats(frame: &mut Frame, area: Rect, storage: &StorageState) {
         Span::styled("]", Style::default().fg(Color::DarkGray)),
     ];
     tabs.push(Span::styled(
-        " [3:Logs]",
+        " [3:Networks]",
         Style::default().fg(Color::DarkGray),
     ));
     tabs.push(Span::styled(
-        " [4:Networks]",
+        " [4:Logs]",
         Style::default().fg(Color::DarkGray),
     ));
     let title = Line::from(tabs);

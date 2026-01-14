@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::types::{
-    CreateVmParams, DiskSourceType, SshKeySource, SshKeysConfig, UserDataMode,
+    CreateVmParams, DiskSourceType, NetworkItem, SshKeySource, SshKeysConfig, UserDataMode,
 };
 use crate::zfs_proto::{Template, Volume};
 
@@ -25,6 +25,8 @@ pub struct CreateModal {
     pub user_data_mode: UserDataMode,
     pub user_data_file: String,
     pub ssh_keys_config: Option<SshKeysConfig>,
+    pub network_items: Vec<NetworkItem>, // Available networks
+    pub selected_network: Option<usize>, // None = no network, Some(idx) = selected network
     pub focused_field: usize,
 }
 
@@ -47,12 +49,24 @@ impl CreateModal {
             user_data_mode: UserDataMode::None,
             user_data_file: String::new(),
             ssh_keys_config: None,
+            network_items: Vec::new(),
+            selected_network: None,
             focused_field: 0,
         }
     }
 
-    /// Create modal with pre-populated disk items
+    /// Create modal with pre-populated disk items (no networks)
+    #[allow(dead_code)]
     pub fn with_storage(templates: &[Template], volumes: &[Volume]) -> Self {
+        Self::with_storage_and_networks(templates, volumes, &[])
+    }
+
+    /// Create modal with pre-populated disk and network items
+    pub fn with_storage_and_networks(
+        templates: &[Template],
+        volumes: &[Volume],
+        networks: &[NetworkItem],
+    ) -> Self {
         let mut modal = Self::new();
 
         // Add templates first (default selection)
@@ -73,11 +87,14 @@ impl CreateModal {
             });
         }
 
+        // Add networks
+        modal.network_items = networks.to_vec();
+
         modal
     }
 
     pub fn field_count() -> usize {
-        7 // name, disk, vcpus, memory, nested_virt, user_data, submit
+        8 // name, disk, vcpus, memory, nested_virt, network, user_data, submit
     }
 
     pub fn focus_next(&mut self) {
@@ -121,8 +138,36 @@ impl CreateModal {
         self.nested_virt = !self.nested_virt;
     }
 
-    pub fn is_user_data_mode_field(&self) -> bool {
+    pub fn is_network_field(&self) -> bool {
         self.focused_field == 5
+    }
+
+    pub fn network_select_next(&mut self) {
+        if self.network_items.is_empty() {
+            self.selected_network = None;
+        } else {
+            self.selected_network = match self.selected_network {
+                None => Some(0),
+                Some(idx) if idx >= self.network_items.len() - 1 => None,
+                Some(idx) => Some(idx + 1),
+            };
+        }
+    }
+
+    pub fn network_select_prev(&mut self) {
+        if self.network_items.is_empty() {
+            self.selected_network = None;
+        } else {
+            self.selected_network = match self.selected_network {
+                None => Some(self.network_items.len() - 1),
+                Some(0) => None,
+                Some(idx) => Some(idx - 1),
+            };
+        }
+    }
+
+    pub fn is_user_data_mode_field(&self) -> bool {
+        self.focused_field == 6
     }
 
     pub fn cycle_user_data_mode(&mut self) {
@@ -146,7 +191,7 @@ impl CreateModal {
     }
 
     pub fn is_submit_field(&self) -> bool {
-        self.focused_field == 6
+        self.focused_field == 7
     }
 
     pub fn disk_select_next(&mut self) {
@@ -226,6 +271,12 @@ impl CreateModal {
         let vcpus: u32 = self.vcpus.parse().map_err(|_| "Invalid vcpus")?;
         let memory_mb: u64 = self.memory_mb.parse().map_err(|_| "Invalid memory")?;
 
+        // Get selected network ID if any
+        let network_id = self
+            .selected_network
+            .and_then(|idx| self.network_items.get(idx))
+            .map(|n| n.id.clone());
+
         Ok(CreateVmParams {
             name: if self.name.is_empty() {
                 None
@@ -244,6 +295,7 @@ impl CreateModal {
                 Some(self.user_data_file.clone())
             },
             ssh_keys_config: self.ssh_keys_config.clone(),
+            network_id,
         })
     }
 }
@@ -263,7 +315,7 @@ fn format_size(bytes: u64) -> String {
 pub fn draw(frame: &mut Frame, modal: &CreateModal) {
     let area = frame.area();
     let modal_width = 70.min(area.width.saturating_sub(4));
-    let modal_height = 18.min(area.height.saturating_sub(4));
+    let modal_height = 20.min(area.height.saturating_sub(4));
 
     let modal_area = Rect {
         x: (area.width - modal_width) / 2,
@@ -297,14 +349,15 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
     let field_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Padding
-            Constraint::Length(2), // Name
-            Constraint::Length(4), // Disk selector (expanded)
-            Constraint::Length(2), // VCPUs
-            Constraint::Length(2), // Memory
-            Constraint::Length(2), // Nested virt
-            Constraint::Length(2), // User-data
-            Constraint::Length(2), // Submit
+            Constraint::Length(1), // [0] Padding
+            Constraint::Length(2), // [1] Name
+            Constraint::Length(4), // [2] Disk selector (expanded)
+            Constraint::Length(2), // [3] VCPUs
+            Constraint::Length(2), // [4] Memory
+            Constraint::Length(2), // [5] Nested virt
+            Constraint::Length(2), // [6] Network
+            Constraint::Length(2), // [7] User-data
+            Constraint::Length(2), // [8] Submit
         ])
         .split(inner);
 
@@ -506,8 +559,50 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
     ]);
     frame.render_widget(Paragraph::new(nested_line), field_chunks[5]);
 
+    // Network selector
+    let network_focused = modal.focused_field == 5;
+    let network_display = match modal.selected_network {
+        None => "None".to_string(),
+        Some(idx) => modal
+            .network_items
+            .get(idx)
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| "Unknown".to_string()),
+    };
+    let network_line = Line::from(vec![
+        Span::styled(
+            " Network:    ",
+            if network_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("[{}]", network_display),
+            if network_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+        if network_focused {
+            if modal.network_items.is_empty() {
+                Span::styled(
+                    " (no networks available)",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::styled(" [↑↓: select]", Style::default().fg(Color::Yellow))
+            }
+        } else {
+            Span::raw("")
+        },
+    ]);
+    frame.render_widget(Paragraph::new(network_line), field_chunks[6]);
+
     // User-Data
-    let user_data_focused = modal.focused_field == 5;
+    let user_data_focused = modal.focused_field == 6;
     let (user_data_mode_str, user_data_value, user_data_hint) = match modal.user_data_mode {
         UserDataMode::None => ("None", "".to_string(), "[Space: cycle]"),
         UserDataMode::SshKeys => {
@@ -568,10 +663,10 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
             Span::raw("")
         },
     ]);
-    frame.render_widget(Paragraph::new(user_data_line), field_chunks[6]);
+    frame.render_widget(Paragraph::new(user_data_line), field_chunks[7]);
 
     // Submit button
-    let submit_style = if modal.focused_field == 6 {
+    let submit_style = if modal.focused_field == 7 {
         Style::default().fg(Color::Black).bg(Color::Green).bold()
     } else {
         Style::default().fg(Color::Green)
@@ -581,5 +676,5 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
         submit_style,
     )]))
     .alignment(Alignment::Center);
-    frame.render_widget(submit, field_chunks[7]);
+    frame.render_widget(submit, field_chunks[8]);
 }

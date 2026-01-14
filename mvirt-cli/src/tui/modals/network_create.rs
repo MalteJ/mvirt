@@ -13,11 +13,7 @@ pub struct NetworkCreateModal {
 
 impl NetworkCreateModal {
     pub fn new() -> Self {
-        Self {
-            ipv4_subnet: "10.0.0.0/24".to_string(),
-            ipv6_prefix: String::new(),
-            ..Default::default()
-        }
+        Self::default()
     }
 
     pub fn field_count() -> usize {
@@ -81,7 +77,7 @@ impl NetworkCreateModal {
         } else {
             // Basic CIDR validation
             if !self.ipv6_prefix.contains('/') {
-                return Err("IPv6 prefix must be in CIDR format (e.g., fd00::/64)".to_string());
+                return Err("IPv6 prefix must be in CIDR format (e.g., 2001:db8::/64)".to_string());
             }
             Some(self.ipv6_prefix.clone())
         };
@@ -148,6 +144,11 @@ pub fn draw(frame: &mut Frame, modal: &NetworkCreateModal) {
         } else {
             Span::raw("")
         },
+        if modal.ipv4_subnet.is_empty() && modal.focused_field != 1 {
+            Span::styled(" (e.g. 10.0.0.0/24)", Style::default().fg(Color::DarkGray))
+        } else {
+            Span::raw("")
+        },
     ]);
     frame.render_widget(Paragraph::new(ipv4_line), chunks[1]);
 
@@ -166,7 +167,10 @@ pub fn draw(frame: &mut Frame, modal: &NetworkCreateModal) {
             Span::raw("")
         },
         if modal.ipv6_prefix.is_empty() && modal.focused_field != 2 {
-            Span::styled(" (optional)", Style::default().fg(Color::DarkGray))
+            Span::styled(
+                " (e.g. 2001:db8::/64)",
+                Style::default().fg(Color::DarkGray),
+            )
         } else {
             Span::raw("")
         },
