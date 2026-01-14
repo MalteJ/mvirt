@@ -4,5 +4,17 @@ members = [
     "mvirt-vmm",
     "mvirt-cli",
     "mvirt-zfs",
-    "mvirt-os/pideisn", "mvirt-log",
+    "mvirt-net",
+    "mvirt-os/pideisn",
+    "mvirt-log",
 ]
+
+# Size optimization for pideins (VM init process)
+[profile.release.package.pideisn]
+opt-level = "z"
+codegen-units = 1
+strip = true
+
+[profile.release]
+lto = true
+panic = "abort"
