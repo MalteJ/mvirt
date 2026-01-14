@@ -100,7 +100,7 @@ docker:
 
 # ============ DEBIAN PACKAGES ============
 
-DEB_OUT := deb-out
+DEB_OUT := target/deb
 
 deb: vmm-deps
 	dpkg-buildpackage -us -uc -b
