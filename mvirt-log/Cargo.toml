@@ -3,6 +3,14 @@ name = "mvirt-log"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "mvirt_log"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mvirt-log"
+path = "src/main.rs"
+
 [dependencies]
 tonic = "0.12"
 prost = "0.13"

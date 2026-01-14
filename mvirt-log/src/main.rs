@@ -5,14 +5,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{error, info};
 
-pub mod mvirt {
-    pub mod log {
-        tonic::include_proto!("mvirt.log");
-    }
-}
-
-use mvirt::log::log_service_server::{LogService, LogServiceServer};
-use mvirt::log::{LogEntry, LogRequest, LogResponse, QueryRequest};
+use mvirt_log::{LogEntry, LogRequest, LogResponse, LogService, LogServiceServer, QueryRequest};
 
 mod storage;
 use std::sync::Arc;

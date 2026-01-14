@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::mvirt::log::LogEntry;
+use mvirt_log::LogEntry;
 
 pub struct LogManager {
     conn: Mutex<Connection>,
@@ -99,7 +99,13 @@ impl LogManager {
                  LIMIT ?4",
             )?;
             let mapped = stmt.query_map(params![obj, start, end, limit as i64], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?;
             mapped.collect::<Result<Vec<_>, _>>()?
         } else {
@@ -111,7 +117,13 @@ impl LogManager {
                  LIMIT ?3",
             )?;
             let mapped = stmt.query_map(params![start, end, limit as i64], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?;
             mapped.collect::<Result<Vec<_>, _>>()?
         };
