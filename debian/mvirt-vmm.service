@@ -1,0 +1,12 @@
+[Unit]
+Description=mvirt VM Manager
+After=network.target mvirt-log.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mvirt-vmm
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

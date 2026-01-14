@@ -1,0 +1,12 @@
+[Unit]
+Description=mvirt ZFS Storage Manager
+After=network.target mvirt-log.service zfs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mvirt-zfs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

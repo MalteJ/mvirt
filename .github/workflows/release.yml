@@ -16,7 +16,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build with Docker
-        run: make docker
+        run: |
+          docker build -t mvirt-builder .
+          docker run --rm \
+            --user $(id -u):$(id -g) \
+            -v $PWD:/work \
+            mvirt-builder \
+            make iso deb
 
       - name: Get version from tag
         id: version
@@ -34,3 +40,4 @@ jobs:
             mvirt-os/target/mvirt-os.iso
             target/x86_64-unknown-linux-musl/release/mvirt
             target/x86_64-unknown-linux-musl/release/mvirt-vmm
+            deb-out/*.deb

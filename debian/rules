@@ -1,0 +1,36 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export CARGO_HOME = $(CURDIR)/debian/.cargo
+
+MUSL_TARGET = x86_64-unknown-linux-musl
+RELEASE_DIR = target/$(MUSL_TARGET)/release
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Download cloud-hypervisor and CLOUDHV.fd
+	$(MAKE) vmm-deps
+	# Build all Rust binaries
+	cargo build --release --target $(MUSL_TARGET)
+
+override_dh_auto_install:
+	# dh_install handles everything via .install files
+
+override_dh_auto_test:
+	# Skip tests during package build
+
+override_dh_auto_clean:
+	cargo clean || true
+	$(MAKE) vmm-clean || true
+	rm -rf debian/.cargo
+
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start
+
+override_dh_strip:
+	dh_strip --exclude=CLOUDHV.fd --no-automatic-dbgsym
+
+override_dh_dwz:
+	dh_dwz --exclude=CLOUDHV.fd

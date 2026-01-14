@@ -1,0 +1,13 @@
+[Unit]
+Description=mvirt Network Manager
+After=network.target mvirt-log.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mvirt-net
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=mvirt-net
+
+[Install]
+WantedBy=multi-user.target

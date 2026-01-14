@@ -1,0 +1,12 @@
+[Unit]
+Description=mvirt Logging Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mvirt-log
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

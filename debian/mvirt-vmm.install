@@ -1,0 +1,3 @@
+target/x86_64-unknown-linux-musl/release/mvirt-vmm usr/bin/
+mvirt-vmm/target/cloud-hypervisor usr/bin/
+mvirt-vmm/target/CLOUDHV.fd usr/share/mvirt/

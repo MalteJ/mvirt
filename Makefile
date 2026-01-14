@@ -3,12 +3,13 @@
 
 MUSL_TARGET := x86_64-unknown-linux-musl
 
-.PHONY: all build release os kernel initramfs uki iso menuconfig clean distclean check docker mvirt-log mvirt-zfs
+.PHONY: all build release os kernel initramfs uki iso menuconfig clean distclean check docker deb deb-clean mvirt-log mvirt-zfs
 
 # Include subsystems
 include mvirt-os/mvirt-os.mk
 include mvirt-log/mvirt-log.mk
 include mvirt-zfs/mvirt-zfs.mk
+include mvirt-vmm/mvirt-vmm.mk
 
 # Default: build everything
 all: release os
@@ -34,7 +35,7 @@ os: uki
 clean: os-clean
 	cargo clean
 
-distclean: os-distclean
+distclean: os-distclean vmm-clean deb-clean
 	cargo clean
 
 # ============ CHECK BUILD DEPENDENCIES ============
@@ -96,3 +97,18 @@ docker:
 		-v $(CURDIR):/work \
 		$(DOCKER_IMAGE) \
 		make iso
+
+# ============ DEBIAN PACKAGES ============
+
+DEB_OUT := deb-out
+
+deb: vmm-deps
+	dpkg-buildpackage -us -uc -b
+	mkdir -p $(DEB_OUT)
+	mv -f ../mvirt*.deb $(DEB_OUT)/
+	@echo ""
+	@echo "Debian packages built in $(DEB_OUT)/:"
+	@ls -1 $(DEB_OUT)/*.deb | xargs -I{} basename {}
+
+deb-clean:
+	rm -rf $(DEB_OUT)

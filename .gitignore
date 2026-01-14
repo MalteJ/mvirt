@@ -23,3 +23,9 @@ target/
 /mvirt-os/target/
 /mvirt-os/initramfs/rootfs/init
 /mvirt-os/initramfs/rootfs/usr/
+
+# mvirt-vmm downloads
+/mvirt-vmm/target/
+
+# Debian packaging
+/deb-out/

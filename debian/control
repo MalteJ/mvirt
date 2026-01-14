@@ -1,0 +1,42 @@
+Source: mvirt
+Section: admin
+Priority: optional
+Maintainer: Malte <malte@localhost>
+Build-Depends: debhelper-compat (= 13), curl
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: mvirt
+Architecture: amd64
+Depends: ${misc:Depends}
+Description: CLI/TUI for mvirt VM management
+ Command-line interface and terminal UI for managing virtual machines
+ via the mvirt daemon.
+
+Package: mvirt-vmm
+Architecture: amd64
+Depends: ${misc:Depends}
+Description: mvirt VM Manager daemon
+ Virtual machine manager daemon that uses cloud-hypervisor to run VMs.
+ Includes cloud-hypervisor binary and CLOUDHV.fd UEFI firmware.
+
+Package: mvirt-log
+Architecture: amd64
+Depends: ${misc:Depends}
+Description: mvirt centralized logging service
+ Centralized audit logging service for all mvirt components.
+ Stores logs in SQLite with many-to-many object relations.
+
+Package: mvirt-zfs
+Architecture: amd64
+Depends: ${misc:Depends}, zfsutils-linux
+Description: mvirt ZFS storage management daemon
+ ZFS storage management daemon for mvirt.
+ Manages ZFS volumes, snapshots, and templates.
+
+Package: mvirt-net
+Architecture: amd64
+Depends: ${misc:Depends}
+Description: mvirt network management daemon
+ Network management daemon for mvirt.
+ Manages virtual networks and NICs.

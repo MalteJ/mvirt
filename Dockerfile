@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     musl-tools \
     # gRPC/protobuf
     protobuf-compiler \
+    # Debian packaging
+    debhelper \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust system-wide
