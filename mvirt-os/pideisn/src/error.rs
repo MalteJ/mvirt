@@ -10,7 +10,6 @@ pub enum Error {
         source: nix::errno::Errno,
     },
     Network(NetworkError),
-    Service(String),
 }
 
 #[derive(Debug)]
@@ -32,7 +31,6 @@ impl fmt::Display for Error {
             Error::Nix(e) => write!(f, "System error: {e}"),
             Error::Mount { target, source } => write!(f, "Failed to mount {target}: {source}"),
             Error::Network(e) => write!(f, "Network error: {e}"),
-            Error::Service(msg) => write!(f, "Service error: {msg}"),
         }
     }
 }

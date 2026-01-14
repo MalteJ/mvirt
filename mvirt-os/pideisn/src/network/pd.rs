@@ -1,3 +1,6 @@
+//! Prefix delegation pool for allocating IPv6 addresses to nested VMs.
+#![allow(dead_code)]
+
 use crate::network::DelegatedPrefix;
 use std::collections::HashMap;
 use std::net::Ipv6Addr;

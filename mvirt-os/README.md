@@ -7,21 +7,26 @@ Build system for Linux kernel, initramfs, and UKI (Unified Kernel Image).
 - Minimal Linux kernel for cloud-hypervisor
 - initramfs with statically linked binaries
 - UKI for direct EFI booting
-- pideins - Rust init (PID 1)
+- pideisn - Rust init (PID 1)
 
 ## Usage
 
+All commands are run from the repository root:
+
 ```bash
 # Build everything (kernel + initramfs + UKI)
-make -C mvirt-os
+make os
 
 # Individual targets
-make -C mvirt-os kernel
-make -C mvirt-os initramfs
-make -C mvirt-os uki
+make kernel
+make initramfs
+make uki
+
+# Bootable ISO
+make iso
 
 # Configure kernel
-make -C mvirt-os menuconfig
+make menuconfig
 ```
 
 ## Structure
@@ -40,7 +45,7 @@ mvirt-os/
 │       ├── sys/
 │       ├── usr/bin/
 │       └── usr/sbin/
-├── pideins/                # Rust init
+├── pideisn/                # Rust init
 │   ├── Cargo.toml
 │   └── src/main.rs
 └── target/                 # Build output
@@ -80,12 +85,12 @@ console=ttyS0 quiet
 
 | Path | Source |
 |------|--------|
-| `/init` | `pideins` (Rust init) |
+| `/init` | `pideisn` (Rust init) |
 | `/usr/sbin/mvirt` | CLI |
 | `/usr/sbin/mvirt-vmm` | Daemon |
 | `/usr/bin/cloud-hypervisor` | cloud-hypervisor release |
 
-## pideins
+## pideisn
 
 Minimal init process in Rust:
 
@@ -107,8 +112,8 @@ Minimal init process in Rust:
 ## Cleanup
 
 ```bash
-make -C mvirt-os clean       # Delete build artifacts
-make -C mvirt-os distclean   # + kernel source + downloads
+make clean       # Delete build artifacts
+make distclean   # + kernel source + downloads
 ```
 
 ## Dependencies

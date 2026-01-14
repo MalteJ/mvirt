@@ -68,8 +68,14 @@ make
 # Rust binaries only
 make release
 
-# mvirt-os only
+# mvirt-os only (kernel + initramfs + UKI)
 make os
+
+# Bootable ISO (BIOS + UEFI)
+make iso
+
+# Check build dependencies
+make check
 ```
 
 ## Development
@@ -110,7 +116,7 @@ mvirt/
 │   │   └── store.rs        # SQLite persistence
 │   └── proto/              # gRPC proto (server)
 ├── mvirt-os/               # OS build system
-│   ├── pideins/            # Rust init (PID 1)
+│   ├── pideisn/            # Rust init (PID 1)
 │   ├── initramfs/          # initramfs skeleton
 │   ├── kernel.config       # Kernel Kconfig fragment
 │   └── *.mk                # Make includes
@@ -124,7 +130,13 @@ mvirt/
 |------|-------------|
 | `target/x86_64-unknown-linux-musl/release/mvirt` | CLI binary |
 | `target/x86_64-unknown-linux-musl/release/mvirt-vmm` | Daemon binary |
-| `mvirt-os/mvirt.efi` | Bootable UKI |
+| `mvirt-os/target/mvirt.efi` | Bootable UKI |
+| `mvirt-os/target/mvirt-os.iso` | Bootable ISO |
+
+## Documentation
+
+- [Development Guide](docs/development.md) - Build system, workflow, code quality
+- [Kernel Configuration](docs/kernel.md) - Kernel build, adding drivers
 
 ## License
 

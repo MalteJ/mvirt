@@ -75,6 +75,7 @@ firmware: $(FW_BIN)
 $(INITRAMFS): $(CH_BIN) $(FW_BIN) $(RUST_TARGET_DIR)/pideisn $(RUST_TARGET_DIR)/mvirt $(RUST_TARGET_DIR)/mvirt-vmm | $(MVIRT_OS_DIR)/target
 	cp $(RUST_TARGET_DIR)/pideisn $(INITRAMFS_ROOTFS)/init
 	chmod +x $(INITRAMFS_ROOTFS)/init
+	mkdir -p $(INITRAMFS_ROOTFS)/usr/sbin $(INITRAMFS_ROOTFS)/usr/bin
 	cp $(RUST_TARGET_DIR)/mvirt $(INITRAMFS_ROOTFS)/usr/sbin/mvirt
 	cp $(RUST_TARGET_DIR)/mvirt-vmm $(INITRAMFS_ROOTFS)/usr/sbin/
 	chmod +x $(INITRAMFS_ROOTFS)/usr/sbin/*
@@ -106,7 +107,7 @@ ISO_DIR := $(MVIRT_OS_DIR)/target/iso
 
 CMDLINE := $(shell cat $(MVIRT_OS_DIR)/cmdline.txt 2>/dev/null)
 
-$(ISO): $(BZIMAGE) $(INITRAMFS) $(UKI) $(MVIRT_OS_DIR)/cmdline.txt | $(MVIRT_OS_DIR)/target
+$(ISO): $(UKI) $(MVIRT_OS_DIR)/cmdline.txt | $(MVIRT_OS_DIR)/target
 	rm -rf $(ISO_DIR)
 	mkdir -p $(ISO_DIR)/boot/grub
 	mkdir -p $(ISO_DIR)/EFI/BOOT

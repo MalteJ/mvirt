@@ -83,8 +83,8 @@ impl RawSocket {
     fn set_read_timeout(&self, dur: Option<Duration>) -> Result<(), std::io::Error> {
         let tv = match dur {
             Some(d) => libc::timeval {
-                tv_sec: d.as_secs() as libc::time_t,
-                tv_usec: d.subsec_micros() as libc::suseconds_t,
+                tv_sec: d.as_secs() as i64,
+                tv_usec: d.subsec_micros() as i64,
             },
             None => libc::timeval {
                 tv_sec: 0,
@@ -405,6 +405,8 @@ struct PrefixInfo {
     prefix: Ipv6Addr,
     prefix_len: u8,
     autonomous: bool,
+    #[allow(dead_code)]
     valid_lifetime: u32,
+    #[allow(dead_code)]
     preferred_lifetime: u32,
 }

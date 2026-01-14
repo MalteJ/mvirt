@@ -90,6 +90,7 @@ pub struct Dhcp4Lease {
     pub address: Ipv4Addr,
     pub netmask: Ipv4Addr,
     pub gateway: Option<Ipv4Addr>,
+    #[allow(dead_code)]
     pub dns_servers: Vec<Ipv4Addr>,
     pub lease_time: u32,
 }
@@ -98,6 +99,7 @@ pub struct Dhcp4Lease {
 pub struct Dhcp6Lease {
     pub address: Option<std::net::Ipv6Addr>,
     pub prefix: Option<DelegatedPrefix>,
+    #[allow(dead_code)]
     pub dns_servers: Vec<std::net::Ipv6Addr>,
 }
 

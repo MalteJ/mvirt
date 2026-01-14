@@ -19,9 +19,13 @@ build:
 release:
 	cargo build --release --target $(MUSL_TARGET)
 
+# Rust binary targets (for dependency tracking)
+$(RUST_TARGET_DIR)/pideisn $(RUST_TARGET_DIR)/mvirt $(RUST_TARGET_DIR)/mvirt-vmm:
+	cargo build --release --target $(MUSL_TARGET)
+
 # ============ MVIRT-OS ============
 
-os: release kernel initramfs uki
+os: uki
 
 # ============ CLEAN ============
 
