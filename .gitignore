@@ -27,5 +27,13 @@ target/
 # mvirt-vmm downloads
 /mvirt-vmm/target/
 
-# Debian packaging
-/deb-out/
+# Debian packaging build artifacts
+/debian/.cargo/
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.debhelper.log
+/debian/*.postrm.debhelper
+/debian/*.substvars
+/debian/mvirt/
+/debian/mvirt-*/
