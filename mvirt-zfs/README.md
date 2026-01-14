@@ -18,7 +18,7 @@ mvirt-zfs is a standalone gRPC daemon that manages ZFS storage independently fro
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │  mvirt-cli  │────▶│  mvirt-zfs  │     │  mvirt-vmm  │
-│   (TUI)     │     │   :50052    │     │   :50051    │
+│   (TUI)     │     │   :50053    │     │   :50051    │
 └─────────────┘     └─────────────┘     └─────────────┘
       │                   │                   ▲
       │  1. CreateVolume  │                   │
@@ -45,10 +45,10 @@ This loose coupling means:
 
 ```bash
 # Start the daemon
-mvirt-zfs --pool vmpool --listen [::1]:50052
+mvirt-zfs --pool vmpool --listen [::1]:50053
 
 # With custom pool
-mvirt-zfs --pool mypool --listen 0.0.0.0:50052
+mvirt-zfs --pool mypool --listen 0.0.0.0:50053
 ```
 
 ## gRPC API

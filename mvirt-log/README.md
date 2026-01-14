@@ -99,12 +99,37 @@ message LogRequest { LogEntry entry = 1; }
 message LogResponse { bytes id = 1; }
 ```
 
-## Implementation Plan
+## Usage
 
-1.  **Initialize Crate:** `mvirt-log`
-2.  **Dependencies:** `tonic`, `prost`, `fjall`, `serde`.
-3.  **Core Logic:**
-    - Setup `fjall::Config`.
-    - Implement `LogManager` struct wrapping the DB.
-    - Implement `Batch` construction logic.
-4.  **gRPC Layer:** Connect `LogService` to `LogManager`.
+```bash
+# Start the logging service
+mvirt-log --listen [::1]:50052 --data-dir /var/lib/mvirt-log
+
+# Custom data directory
+mvirt-log --data-dir ./log-data
+```
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--listen` | `[::1]:50052` | gRPC listen address |
+| `--data-dir` | `/var/lib/mvirt-log` | Data directory for log storage |
+
+## Data Directory
+
+```
+<data-dir>/
+└── fjall/          # LSM-Tree storage (logs_data + index_objects)
+```
+
+## Building
+
+```bash
+cargo build -p mvirt-log
+```
+
+## See Also
+
+- [Architecture](../docs/architecture.md) - System overview
+- [CLAUDE.md](../CLAUDE.md) - Logging guidelines and AuditLogger usage

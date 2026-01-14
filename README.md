@@ -20,30 +20,32 @@ Lightweight VM manager in Rust as a modern alternative to libvirt.
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        mvirt (CLI/TUI)                      │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ gRPC
-┌─────────────────────────▼───────────────────────────────────┐
-│                      mvirt-vmm (Daemon)                     │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐   │
-│  │ gRPC Server │  │  Hypervisor  │  │  SQLite Store     │   │
-│  └─────────────┘  └──────┬───────┘  └───────────────────┘   │
-└──────────────────────────┼──────────────────────────────────┘
-                           │ HTTP API (Unix Socket)
-┌──────────────────────────▼──────────────────────────────────┐
-│                 cloud-hypervisor Processes                  │
-│       ┌────────┐    ┌────────┐    ┌────────┐                │
-│       │  VM 1  │    │  VM 2  │    │  VM n  │                │
-│       └────────┘    └────────┘    └────────┘                │
-└─────────────────────────────────────────────────────────────┘
+└───────┬─────────────┬─────────────┬─────────────┬───────────┘
+        │             │             │             │ gRPC
+        ▼             ▼             ▼             ▼
+┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
+│ mvirt-vmm │  │ mvirt-zfs │  │ mvirt-net │  │ mvirt-log │
+│   :50051  │  │   :50053  │  │   :50054  │  │   :50052  │
+└─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └───────────┘
+      │              │              │
+      ▼              ▼              ▼
+┌───────────┐  ┌───────────┐  ┌───────────┐
+│ cloud-    │  │    ZFS    │  │   TAP     │
+│ hypervisor│  │   Pool    │  │  Devices  │
+└───────────┘  └───────────┘  └───────────┘
 ```
 
 ## Components
 
-| Directory | Description |
-|-----------|-------------|
-| `mvirt-vmm/` | Daemon that manages VMs |
-| `mvirt-cli/` | CLI and TUI client |
-| `mvirt-os/` | Linux kernel, initramfs, UKI build system |
+| Directory      | Port  | Description                          |
+|----------------|-------|--------------------------------------|
+| `mvirt-cli/`   | -     | CLI and TUI client                   |
+| `mvirt-vmm/`   | 50051 | VM manager daemon                    |
+| `mvirt-log/`   | 50052 | Centralized audit logging service    |
+| `mvirt-zfs/`   | 50053 | ZFS storage management daemon        |
+| `mvirt-net/`   | 50054 | Virtual networking daemon            |
+| `mvirt-os/`    | -     | Linux kernel, initramfs, UKI builder |
+| `proto/`       | -     | gRPC protocol definitions            |
 
 ## Prerequisites
 
@@ -107,25 +109,16 @@ mvirt/
 ├── Cargo.toml              # Workspace
 ├── Makefile                # Build orchestration
 ├── Dockerfile              # Build environment
+├── proto/                  # gRPC protocol definitions
 ├── mvirt-cli/              # CLI + TUI
-│   ├── src/
-│   │   ├── main.rs         # CLI commands
-│   │   └── tui.rs          # TUI with ratatui
-│   └── proto/              # gRPC proto (client)
-├── mvirt-vmm/              # Daemon
-│   ├── src/
-│   │   ├── main.rs         # Server startup
-│   │   ├── grpc.rs         # gRPC handlers
-│   │   ├── hypervisor.rs   # cloud-hypervisor management
-│   │   └── store.rs        # SQLite persistence
-│   └── proto/              # gRPC proto (server)
-├── mvirt-os/               # OS build system
-│   ├── pideisn/            # Rust init (PID 1)
-│   ├── initramfs/          # initramfs skeleton
-│   ├── kernel.config       # Kernel Kconfig fragment
-│   └── *.mk                # Make includes
-├── images/                 # VM disk images
-└── tmp/                    # Development data dir
+├── mvirt-vmm/              # VM manager daemon
+├── mvirt-log/              # Audit logging service
+├── mvirt-zfs/              # ZFS storage daemon
+├── mvirt-net/              # Networking daemon
+├── mvirt-os/               # Linux kernel + initramfs builder
+│   └── pideisn/            # Rust init (PID 1)
+├── docs/                   # Documentation
+└── images/                 # VM disk images (not in git)
 ```
 
 ## Output
@@ -133,14 +126,22 @@ mvirt/
 | File | Description |
 |------|-------------|
 | `target/x86_64-unknown-linux-musl/release/mvirt` | CLI binary |
-| `target/x86_64-unknown-linux-musl/release/mvirt-vmm` | Daemon binary |
+| `target/x86_64-unknown-linux-musl/release/mvirt-vmm` | VM manager daemon |
+| `target/x86_64-unknown-linux-musl/release/mvirt-log` | Logging service |
+| `target/x86_64-unknown-linux-musl/release/mvirt-zfs` | ZFS storage daemon |
+| `target/x86_64-unknown-linux-musl/release/mvirt-net` | Networking daemon |
 | `mvirt-os/target/mvirt.efi` | Bootable UKI |
 | `mvirt-os/target/mvirt-os.iso` | Bootable ISO |
 
 ## Documentation
 
-- [Development Guide](docs/development.md) - Build system, workflow, code quality
-- [Kernel Configuration](docs/kernel.md) - Kernel build, adding drivers
+- [Getting Started](docs/getting-started.md) - Quick start guide
+- [Architecture](docs/architecture.md) - How components work together
+- [Development Guide](docs/development/building.md) - Build system, workflow
+- [Kernel Configuration](docs/development/kernel.md) - Kernel build, adding drivers
+- [Networking](docs/concepts/networking.md) - vNICs, IP addressing, gateway model
+- [Storage](docs/concepts/storage.md) - Templates, volumes, snapshots
+- [Service Ports](docs/reference/ports.md) - All service ports and configuration
 
 ## License
 

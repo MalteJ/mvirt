@@ -8,15 +8,19 @@ This guide explains the mvirt build system and development workflow.
 mvirt/
 ├── mvirt-cli/           # CLI client + TUI
 ├── mvirt-vmm/           # Daemon (VM Manager)
+├── mvirt-log/           # Centralized audit logging
+├── mvirt-zfs/           # ZFS storage management
+├── mvirt-net/           # Virtual networking
 ├── mvirt-os/            # Mini-Linux for VMs
 │   ├── pideisn/         # Rust init process (PID 1)
 │   ├── initramfs/       # rootfs skeleton
 │   ├── kernel.config    # Kernel config fragment
 │   └── mvirt-os.mk      # OS build rules
-├── proto/               # gRPC API definition
 ├── docs/                # Documentation
 └── Makefile             # Main build orchestration
 ```
+
+Each service has its own `proto/` subdirectory with gRPC definitions.
 
 ## Build System
 
@@ -68,6 +72,9 @@ The binaries are:
 - `pideisn` - Init process (PID 1) for the mini-Linux
 - `mvirt` - CLI client
 - `mvirt-vmm` - VM manager daemon
+- `mvirt-log` - Audit logging service
+- `mvirt-zfs` - ZFS storage daemon
+- `mvirt-net` - Networking daemon
 
 ### Output Artifacts
 
@@ -85,9 +92,9 @@ All build outputs go to `mvirt-os/target/`:
 
 ### Code Changes
 
-1. Edit code in `mvirt-cli/`, `mvirt-vmm/`, or `mvirt-os/pideisn/`
-2. Run `cargo fmt && cargo clippy` to check formatting and lints
-3. Run `make iso` to rebuild with changes
+1. Edit code in any module (`mvirt-cli/`, `mvirt-vmm/`, `mvirt-zfs/`, `mvirt-net/`, `mvirt-log/`, `mvirt-os/pideisn/`)
+2. Run `cargo fmt && cargo clippy --workspace` to check formatting and lints
+3. Run `make iso` to rebuild with changes (for mvirt-os), or `cargo build` for daemons only
 
 ### Testing in VM
 
