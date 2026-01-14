@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,8 @@ use crate::store::VmStore;
 
 const CLOUD_HYPERVISOR_BIN: &str = "/usr/bin/cloud-hypervisor";
 const FIRMWARE_FILENAME: &str = "hypervisor-fw";
+const HUGEPAGES_FREE_PATH: &str = "/sys/kernel/mm/hugepages/hugepages-2048kB/free_hugepages";
+const HUGEPAGE_SIZE_KB: u64 = 2048;
 
 pub struct Hypervisor {
     data_dir: PathBuf,
@@ -34,6 +37,21 @@ impl Hypervisor {
         hypervisor.ensure_bridge().await?;
 
         Ok(hypervisor)
+    }
+
+    /// Check if enough 2MiB hugepages are available for the given memory size
+    fn hugepages_available(memory_mb: u64) -> bool {
+        let required_pages = (memory_mb * 1024) / HUGEPAGE_SIZE_KB;
+        match fs::read_to_string(HUGEPAGES_FREE_PATH) {
+            Ok(content) => {
+                if let Ok(free_pages) = content.trim().parse::<u64>() {
+                    free_pages >= required_pages
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        }
     }
 
     async fn ensure_bridge(&self) -> Result<()> {
@@ -271,8 +289,13 @@ ethernets:
         };
         cmd.arg("--cpus").arg(cpus_arg);
 
-        cmd.arg("--memory")
-            .arg(format!("size={}M", config.memory_mb));
+        let memory_arg = if Self::hugepages_available(config.memory_mb) {
+            info!("Using hugepages for VM memory ({}MB)", config.memory_mb);
+            format!("size={}M,hugepages=on", config.memory_mb)
+        } else {
+            format!("size={}M", config.memory_mb)
+        };
+        cmd.arg("--memory").arg(memory_arg);
 
         // Collect all disks
         let mut disk_args: Vec<String> = Vec::new();
