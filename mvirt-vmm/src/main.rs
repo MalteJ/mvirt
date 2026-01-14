@@ -2,8 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use mvirt_log::LogServiceClient;
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod grpc;
@@ -62,8 +63,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn process watcher
     let _watcher_shutdown = hypervisor.clone().spawn_watcher();
 
+    // Connect to mvirt-log (optional)
+    let log_client = match LogServiceClient::connect("http://[::1]:50052").await {
+        Ok(client) => {
+            info!("Connected to mvirt-log audit service");
+            Some(client)
+        }
+        Err(_) => {
+            warn!("mvirt-log unavailable, audit logging disabled");
+            None
+        }
+    };
+
     // Create gRPC service
-    let service = VmServiceImpl::new(store, hypervisor);
+    let service = VmServiceImpl::new(store, hypervisor, log_client);
 
     let addr = args.listen.parse()?;
     info!(addr = %addr, "Starting gRPC server");

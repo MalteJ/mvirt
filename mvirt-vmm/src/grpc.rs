@@ -1,11 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use mvirt_log::{LogEntry, LogLevel, LogRequest, LogServiceClient};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 use tracing::{error, info};
 
@@ -14,14 +15,37 @@ use crate::proto::vm_service_server::VmService;
 use crate::proto::*;
 use crate::store::VmStore;
 
+type LogClient = LogServiceClient<tonic::transport::Channel>;
+
 pub struct VmServiceImpl {
     store: Arc<VmStore>,
     hypervisor: Arc<Hypervisor>,
+    log_client: Option<LogClient>,
 }
 
 impl VmServiceImpl {
-    pub fn new(store: Arc<VmStore>, hypervisor: Arc<Hypervisor>) -> Self {
-        Self { store, hypervisor }
+    pub fn new(store: Arc<VmStore>, hypervisor: Arc<Hypervisor>, log_client: Option<LogClient>) -> Self {
+        Self { store, hypervisor, log_client }
+    }
+
+    /// Send audit log entry (non-blocking, fire-and-forget)
+    fn audit_log(&self, message: impl Into<String>, level: LogLevel, object_ids: Vec<String>) {
+        if let Some(mut client) = self.log_client.clone() {
+            let message = message.into();
+            tokio::spawn(async move {
+                let _ = client
+                    .log(LogRequest {
+                        entry: Some(LogEntry {
+                            message,
+                            level: level as i32,
+                            component: "vmm".into(),
+                            related_object_ids: object_ids,
+                            ..Default::default()
+                        }),
+                    })
+                    .await;
+            });
+        }
     }
 }
 
@@ -105,6 +129,11 @@ impl VmService for VmServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         info!(id = %entry.id, "VM created");
+        self.audit_log(
+            format!("VM created: {}", entry.name.as_deref().unwrap_or(&entry.id)),
+            LogLevel::Audit,
+            vec![entry.id.clone()],
+        );
         Ok(Response::new(entry.to_proto()))
     }
 
@@ -156,6 +185,11 @@ impl VmService for VmServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         info!(id = %req.id, "VM deleted");
+        self.audit_log(
+            format!("VM deleted: {}", entry.name.as_deref().unwrap_or(&req.id)),
+            LogLevel::Audit,
+            vec![req.id],
+        );
         Ok(Response::new(DeleteVmResponse {}))
     }
 
@@ -190,6 +224,11 @@ impl VmService for VmServiceImpl {
         {
             // Revert state on failure
             let _ = self.store.update_state(&req.id, VmState::Stopped).await;
+            self.audit_log(
+                format!("VM start failed: {}", e),
+                LogLevel::Error,
+                vec![req.id.clone()],
+            );
             return Err(Status::internal(format!("Failed to start VM: {}", e)));
         }
 
@@ -202,6 +241,11 @@ impl VmService for VmServiceImpl {
             .ok_or_else(|| Status::internal("Failed to update VM state"))?;
 
         info!(id = %req.id, "VM started");
+        self.audit_log(
+            format!("VM started: {}", entry.name.as_deref().unwrap_or(&entry.id)),
+            LogLevel::Audit,
+            vec![entry.id.clone()],
+        );
         Ok(Response::new(entry.to_proto()))
     }
 
@@ -231,7 +275,9 @@ impl VmService for VmServiceImpl {
         // Spawn background task to stop the VM
         let hypervisor = Arc::clone(&self.hypervisor);
         let store = Arc::clone(&self.store);
+        let log_client = self.log_client.clone();
         let vm_id = req.id.clone();
+        let vm_name = entry.name.clone();
         let timeout = Duration::from_secs(req.timeout_seconds as u64);
         tokio::spawn(async move {
             if let Err(e) = hypervisor.stop(&vm_id, timeout).await {
@@ -241,6 +287,19 @@ impl VmService for VmServiceImpl {
                 error!(id = %vm_id, error = %e, "Failed to update VM state after stop");
             }
             info!(id = %vm_id, "VM stopped");
+            if let Some(mut client) = log_client {
+                let _ = client
+                    .log(LogRequest {
+                        entry: Some(LogEntry {
+                            message: format!("VM stopped: {}", vm_name.as_deref().unwrap_or(&vm_id)),
+                            level: LogLevel::Audit as i32,
+                            component: "vmm".into(),
+                            related_object_ids: vec![vm_id],
+                            ..Default::default()
+                        }),
+                    })
+                    .await;
+            }
         });
 
         Ok(Response::new(entry.to_proto()))
@@ -275,7 +334,9 @@ impl VmService for VmServiceImpl {
         // Spawn background task to kill the VM
         let hypervisor = Arc::clone(&self.hypervisor);
         let store = Arc::clone(&self.store);
+        let log_client = self.log_client.clone();
         let vm_id = req.id.clone();
+        let vm_name = entry.name.clone();
         tokio::spawn(async move {
             if let Err(e) = hypervisor.kill(&vm_id).await {
                 error!(id = %vm_id, error = %e, "Failed to kill VM");
@@ -284,6 +345,19 @@ impl VmService for VmServiceImpl {
                 error!(id = %vm_id, error = %e, "Failed to update VM state after kill");
             }
             info!(id = %vm_id, "VM killed");
+            if let Some(mut client) = log_client {
+                let _ = client
+                    .log(LogRequest {
+                        entry: Some(LogEntry {
+                            message: format!("VM killed: {}", vm_name.as_deref().unwrap_or(&vm_id)),
+                            level: LogLevel::Warn as i32,
+                            component: "vmm".into(),
+                            related_object_ids: vec![vm_id],
+                            ..Default::default()
+                        }),
+                    })
+                    .await;
+            }
         });
 
         Ok(Response::new(entry.to_proto()))
