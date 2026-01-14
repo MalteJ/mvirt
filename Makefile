@@ -3,10 +3,12 @@
 
 MUSL_TARGET := x86_64-unknown-linux-musl
 
-.PHONY: all build release os kernel initramfs uki iso menuconfig clean distclean check docker
+.PHONY: all build release os kernel initramfs uki iso menuconfig clean distclean check docker mvirt-log mvirt-zfs
 
-# Include mvirt-os subsystem
+# Include subsystems
 include mvirt-os/mvirt-os.mk
+include mvirt-log/mvirt-log.mk
+include mvirt-zfs/mvirt-zfs.mk
 
 # Default: build everything
 all: release os
@@ -37,7 +39,7 @@ distclean: os-distclean
 
 # ============ CHECK BUILD DEPENDENCIES ============
 
-REQUIRED_CMDS := cargo curl tar cpio gzip ukify xorriso
+REQUIRED_CMDS := cargo curl tar cpio gzip ukify xorriso qemu-img
 REQUIRED_FILES := /usr/lib/systemd/boot/efi/linuxx64.efi.stub
 ISO_FILES := /usr/lib/ISOLINUX/isolinux.bin /usr/lib/ISOLINUX/isohdpfx.bin \
              /usr/lib/syslinux/modules/bios/ldlinux.c32 \

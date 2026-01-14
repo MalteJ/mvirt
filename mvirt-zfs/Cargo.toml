@@ -1,0 +1,45 @@
+[package]
+name = "mvirt-zfs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client (for URL imports)
+reqwest = { version = "0.12", features = ["stream"] }
+futures-util = "0.3"
+
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+[build-dependencies]
+tonic-build = "0.12"
