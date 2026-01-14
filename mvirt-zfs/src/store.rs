@@ -26,6 +26,7 @@ impl Store {
 
     async fn migrate(&self) -> Result<()> {
         // Volumes table: tracks all managed volumes
+        // origin_template_id: NULL for empty volumes, template UUID for cloned volumes
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS volumes (
@@ -34,8 +35,7 @@ impl Store {
                 zfs_path TEXT NOT NULL,
                 device_path TEXT NOT NULL,
                 size_bytes INTEGER NOT NULL,
-                source_type TEXT,
-                source_ref TEXT,
+                origin_template_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -44,14 +44,29 @@ impl Store {
         .execute(&self.pool)
         .await?;
 
-        // Templates table: snapshots that serve as VM templates
+        // Migration: add origin_template_id column if it doesn't exist (for pre-existing databases)
+        let columns = sqlx::query("PRAGMA table_info(volumes)")
+            .fetch_all(&self.pool)
+            .await?;
+        let has_origin = columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "origin_template_id");
+        if !has_origin {
+            sqlx::query("ALTER TABLE volumes ADD COLUMN origin_template_id TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        // Templates table: base images for cloning volumes
+        // base_zvol_path: vmpool/.base/<uuid> - the hidden base ZVOL
+        // snapshot_path: vmpool/.base/<uuid>@img - the cloneable snapshot
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS templates (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
+                base_zvol_path TEXT NOT NULL,
                 snapshot_path TEXT NOT NULL,
-                source_volume_id TEXT,
                 size_bytes INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             )
@@ -60,12 +75,12 @@ impl Store {
         .execute(&self.pool)
         .await?;
 
-        // Import jobs table: tracks async import operations
+        // Import jobs table: tracks async import operations (creates templates)
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS import_jobs (
                 id TEXT PRIMARY KEY,
-                volume_name TEXT NOT NULL,
+                template_name TEXT NOT NULL,
                 source TEXT NOT NULL,
                 format TEXT NOT NULL,
                 state TEXT NOT NULL,
@@ -80,14 +95,15 @@ impl Store {
         .execute(&self.pool)
         .await?;
 
-        // Snapshots table: user snapshots (not templates)
+        // Snapshots table: point-in-time captures of volumes
+        // zfs_snapshot_name: the UUID used in ZFS (vmpool/<vol-uuid>@<snap-uuid>)
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS snapshots (
                 id TEXT PRIMARY KEY,
                 volume_id TEXT NOT NULL,
                 name TEXT NOT NULL,
-                snapshot_path TEXT NOT NULL,
+                zfs_snapshot_name TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (volume_id) REFERENCES volumes(id) ON DELETE CASCADE,
                 UNIQUE(volume_id, name)
@@ -105,8 +121,8 @@ impl Store {
     pub async fn create_volume(&self, entry: &VolumeEntry) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO volumes (id, name, zfs_path, device_path, size_bytes, source_type, source_ref, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO volumes (id, name, zfs_path, device_path, size_bytes, origin_template_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&entry.id)
@@ -114,8 +130,7 @@ impl Store {
         .bind(&entry.zfs_path)
         .bind(&entry.device_path)
         .bind(entry.size_bytes as i64)
-        .bind(&entry.source_type)
-        .bind(&entry.source_ref)
+        .bind(&entry.origin_template_id)
         .bind(&entry.created_at)
         .bind(&entry.updated_at)
         .execute(&self.pool)
@@ -124,11 +139,10 @@ impl Store {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn get_volume(&self, id: &str) -> Result<Option<VolumeEntry>> {
         let row = sqlx::query(
             r#"
-            SELECT id, name, zfs_path, device_path, size_bytes, source_type, source_ref, created_at, updated_at
+            SELECT id, name, zfs_path, device_path, size_bytes, origin_template_id, created_at, updated_at
             FROM volumes WHERE id = ?
             "#,
         )
@@ -142,8 +156,7 @@ impl Store {
             zfs_path: r.get("zfs_path"),
             device_path: r.get("device_path"),
             size_bytes: r.get::<i64, _>("size_bytes") as u64,
-            source_type: r.get("source_type"),
-            source_ref: r.get("source_ref"),
+            origin_template_id: r.get("origin_template_id"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         }))
@@ -152,7 +165,7 @@ impl Store {
     pub async fn get_volume_by_name(&self, name: &str) -> Result<Option<VolumeEntry>> {
         let row = sqlx::query(
             r#"
-            SELECT id, name, zfs_path, device_path, size_bytes, source_type, source_ref, created_at, updated_at
+            SELECT id, name, zfs_path, device_path, size_bytes, origin_template_id, created_at, updated_at
             FROM volumes WHERE name = ?
             "#,
         )
@@ -166,8 +179,7 @@ impl Store {
             zfs_path: r.get("zfs_path"),
             device_path: r.get("device_path"),
             size_bytes: r.get::<i64, _>("size_bytes") as u64,
-            source_type: r.get("source_type"),
-            source_ref: r.get("source_ref"),
+            origin_template_id: r.get("origin_template_id"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         }))
@@ -176,7 +188,7 @@ impl Store {
     pub async fn list_volumes(&self) -> Result<Vec<VolumeEntry>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, name, zfs_path, device_path, size_bytes, source_type, source_ref, created_at, updated_at
+            SELECT id, name, zfs_path, device_path, size_bytes, origin_template_id, created_at, updated_at
             FROM volumes ORDER BY created_at DESC
             "#,
         )
@@ -191,8 +203,7 @@ impl Store {
                 zfs_path: r.get("zfs_path"),
                 device_path: r.get("device_path"),
                 size_bytes: r.get::<i64, _>("size_bytes") as u64,
-                source_type: r.get("source_type"),
-                source_ref: r.get("source_ref"),
+                origin_template_id: r.get("origin_template_id"),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
             })
@@ -225,14 +236,14 @@ impl Store {
     pub async fn create_template(&self, entry: &TemplateEntry) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO templates (id, name, snapshot_path, source_volume_id, size_bytes, created_at)
+            INSERT INTO templates (id, name, base_zvol_path, snapshot_path, size_bytes, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&entry.id)
         .bind(&entry.name)
+        .bind(&entry.base_zvol_path)
         .bind(&entry.snapshot_path)
-        .bind(&entry.source_volume_id)
         .bind(entry.size_bytes as i64)
         .bind(&entry.created_at)
         .execute(&self.pool)
@@ -244,7 +255,7 @@ impl Store {
     pub async fn get_template(&self, name: &str) -> Result<Option<TemplateEntry>> {
         let row = sqlx::query(
             r#"
-            SELECT id, name, snapshot_path, source_volume_id, size_bytes, created_at
+            SELECT id, name, base_zvol_path, snapshot_path, size_bytes, created_at
             FROM templates WHERE name = ?
             "#,
         )
@@ -255,8 +266,29 @@ impl Store {
         Ok(row.map(|r| TemplateEntry {
             id: r.get("id"),
             name: r.get("name"),
+            base_zvol_path: r.get("base_zvol_path"),
             snapshot_path: r.get("snapshot_path"),
-            source_volume_id: r.get("source_volume_id"),
+            size_bytes: r.get::<i64, _>("size_bytes") as u64,
+            created_at: r.get("created_at"),
+        }))
+    }
+
+    pub async fn get_template_by_id(&self, id: &str) -> Result<Option<TemplateEntry>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, base_zvol_path, snapshot_path, size_bytes, created_at
+            FROM templates WHERE id = ?
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| TemplateEntry {
+            id: r.get("id"),
+            name: r.get("name"),
+            base_zvol_path: r.get("base_zvol_path"),
+            snapshot_path: r.get("snapshot_path"),
             size_bytes: r.get::<i64, _>("size_bytes") as u64,
             created_at: r.get("created_at"),
         }))
@@ -265,7 +297,7 @@ impl Store {
     pub async fn list_templates(&self) -> Result<Vec<TemplateEntry>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, name, snapshot_path, source_volume_id, size_bytes, created_at
+            SELECT id, name, base_zvol_path, snapshot_path, size_bytes, created_at
             FROM templates ORDER BY created_at DESC
             "#,
         )
@@ -277,8 +309,8 @@ impl Store {
             .map(|r| TemplateEntry {
                 id: r.get("id"),
                 name: r.get("name"),
+                base_zvol_path: r.get("base_zvol_path"),
                 snapshot_path: r.get("snapshot_path"),
-                source_volume_id: r.get("source_volume_id"),
                 size_bytes: r.get::<i64, _>("size_bytes") as u64,
                 created_at: r.get("created_at"),
             })
@@ -300,12 +332,12 @@ impl Store {
     pub async fn create_import_job(&self, entry: &ImportJobEntry) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO import_jobs (id, volume_name, source, format, state, bytes_written, total_bytes, error, created_at, completed_at)
+            INSERT INTO import_jobs (id, template_name, source, format, state, bytes_written, total_bytes, error, created_at, completed_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&entry.id)
-        .bind(&entry.volume_name)
+        .bind(&entry.template_name)
         .bind(&entry.source)
         .bind(&entry.format)
         .bind(&entry.state)
@@ -324,7 +356,7 @@ impl Store {
     pub async fn get_import_job(&self, id: &str) -> Result<Option<ImportJobEntry>> {
         let row = sqlx::query(
             r#"
-            SELECT id, volume_name, source, format, state, bytes_written, total_bytes, error, created_at, completed_at
+            SELECT id, template_name, source, format, state, bytes_written, total_bytes, error, created_at, completed_at
             FROM import_jobs WHERE id = ?
             "#,
         )
@@ -334,7 +366,7 @@ impl Store {
 
         Ok(row.map(|r| ImportJobEntry {
             id: r.get("id"),
-            volume_name: r.get("volume_name"),
+            template_name: r.get("template_name"),
             source: r.get("source"),
             format: r.get("format"),
             state: r.get("state"),
@@ -349,9 +381,9 @@ impl Store {
     #[allow(dead_code)]
     pub async fn list_import_jobs(&self, include_completed: bool) -> Result<Vec<ImportJobEntry>> {
         let query = if include_completed {
-            "SELECT id, volume_name, source, format, state, bytes_written, total_bytes, error, created_at, completed_at FROM import_jobs ORDER BY created_at DESC"
+            "SELECT id, template_name, source, format, state, bytes_written, total_bytes, error, created_at, completed_at FROM import_jobs ORDER BY created_at DESC"
         } else {
-            "SELECT id, volume_name, source, format, state, bytes_written, total_bytes, error, created_at, completed_at FROM import_jobs WHERE state NOT IN ('completed', 'failed', 'cancelled') ORDER BY created_at DESC"
+            "SELECT id, template_name, source, format, state, bytes_written, total_bytes, error, created_at, completed_at FROM import_jobs WHERE state NOT IN ('completed', 'failed', 'cancelled') ORDER BY created_at DESC"
         };
 
         let rows = sqlx::query(query).fetch_all(&self.pool).await?;
@@ -360,7 +392,7 @@ impl Store {
             .into_iter()
             .map(|r| ImportJobEntry {
                 id: r.get("id"),
-                volume_name: r.get("volume_name"),
+                template_name: r.get("template_name"),
                 source: r.get("source"),
                 format: r.get("format"),
                 state: r.get("state"),
@@ -406,14 +438,14 @@ impl Store {
     pub async fn create_snapshot(&self, entry: &SnapshotEntry) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO snapshots (id, volume_id, name, snapshot_path, created_at)
+            INSERT INTO snapshots (id, volume_id, name, zfs_snapshot_name, created_at)
             VALUES (?, ?, ?, ?, ?)
             "#,
         )
         .bind(&entry.id)
         .bind(&entry.volume_id)
         .bind(&entry.name)
-        .bind(&entry.snapshot_path)
+        .bind(&entry.zfs_snapshot_name)
         .bind(&entry.created_at)
         .execute(&self.pool)
         .await?;
@@ -421,10 +453,31 @@ impl Store {
         Ok(())
     }
 
+    pub async fn get_snapshot(&self, volume_id: &str, name: &str) -> Result<Option<SnapshotEntry>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, volume_id, name, zfs_snapshot_name, created_at
+            FROM snapshots WHERE volume_id = ? AND name = ?
+            "#,
+        )
+        .bind(volume_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| SnapshotEntry {
+            id: r.get("id"),
+            volume_id: r.get("volume_id"),
+            name: r.get("name"),
+            zfs_snapshot_name: r.get("zfs_snapshot_name"),
+            created_at: r.get("created_at"),
+        }))
+    }
+
     pub async fn list_snapshots(&self, volume_id: &str) -> Result<Vec<SnapshotEntry>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, volume_id, name, snapshot_path, created_at
+            SELECT id, volume_id, name, zfs_snapshot_name, created_at
             FROM snapshots WHERE volume_id = ? ORDER BY created_at DESC
             "#,
         )
@@ -438,7 +491,7 @@ impl Store {
                 id: r.get("id"),
                 volume_id: r.get("volume_id"),
                 name: r.get("name"),
-                snapshot_path: r.get("snapshot_path"),
+                zfs_snapshot_name: r.get("zfs_snapshot_name"),
                 created_at: r.get("created_at"),
             })
             .collect())
@@ -453,6 +506,28 @@ impl Store {
 
         Ok(result.rows_affected() > 0)
     }
+
+    // === Garbage Collection helpers ===
+
+    /// Count volumes that originated from a given template
+    pub async fn count_volumes_by_origin(&self, template_id: &str) -> Result<u64> {
+        let row = sqlx::query("SELECT COUNT(*) as count FROM volumes WHERE origin_template_id = ?")
+            .bind(template_id)
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(row.get::<i64, _>("count") as u64)
+    }
+
+    /// Check if a template exists by ID
+    pub async fn template_exists(&self, template_id: &str) -> Result<bool> {
+        let row = sqlx::query("SELECT 1 FROM templates WHERE id = ?")
+            .bind(template_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row.is_some())
+    }
 }
 
 // === Entry types ===
@@ -464,30 +539,28 @@ pub struct VolumeEntry {
     pub zfs_path: String,
     pub device_path: String,
     pub size_bytes: u64,
-    pub source_type: Option<String>,
-    pub source_ref: Option<String>,
+    pub origin_template_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
 impl VolumeEntry {
     pub fn new(
+        id: String,
         name: String,
         zfs_path: String,
         device_path: String,
         size_bytes: u64,
-        source_type: Option<String>,
-        source_ref: Option<String>,
+        origin_template_id: Option<String>,
     ) -> Self {
         let now = Utc::now().to_rfc3339();
         Self {
-            id: Uuid::new_v4().to_string(),
+            id,
             name,
             zfs_path,
             device_path,
             size_bytes,
-            source_type,
-            source_ref,
+            origin_template_id,
             created_at: now.clone(),
             updated_at: now,
         }
@@ -498,24 +571,25 @@ impl VolumeEntry {
 pub struct TemplateEntry {
     pub id: String,
     pub name: String,
+    pub base_zvol_path: String,
     pub snapshot_path: String,
-    pub source_volume_id: Option<String>,
     pub size_bytes: u64,
     pub created_at: String,
 }
 
 impl TemplateEntry {
     pub fn new(
+        id: String,
         name: String,
+        base_zvol_path: String,
         snapshot_path: String,
-        source_volume_id: Option<String>,
         size_bytes: u64,
     ) -> Self {
         Self {
-            id: Uuid::new_v4().to_string(),
+            id,
             name,
+            base_zvol_path,
             snapshot_path,
-            source_volume_id,
             size_bytes,
             created_at: Utc::now().to_rfc3339(),
         }
@@ -526,7 +600,7 @@ impl TemplateEntry {
 #[derive(Debug, Clone)]
 pub struct ImportJobEntry {
     pub id: String,
-    pub volume_name: String,
+    pub template_name: String,
     pub source: String,
     pub format: String,
     pub state: String,
@@ -540,14 +614,14 @@ pub struct ImportJobEntry {
 impl ImportJobEntry {
     #[allow(dead_code)]
     pub fn new(
-        volume_name: String,
+        template_name: String,
         source: String,
         format: String,
         total_bytes: Option<u64>,
     ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            volume_name,
+            template_name,
             source,
             format,
             state: "pending".to_string(),
@@ -565,17 +639,17 @@ pub struct SnapshotEntry {
     pub id: String,
     pub volume_id: String,
     pub name: String,
-    pub snapshot_path: String,
+    pub zfs_snapshot_name: String,
     pub created_at: String,
 }
 
 impl SnapshotEntry {
-    pub fn new(volume_id: String, name: String, snapshot_path: String) -> Self {
+    pub fn new(id: String, volume_id: String, name: String, zfs_snapshot_name: String) -> Self {
         Self {
-            id: Uuid::new_v4().to_string(),
+            id,
             volume_id,
             name,
-            snapshot_path,
+            zfs_snapshot_name,
             created_at: Utc::now().to_rfc3339(),
         }
     }

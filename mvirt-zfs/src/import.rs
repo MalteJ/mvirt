@@ -12,7 +12,8 @@ use tokio::sync::{RwLock, oneshot};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::store::{ImportJobEntry, Store, VolumeEntry};
+use crate::audit::ZfsAuditLogger;
+use crate::store::{ImportJobEntry, Store, TemplateEntry};
 use crate::zfs::ZfsManager;
 
 /// Image format
@@ -55,24 +56,27 @@ struct RunningJob {
 pub struct ImportManager {
     #[allow(dead_code)]
     pool_name: String,
-    pool_mountpoint: String,
+    state_dir: String,
     store: Arc<Store>,
     zfs: Arc<ZfsManager>,
+    audit: Arc<ZfsAuditLogger>,
     running_jobs: Arc<RwLock<HashMap<String, RunningJob>>>,
 }
 
 impl ImportManager {
     pub fn new(
         pool_name: String,
-        pool_mountpoint: String,
+        state_dir: String,
         store: Arc<Store>,
         zfs: Arc<ZfsManager>,
+        audit: Arc<ZfsAuditLogger>,
     ) -> Self {
         Self {
             pool_name,
-            pool_mountpoint,
+            state_dir,
             store,
             zfs,
+            audit,
             running_jobs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -94,50 +98,38 @@ impl ImportManager {
         }
     }
 
-    /// Detect image format from HTTP Content-Type or URL extension
-    pub fn detect_format_from_url(url: &str, content_type: Option<&str>) -> ImageFormat {
-        // Check content type first
-        if let Some(ct) = content_type
-            && (ct.contains("qcow2") || ct.contains("x-qemu-disk"))
-        {
-            return ImageFormat::Qcow2;
-        }
-
-        // Check URL extension
-        let lower_url = url.to_lowercase();
-        if lower_url.ends_with(".qcow2") || lower_url.contains(".qcow2?") {
+    /// Detect image format from magic bytes (first 4 bytes)
+    pub fn detect_format_from_magic(bytes: &[u8]) -> ImageFormat {
+        // qcow2 magic: "QFI\xfb" (0x514649fb big-endian)
+        if bytes.len() >= 4 && bytes[..4] == [0x51, 0x46, 0x49, 0xfb] {
             ImageFormat::Qcow2
         } else {
             ImageFormat::Raw
         }
     }
 
-    /// Start an import job
+    /// Start an import job (creates a template)
     pub async fn start_import(
         &self,
-        volume_name: String,
+        template_name: String,
         source: ImportSource,
         size_bytes: Option<u64>,
     ) -> Result<ImportJobEntry> {
-        // Determine format
+        // For local files, detect format upfront. For URLs, detect during download.
         let format = match &source {
-            ImportSource::LocalFile(path) => Self::detect_format_from_file(path).await?,
-            ImportSource::HttpUrl(url) => {
-                // We'll refine this when we start downloading
-                Self::detect_format_from_url(url, None)
-            }
+            ImportSource::LocalFile(path) => Some(Self::detect_format_from_file(path).await?),
+            ImportSource::HttpUrl(_) => None, // Detect from first bytes during download
         };
 
-        // For qcow2, we need size_bytes or we'll determine it during conversion
-        // For raw from URL, we need size_bytes to create the volume
         let format_str = match format {
-            ImageFormat::Raw => "raw",
-            ImageFormat::Qcow2 => "qcow2",
+            Some(ImageFormat::Raw) => "raw",
+            Some(ImageFormat::Qcow2) => "qcow2",
+            None => "auto",
         };
 
         // Create job entry
         let job_entry = ImportJobEntry::new(
-            volume_name.clone(),
+            template_name.clone(),
             source.as_str().to_string(),
             format_str.to_string(),
             size_bytes,
@@ -148,11 +140,16 @@ impl ImportManager {
 
         info!(
             job_id = %job_entry.id,
-            volume = %volume_name,
+            template = %template_name,
             source = %source.as_str(),
             format = %format_str,
             "Starting import job"
         );
+
+        // Audit log: import started
+        self.audit
+            .import_started(&job_entry.id, &template_name, source.as_str())
+            .await;
 
         // Create cancel channel
         let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -172,19 +169,21 @@ impl ImportManager {
         let job_id = job_entry.id.clone();
         let store = Arc::clone(&self.store);
         let zfs = Arc::clone(&self.zfs);
-        let pool_mountpoint = self.pool_mountpoint.clone();
+        let audit = Arc::clone(&self.audit);
+        let state_dir = self.state_dir.clone();
         let running_jobs = Arc::clone(&self.running_jobs);
 
         tokio::spawn(async move {
             let result = Self::run_import(
                 &job_id,
-                &volume_name,
+                &template_name,
                 source,
                 format,
                 size_bytes,
                 &store,
                 &zfs,
-                &pool_mountpoint,
+                &audit,
+                &state_dir,
                 cancel_rx,
             )
             .await;
@@ -231,44 +230,60 @@ impl ImportManager {
     }
 
     /// Run the actual import with centralized error handling
+    /// Returns the template_id on success for cleanup purposes
     #[allow(clippy::too_many_arguments)]
     async fn run_import(
         job_id: &str,
-        volume_name: &str,
+        template_name: &str,
         source: ImportSource,
-        format: ImageFormat,
+        format: Option<ImageFormat>,
         size_bytes: Option<u64>,
         store: &Store,
         zfs: &ZfsManager,
-        pool_mountpoint: &str,
+        audit: &ZfsAuditLogger,
+        state_dir: &str,
         mut cancel_rx: oneshot::Receiver<()>,
     ) -> Result<()> {
+        // Generate template UUID upfront for cleanup tracking
+        let template_id = Uuid::new_v4().to_string();
+
         let result = Self::run_import_inner(
             job_id,
-            volume_name,
+            &template_id,
+            template_name,
             source,
             format,
             size_bytes,
             store,
             zfs,
-            pool_mountpoint,
+            state_dir,
             &mut cancel_rx,
         )
         .await;
+
+        // Handle success: log completion
+        if result.is_ok() {
+            audit
+                .import_completed(job_id, &template_id, template_name)
+                .await;
+        }
 
         // Handle errors centrally: update job state and cleanup
         if let Err(ref e) = result {
             let error_msg = e.to_string();
             error!(job_id = %job_id, error = %error_msg, "Import failed");
 
-            // Try to clean up the volume if it was created
-            if let Err(cleanup_err) = zfs.delete_volume(volume_name).await {
-                // Volume might not exist yet, that's fine
+            // Audit log: import failed
+            audit.import_failed(job_id, template_name, &error_msg).await;
+
+            // Try to clean up the base ZVOL if it was created
+            if let Err(cleanup_err) = zfs.delete_base_zvol(&template_id).await {
+                // Base ZVOL might not exist yet, that's fine
                 warn!(
                     job_id = %job_id,
-                    volume = %volume_name,
+                    template_id = %template_id,
                     error = %cleanup_err,
-                    "Failed to cleanup volume after import error (may not exist)"
+                    "Failed to cleanup base ZVOL after import error (may not exist)"
                 );
             }
 
@@ -292,70 +307,74 @@ impl ImportManager {
     #[allow(clippy::too_many_arguments)]
     async fn run_import_inner(
         job_id: &str,
-        volume_name: &str,
+        template_id: &str,
+        template_name: &str,
         source: ImportSource,
-        format: ImageFormat,
+        format: Option<ImageFormat>,
         size_bytes: Option<u64>,
         store: &Store,
         zfs: &ZfsManager,
-        pool_mountpoint: &str,
+        state_dir: &str,
         cancel_rx: &mut oneshot::Receiver<()>,
     ) -> Result<()> {
-        match format {
-            ImageFormat::Raw => match source {
-                ImportSource::LocalFile(path) => {
-                    Self::import_raw_file(
-                        job_id,
-                        volume_name,
-                        &path,
-                        size_bytes,
-                        store,
-                        zfs,
-                        cancel_rx,
-                    )
-                    .await
-                }
-                ImportSource::HttpUrl(url) => {
-                    Self::import_raw_url(
-                        job_id,
-                        volume_name,
-                        &url,
-                        size_bytes,
-                        store,
-                        zfs,
-                        cancel_rx,
-                    )
-                    .await
-                }
-            },
-            ImageFormat::Qcow2 => {
-                // qcow2 import requires temp file for random access
-                match source {
-                    ImportSource::LocalFile(path) => {
-                        Self::import_qcow2_file(job_id, volume_name, &path, store, zfs, cancel_rx)
-                            .await
-                    }
-                    ImportSource::HttpUrl(url) => {
-                        Self::import_qcow2_url(
-                            job_id,
-                            volume_name,
-                            &url,
-                            store,
-                            zfs,
-                            pool_mountpoint,
-                            cancel_rx,
-                        )
-                        .await
-                    }
-                }
+        match (format, source) {
+            // Local files: format is known
+            (Some(ImageFormat::Raw), ImportSource::LocalFile(path)) => {
+                Self::import_raw_file(
+                    job_id,
+                    template_id,
+                    template_name,
+                    &path,
+                    size_bytes,
+                    store,
+                    zfs,
+                    cancel_rx,
+                )
+                .await
+            }
+            (Some(ImageFormat::Qcow2), ImportSource::LocalFile(path)) => {
+                Self::import_qcow2_file(
+                    job_id,
+                    template_id,
+                    template_name,
+                    &path,
+                    store,
+                    zfs,
+                    cancel_rx,
+                )
+                .await
+            }
+            // HTTP URLs: detect format from first bytes during download
+            (None, ImportSource::HttpUrl(url)) => {
+                Self::import_from_url(
+                    job_id,
+                    template_id,
+                    template_name,
+                    &url,
+                    size_bytes,
+                    store,
+                    zfs,
+                    state_dir,
+                    cancel_rx,
+                )
+                .await
+            }
+            // Should not happen: local file without format or URL with format
+            (None, ImportSource::LocalFile(_)) => {
+                Err(anyhow!("Local file format should be detected upfront"))
+            }
+            (Some(_), ImportSource::HttpUrl(_)) => {
+                Err(anyhow!("URL format should be detected during download"))
             }
         }
     }
 
-    /// Import raw file to ZVOL
+    /// Import raw file to template
+    #[allow(clippy::too_many_arguments)]
     async fn import_raw_file(
         job_id: &str,
-        volume_name: &str,
+        template_id: &str,
+        template_name: &str,
         path: &str,
         size_bytes: Option<u64>,
         store: &Store,
@@ -371,18 +390,18 @@ impl ImportManager {
             .context("Failed to get file metadata")?;
         let file_size = size_bytes.unwrap_or(metadata.len());
 
-        // Create ZVOL
-        let vol = zfs.create_volume(volume_name, file_size, None).await?;
+        // Create base ZVOL for template
+        let device_path = zfs.create_base_zvol(template_id, file_size).await?;
 
         // Open source file
         let mut src_file = File::open(path)
             .await
             .context("Failed to open source file")?;
 
-        // Open ZVOL device
+        // Open base ZVOL device
         let mut zvol = tokio::fs::OpenOptions::new()
             .write(true)
-            .open(&vol.device_path)
+            .open(&device_path)
             .await
             .context("Failed to open ZVOL device")?;
 
@@ -394,8 +413,8 @@ impl ImportManager {
         loop {
             // Check for cancellation
             if cancel_rx.try_recv().is_ok() {
-                // Clean up: delete the volume
-                let _ = zfs.delete_volume(volume_name).await;
+                // Clean up: delete the base ZVOL
+                let _ = zfs.delete_base_zvol(template_id).await;
                 store
                     .update_import_job(job_id, "cancelled", bytes_written, None)
                     .await?;
@@ -420,17 +439,20 @@ impl ImportManager {
         }
 
         zvol.flush().await?;
+        drop(zvol); // Close before creating snapshot
 
-        // Store volume in database
-        let vol_entry = VolumeEntry::new(
-            volume_name.to_string(),
-            zfs.volume_zfs_path(volume_name),
-            vol.device_path.clone(),
+        // Create template snapshot
+        let snapshot_path = zfs.create_template_snapshot(template_id).await?;
+
+        // Store template in database
+        let template_entry = TemplateEntry::new(
+            template_id.to_string(),
+            template_name.to_string(),
+            zfs.base_zvol_path(template_id),
+            snapshot_path,
             file_size,
-            Some("import".to_string()),
-            Some(path.to_string()),
         );
-        store.create_volume(&vol_entry).await?;
+        store.create_template(&template_entry).await?;
 
         // Mark completed
         store
@@ -439,7 +461,8 @@ impl ImportManager {
 
         info!(
             job_id = %job_id,
-            volume = %volume_name,
+            template = %template_name,
+            template_id = %template_id,
             bytes = %bytes_written,
             "Raw file import completed"
         );
@@ -447,114 +470,11 @@ impl ImportManager {
         Ok(())
     }
 
-    /// Import raw from HTTP(S) URL
-    async fn import_raw_url(
-        job_id: &str,
-        volume_name: &str,
-        url: &str,
-        size_bytes: Option<u64>,
-        store: &Store,
-        zfs: &ZfsManager,
-        cancel_rx: &mut oneshot::Receiver<()>,
-    ) -> Result<()> {
-        // Update state to downloading
-        store
-            .update_import_job(job_id, "downloading", 0, None)
-            .await?;
-
-        // Start HTTP request
-        let client = reqwest::Client::new();
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .context("Failed to start HTTP request")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow!("HTTP request failed: {}", response.status()));
-        }
-
-        // Get content length
-        let content_length = response.content_length();
-        let file_size = size_bytes.or(content_length).ok_or_else(|| {
-            anyhow!("size_bytes required for raw URL import without Content-Length")
-        })?;
-
-        // Update state to writing
-        store.update_import_job(job_id, "writing", 0, None).await?;
-
-        // Create ZVOL
-        let vol = zfs.create_volume(volume_name, file_size, None).await?;
-
-        // Open ZVOL device
-        let mut zvol = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&vol.device_path)
-            .await
-            .context("Failed to open ZVOL device")?;
-
-        // Stream response body to ZVOL
-        let mut stream = response.bytes_stream();
-        let mut bytes_written: u64 = 0;
-        let mut last_update = std::time::Instant::now();
-
-        use futures_util::StreamExt;
-
-        while let Some(chunk_result) = stream.next().await {
-            // Check for cancellation
-            if cancel_rx.try_recv().is_ok() {
-                let _ = zfs.delete_volume(volume_name).await;
-                store
-                    .update_import_job(job_id, "cancelled", bytes_written, None)
-                    .await?;
-                return Ok(());
-            }
-
-            let chunk = chunk_result.context("Failed to read HTTP chunk")?;
-            zvol.write_all(&chunk).await?;
-            bytes_written += chunk.len() as u64;
-
-            // Update progress every second
-            if last_update.elapsed().as_secs() >= 1 {
-                store
-                    .update_import_job(job_id, "writing", bytes_written, None)
-                    .await?;
-                last_update = std::time::Instant::now();
-            }
-        }
-
-        zvol.flush().await?;
-
-        // Store volume in database
-        let vol_entry = VolumeEntry::new(
-            volume_name.to_string(),
-            zfs.volume_zfs_path(volume_name),
-            vol.device_path.clone(),
-            file_size,
-            Some("import".to_string()),
-            Some(url.to_string()),
-        );
-        store.create_volume(&vol_entry).await?;
-
-        // Mark completed
-        store
-            .update_import_job(job_id, "completed", bytes_written, None)
-            .await?;
-
-        info!(
-            job_id = %job_id,
-            volume = %volume_name,
-            bytes = %bytes_written,
-            "HTTP raw import completed"
-        );
-
-        Ok(())
-    }
-
-    /// Import qcow2 file using qemu-img convert
+    /// Import qcow2 file using qemu-img convert to template
     async fn import_qcow2_file(
         job_id: &str,
-        volume_name: &str,
+        template_id: &str,
+        template_name: &str,
         path: &str,
         store: &Store,
         zfs: &ZfsManager,
@@ -589,21 +509,21 @@ impl ImportManager {
         info!(
             job_id = %job_id,
             virtual_size = %virtual_size,
-            "qcow2 virtual size determined, creating ZVOL"
+            "qcow2 virtual size determined, creating base ZVOL"
         );
 
-        // Create ZVOL
-        let vol = zfs.create_volume(volume_name, virtual_size, None).await?;
+        // Create base ZVOL for template
+        let device_path = zfs.create_base_zvol(template_id, virtual_size).await?;
 
         // Update state to writing
         store.update_import_job(job_id, "writing", 0, None).await?;
 
-        // Convert qcow2 to raw directly to ZVOL using qemu-img convert
+        // Convert qcow2 to raw directly to base ZVOL using qemu-img convert
         info!(
             job_id = %job_id,
             source = %path,
-            target = %vol.device_path,
-            "Converting qcow2 to ZVOL"
+            target = %device_path,
+            "Converting qcow2 to base ZVOL"
         );
 
         let output = Command::new("qemu-img")
@@ -615,7 +535,7 @@ impl ImportManager {
                 "raw",
                 "-p", // Show progress (goes to stderr)
                 path,
-                &vol.device_path,
+                &device_path,
             ])
             .output()
             .await
@@ -626,16 +546,18 @@ impl ImportManager {
             return Err(anyhow!("qemu-img convert failed: {}", stderr));
         }
 
-        // Store volume in database
-        let vol_entry = VolumeEntry::new(
-            volume_name.to_string(),
-            zfs.volume_zfs_path(volume_name),
-            vol.device_path.clone(),
+        // Create template snapshot
+        let snapshot_path = zfs.create_template_snapshot(template_id).await?;
+
+        // Store template in database
+        let template_entry = TemplateEntry::new(
+            template_id.to_string(),
+            template_name.to_string(),
+            zfs.base_zvol_path(template_id),
+            snapshot_path,
             virtual_size,
-            Some("import".to_string()),
-            Some(path.to_string()),
         );
-        store.create_volume(&vol_entry).await?;
+        store.create_template(&template_entry).await?;
 
         // Mark completed
         store
@@ -644,7 +566,8 @@ impl ImportManager {
 
         info!(
             job_id = %job_id,
-            volume = %volume_name,
+            template = %template_name,
+            template_id = %template_id,
             bytes = %virtual_size,
             "qcow2 import completed"
         );
@@ -652,63 +575,35 @@ impl ImportManager {
         Ok(())
     }
 
-    /// Import qcow2 from URL (download first, then convert)
-    async fn import_qcow2_url(
-        job_id: &str,
-        volume_name: &str,
-        url: &str,
-        store: &Store,
-        zfs: &ZfsManager,
-        pool_mountpoint: &str,
-        cancel_rx: &mut oneshot::Receiver<()>,
-    ) -> Result<()> {
-        // Create temp directory on ZFS pool
-        let tmp_dir = format!("{}/.tmp", pool_mountpoint);
-        tokio::fs::create_dir_all(&tmp_dir)
-            .await
-            .context("Failed to create temp directory")?;
-
-        let tmp_file = format!("{}/import-{}.qcow2", tmp_dir, Uuid::new_v4());
-
-        // Run download and conversion, ensuring temp file cleanup on any error
-        let result = Self::download_and_convert_qcow2(
-            job_id,
-            volume_name,
-            url,
-            &tmp_file,
-            store,
-            zfs,
-            cancel_rx,
-        )
-        .await;
-
-        // Always clean up temp file, regardless of success or failure
-        if tokio::fs::metadata(&tmp_file).await.is_ok()
-            && let Err(e) = tokio::fs::remove_file(&tmp_file).await
-        {
-            warn!(path = %tmp_file, error = %e, "Failed to remove temp file");
-        }
-
-        result
-    }
-
-    /// Download qcow2 and convert - helper for import_qcow2_url
+    /// Import from URL with auto-detection of format from first bytes
+    /// Downloads to temp file, detects format, then processes accordingly
     #[allow(clippy::too_many_arguments)]
-    async fn download_and_convert_qcow2(
+    async fn import_from_url(
         job_id: &str,
-        volume_name: &str,
+        template_id: &str,
+        template_name: &str,
         url: &str,
-        tmp_file: &str,
+        size_bytes: Option<u64>,
         store: &Store,
         zfs: &ZfsManager,
+        state_dir: &str,
         cancel_rx: &mut oneshot::Receiver<()>,
     ) -> Result<()> {
+        use futures_util::StreamExt;
+
         // Update state to downloading
         store
             .update_import_job(job_id, "downloading", 0, None)
             .await?;
 
-        // Download to temp file
+        // Create temp directory and file
+        let tmp_dir = format!("{}/tmp", state_dir);
+        tokio::fs::create_dir_all(&tmp_dir)
+            .await
+            .context("Failed to create temp directory")?;
+        let tmp_file = format!("{}/import-{}.tmp", tmp_dir, Uuid::new_v4());
+
+        // Start HTTP request
         let client = reqwest::Client::new();
         let response = client
             .get(url)
@@ -720,18 +615,22 @@ impl ImportManager {
             return Err(anyhow!("HTTP request failed: {}", response.status()));
         }
 
-        let mut file = tokio::fs::File::create(tmp_file)
+        let content_length = response.content_length();
+
+        // Download to temp file, capturing first 4 bytes for format detection
+        let mut file = tokio::fs::File::create(&tmp_file)
             .await
             .context("Failed to create temp file")?;
 
         let mut stream = response.bytes_stream();
         let mut bytes_downloaded: u64 = 0;
         let mut last_update = std::time::Instant::now();
-
-        use futures_util::StreamExt;
+        let mut magic_bytes = [0u8; 4];
+        let mut magic_captured = false;
 
         while let Some(chunk_result) = stream.next().await {
             if cancel_rx.try_recv().is_ok() {
+                let _ = tokio::fs::remove_file(&tmp_file).await;
                 store
                     .update_import_job(job_id, "cancelled", bytes_downloaded, None)
                     .await?;
@@ -739,6 +638,13 @@ impl ImportManager {
             }
 
             let chunk = chunk_result.context("Failed to read HTTP chunk")?;
+
+            // Capture first 4 bytes for format detection
+            if !magic_captured && bytes_downloaded == 0 && chunk.len() >= 4 {
+                magic_bytes.copy_from_slice(&chunk[..4]);
+                magic_captured = true;
+            }
+
             file.write_all(&chunk).await?;
             bytes_downloaded += chunk.len() as u64;
 
@@ -753,13 +659,90 @@ impl ImportManager {
         file.flush().await?;
         drop(file);
 
+        // Detect format from magic bytes
+        let format = Self::detect_format_from_magic(&magic_bytes);
+
         info!(
             job_id = %job_id,
             bytes = %bytes_downloaded,
-            "qcow2 download completed, converting..."
+            format = ?format,
+            "Download completed, detected format"
         );
 
-        // Now convert the downloaded qcow2 file
-        Self::import_qcow2_file(job_id, volume_name, tmp_file, store, zfs, cancel_rx).await
+        // Process based on detected format
+        let result = match format {
+            ImageFormat::Qcow2 => {
+                Self::import_qcow2_file(
+                    job_id,
+                    template_id,
+                    template_name,
+                    &tmp_file,
+                    store,
+                    zfs,
+                    cancel_rx,
+                )
+                .await
+            }
+            ImageFormat::Raw => {
+                // For raw, copy temp file to ZVOL
+                let file_size = size_bytes.or(content_length).unwrap_or(bytes_downloaded);
+
+                store.update_import_job(job_id, "writing", 0, None).await?;
+
+                let device_path = zfs.create_base_zvol(template_id, file_size).await?;
+
+                let mut src = File::open(&tmp_file)
+                    .await
+                    .context("Failed to open temp file")?;
+                let mut zvol = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&device_path)
+                    .await
+                    .context("Failed to open ZVOL device")?;
+
+                let mut buffer = vec![0u8; 1024 * 1024];
+                let mut bytes_written: u64 = 0;
+
+                loop {
+                    let n = src.read(&mut buffer).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    zvol.write_all(&buffer[..n]).await?;
+                    bytes_written += n as u64;
+                }
+
+                zvol.flush().await?;
+                drop(zvol);
+
+                let snapshot_path = zfs.create_template_snapshot(template_id).await?;
+
+                let template_entry = TemplateEntry::new(
+                    template_id.to_string(),
+                    template_name.to_string(),
+                    zfs.base_zvol_path(template_id),
+                    snapshot_path,
+                    file_size,
+                );
+                store.create_template(&template_entry).await?;
+
+                store
+                    .update_import_job(job_id, "completed", bytes_written, None)
+                    .await?;
+
+                info!(
+                    job_id = %job_id,
+                    template = %template_name,
+                    "Raw URL import completed"
+                );
+
+                Ok(())
+            }
+        };
+
+        // Clean up temp file
+        let _ = tokio::fs::remove_file(&tmp_file).await;
+
+        result
     }
 }

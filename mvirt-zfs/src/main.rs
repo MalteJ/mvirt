@@ -1,24 +1,17 @@
 use std::sync::Arc;
 
 use clap::Parser;
+use tokio::signal;
 use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-mod grpc;
-mod import;
-mod store;
-mod zfs;
-
-pub mod proto {
-    tonic::include_proto!("mvirt.zfs");
-}
-
-use grpc::ZfsServiceImpl;
-use import::ImportManager;
-use proto::zfs_service_server::ZfsServiceServer;
-use store::Store;
-use zfs::ZfsManager;
+use mvirt_zfs::audit::create_audit_logger;
+use mvirt_zfs::grpc::ZfsServiceImpl;
+use mvirt_zfs::import::ImportManager;
+use mvirt_zfs::proto::zfs_service_server::ZfsServiceServer;
+use mvirt_zfs::store::Store;
+use mvirt_zfs::zfs::ZfsManager;
 
 #[derive(Parser)]
 #[command(name = "mvirt-zfs")]
@@ -29,8 +22,12 @@ struct Args {
     pool: String,
 
     /// gRPC listen address
-    #[arg(short, long, default_value = "[::1]:50052")]
+    #[arg(short, long, default_value = "[::1]:50053")]
     listen: String,
+
+    /// mvirt-log endpoint for audit logging
+    #[arg(long, default_value = "http://[::1]:50052")]
+    log_endpoint: String,
 }
 
 #[tokio::main]
@@ -43,38 +40,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(pool = %args.pool, "Initializing mvirt-zfs");
 
-    // Get pool mountpoint for metadata storage
-    // For now, assume the pool is mounted at /{pool_name}
-    let pool_mountpoint = format!("/{}", args.pool);
-    let metadata_dir = format!("{}/.mvirt-zfs", pool_mountpoint);
-
-    // Ensure metadata directory exists
-    tokio::fs::create_dir_all(&metadata_dir).await?;
+    // State directory following FHS
+    let state_dir = "/var/lib/mvirt/zfs";
+    tokio::fs::create_dir_all(state_dir).await?;
 
     // Initialize store
-    let store = Arc::new(Store::new(&metadata_dir).await?);
+    let store = Arc::new(Store::new(state_dir).await?);
 
     // Initialize ZFS manager
     let zfs_manager = Arc::new(ZfsManager::new(args.pool.clone()));
 
+    // Ensure temp dataset exists (for qcow2 downloads during import)
+    let tmp_dir = format!("{}/tmp", state_dir);
+    zfs_manager.ensure_tmp_dataset(&tmp_dir).await?;
+
+    // Initialize audit logger (connects lazily to mvirt-log)
+    let audit = create_audit_logger(&args.log_endpoint);
+
     // Initialize import manager
     let import_manager = Arc::new(ImportManager::new(
         args.pool.clone(),
-        pool_mountpoint.clone(),
+        state_dir.to_string(),
         Arc::clone(&store),
         Arc::clone(&zfs_manager),
+        Arc::clone(&audit),
     ));
 
     // Create gRPC service
-    let service = ZfsServiceImpl::new(args.pool.clone(), store, zfs_manager, import_manager);
+    let service = ZfsServiceImpl::new(store, Arc::clone(&zfs_manager), import_manager, audit);
 
     let addr = args.listen.parse()?;
     info!(addr = %addr, pool = %args.pool, "Starting gRPC server");
 
+    // Run server with graceful shutdown on SIGTERM/SIGINT
     Server::builder()
         .add_service(ZfsServiceServer::new(service))
-        .serve(addr)
+        .serve_with_shutdown(addr, async {
+            let ctrl_c = signal::ctrl_c();
+            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("Failed to install SIGTERM handler");
+
+            tokio::select! {
+                _ = ctrl_c => info!("Received SIGINT"),
+                _ = sigterm.recv() => info!("Received SIGTERM"),
+            }
+        })
         .await?;
 
+    // Cleanup: destroy temp dataset
+    zfs_manager.destroy_tmp_dataset().await;
+
+    info!("Shutdown complete");
     Ok(())
 }

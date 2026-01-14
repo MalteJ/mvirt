@@ -35,6 +35,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
 
+# Logging to mvirt-log
+mvirt-log = { path = "../mvirt-log" }
+
 # UUID generation
 uuid = { version = "1", features = ["v4"] }
 
@@ -43,3 +46,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [build-dependencies]
 tonic-build = "0.12"
+
+[dev-dependencies]
+nix = { version = "0.30", features = ["user"] }

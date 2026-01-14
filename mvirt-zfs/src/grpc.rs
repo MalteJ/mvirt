@@ -4,6 +4,7 @@ use chrono::{TimeZone, Utc};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use crate::audit::ZfsAuditLogger;
 use crate::import::{ImportManager, ImportSource};
 use crate::proto::zfs_service_server::ZfsService;
 use crate::proto::*;
@@ -11,24 +12,62 @@ use crate::store::{Store, TemplateEntry, VolumeEntry};
 use crate::zfs::ZfsManager;
 
 pub struct ZfsServiceImpl {
-    pool_name: String,
     store: Arc<Store>,
     zfs: Arc<ZfsManager>,
     import: Arc<ImportManager>,
+    audit: Arc<ZfsAuditLogger>,
 }
 
 impl ZfsServiceImpl {
     pub fn new(
-        pool_name: String,
         store: Arc<Store>,
         zfs: Arc<ZfsManager>,
         import: Arc<ImportManager>,
+        audit: Arc<ZfsAuditLogger>,
     ) -> Self {
         Self {
-            pool_name,
             store,
             zfs,
             import,
+            audit,
+        }
+    }
+
+    /// Garbage collect base ZVOL if it's orphaned (no template entry, no other volumes)
+    async fn maybe_gc_base_zvol(&self, template_id: &str) {
+        use tracing::warn;
+
+        // Check if template still exists in DB
+        let template_exists = self
+            .store
+            .template_exists(template_id)
+            .await
+            .unwrap_or(true); // Assume exists on error, don't GC
+
+        if template_exists {
+            return; // Template still exists, don't GC
+        }
+
+        // Check if any other volumes depend on this template
+        let dependent_count = self
+            .store
+            .count_volumes_by_origin(template_id)
+            .await
+            .unwrap_or(1); // Assume exists on error, don't GC
+
+        if dependent_count > 0 {
+            return; // Other volumes still depend on this base
+        }
+
+        // Safe to garbage collect
+        info!(template_id = %template_id, "Garbage collecting orphaned base ZVOL");
+
+        if let Err(e) = self.zfs.delete_base_zvol(template_id).await {
+            warn!(
+                template_id = %template_id,
+                error = %e,
+                "Failed to garbage collect base ZVOL"
+            );
         }
     }
 }
@@ -86,21 +125,24 @@ impl ZfsService for ZfsServiceImpl {
             )));
         }
 
-        // Create the ZFS volume
+        // Generate volume UUID
+        let volume_id = uuid::Uuid::new_v4().to_string();
+
+        // Create the ZFS volume using UUID
         let vol = self
             .zfs
-            .create_volume(&req.name, req.size_bytes, req.volblocksize)
+            .create_volume(&volume_id, req.size_bytes, req.volblocksize)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Store in database
+        // Store in database with name as label
         let entry = VolumeEntry::new(
+            volume_id.clone(),
             req.name.clone(),
-            self.zfs.volume_zfs_path(&req.name),
+            self.zfs.volume_zfs_path(&volume_id),
             vol.device_path.clone(),
             req.size_bytes,
-            Some("create".to_string()),
-            None,
+            None, // No origin template for empty volumes
         );
 
         self.store
@@ -109,6 +151,11 @@ impl ZfsService for ZfsServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         info!(name = %req.name, id = %entry.id, "Volume created and stored in database");
+
+        // Audit log
+        self.audit
+            .volume_created(&entry.id, &entry.name, req.size_bytes)
+            .await;
 
         Ok(Response::new(volume_to_proto(&entry, &vol)))
     }
@@ -127,7 +174,7 @@ impl ZfsService for ZfsServiceImpl {
         // Get current ZFS state for each volume
         let mut volumes = Vec::new();
         for entry in db_volumes {
-            match self.zfs.get_volume(&entry.name).await {
+            match self.zfs.get_volume(&entry.id).await {
                 Ok(vol) => {
                     volumes.push(volume_to_proto(&entry, &vol));
                 }
@@ -155,10 +202,10 @@ impl ZfsService for ZfsServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.name)))?;
 
-        // Get current ZFS state
+        // Get current ZFS state using UUID
         let vol = self
             .zfs
-            .get_volume(&req.name)
+            .get_volume(&entry.id)
             .await
             .map_err(|e| Status::not_found(e.to_string()))?;
 
@@ -171,26 +218,36 @@ impl ZfsService for ZfsServiceImpl {
     ) -> Result<Response<DeleteVolumeResponse>, Status> {
         let req = request.into_inner();
 
-        // Get from database to get ID
+        // Get from database to get ID and origin template
         let entry = self
             .store
             .get_volume_by_name(&req.name)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.name)))?;
 
-        // Delete from ZFS
+        let origin_template_id = entry.origin_template_id.clone();
+
+        // Delete from ZFS (using UUID, includes snapshots)
         self.zfs
-            .delete_volume(&req.name)
+            .delete_volume_recursive(&entry.id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Delete from database
-        if let Some(entry) = entry {
-            self.store
-                .delete_volume(&entry.id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-            info!(name = %req.name, id = %entry.id, "Volume deleted from database");
+        // Delete from database (cascades to snapshots)
+        self.store
+            .delete_volume(&entry.id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        info!(name = %req.name, id = %entry.id, "Volume deleted from database");
+
+        // Audit log
+        self.audit.volume_deleted(&entry.id, &entry.name).await;
+
+        // Garbage collection: check if origin template's base ZVOL is orphaned
+        if let Some(template_id) = origin_template_id {
+            self.maybe_gc_base_zvol(&template_id).await;
         }
 
         Ok(Response::new(DeleteVolumeResponse { deleted: true }))
@@ -210,10 +267,10 @@ impl ZfsService for ZfsServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.name)))?;
 
-        // Resize in ZFS
+        // Resize in ZFS using UUID
         let vol = self
             .zfs
-            .resize_volume(&req.name, req.new_size_bytes)
+            .resize_volume(&entry.id, req.new_size_bytes)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -225,14 +282,19 @@ impl ZfsService for ZfsServiceImpl {
 
         info!(name = %req.name, new_size = %req.new_size_bytes, "Volume resized");
 
+        // Audit log
+        self.audit
+            .volume_resized(&entry.id, &entry.name, req.new_size_bytes)
+            .await;
+
         Ok(Response::new(volume_to_proto(&entry, &vol)))
     }
 
-    // === Import operations ===
+    // === Import operations (creates templates) ===
 
-    async fn import_volume(
+    async fn import_template(
         &self,
-        request: Request<ImportVolumeRequest>,
+        request: Request<ImportTemplateRequest>,
     ) -> Result<Response<ImportJob>, Status> {
         let req = request.into_inner();
 
@@ -243,16 +305,16 @@ impl ZfsService for ZfsServiceImpl {
             return Err(Status::invalid_argument("source is required"));
         }
 
-        // Check if volume already exists
+        // Check if template already exists
         if self
             .store
-            .get_volume_by_name(&req.name)
+            .get_template(&req.name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .is_some()
         {
             return Err(Status::already_exists(format!(
-                "Volume '{}' already exists",
+                "Template '{}' already exists",
                 req.name
             )));
         }
@@ -281,20 +343,17 @@ impl ZfsService for ZfsServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Import job '{}' not found", req.id)))?;
 
-        // If completed, get the volume
-        let volume = if job.state == "completed" {
-            match self.store.get_volume_by_name(&job.volume_name).await {
-                Ok(Some(entry)) => match self.zfs.get_volume(&entry.name).await {
-                    Ok(vol) => Some(volume_to_proto(&entry, &vol)),
-                    Err(_) => None,
-                },
+        // If completed, get the template
+        let template = if job.state == "completed" {
+            match self.store.get_template(&job.template_name).await {
+                Ok(Some(entry)) => Some(template_to_proto(&entry, 0)),
                 _ => None,
             }
         } else {
             None
         };
 
-        Ok(Response::new(import_job_to_proto(&job, volume)))
+        Ok(Response::new(import_job_to_proto(&job, template)))
     }
 
     async fn list_import_jobs(
@@ -338,30 +397,40 @@ impl ZfsService for ZfsServiceImpl {
         let req = request.into_inner();
 
         // Verify volume exists
-        let entry = self
+        let vol_entry = self
             .store
             .get_volume_by_name(&req.volume_name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.volume_name)))?;
 
+        // Generate snapshot UUID
+        let snapshot_id = uuid::Uuid::new_v4().to_string();
+
+        // Create ZFS snapshot using volume's UUID and snapshot UUID
         let snap = self
             .zfs
-            .create_snapshot(&req.volume_name, &req.snapshot_name)
+            .create_snapshot(&vol_entry.id, &snapshot_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Store snapshot in database
+        // Store snapshot in database with user-friendly name
         let snap_entry = crate::store::SnapshotEntry::new(
-            entry.id.clone(),
+            snapshot_id,
+            vol_entry.id.clone(),
             req.snapshot_name.clone(),
-            snap.full_name.clone(),
+            snap.name.clone(), // ZFS snapshot name (UUID)
         );
 
         self.store
             .create_snapshot(&snap_entry)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Audit log
+        self.audit
+            .snapshot_created(&vol_entry.id, &req.snapshot_name)
+            .await;
 
         Ok(Response::new(snapshot_to_proto(&snap_entry, &snap)))
     }
@@ -380,10 +449,10 @@ impl ZfsService for ZfsServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.volume_name)))?;
 
-        // Get snapshots from ZFS
+        // Get snapshots from ZFS using volume UUID
         let zfs_snapshots = self
             .zfs
-            .list_snapshots(&req.volume_name)
+            .list_snapshots(&entry.id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -424,24 +493,39 @@ impl ZfsService for ZfsServiceImpl {
         let req = request.into_inner();
 
         // Get volume from database
-        let entry = self
+        let vol_entry = self
             .store
             .get_volume_by_name(&req.volume_name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.volume_name)))?;
 
-        // Delete from ZFS
+        // Get snapshot from database to get ZFS snapshot name
+        let snap_entry = self
+            .store
+            .get_snapshot(&vol_entry.id, &req.snapshot_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| {
+                Status::not_found(format!("Snapshot '{}' not found", req.snapshot_name))
+            })?;
+
+        // Delete from ZFS using volume UUID and snapshot UUID
         self.zfs
-            .delete_snapshot(&req.volume_name, &req.snapshot_name)
+            .delete_snapshot(&vol_entry.id, &snap_entry.zfs_snapshot_name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Delete from database
         self.store
-            .delete_snapshot(&entry.id, &req.snapshot_name)
+            .delete_snapshot(&vol_entry.id, &req.snapshot_name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Audit log
+        self.audit
+            .snapshot_deleted(&vol_entry.id, &req.snapshot_name)
+            .await;
 
         Ok(Response::new(DeleteSnapshotResponse { deleted: true }))
     }
@@ -453,27 +537,42 @@ impl ZfsService for ZfsServiceImpl {
         let req = request.into_inner();
 
         // Get volume from database
-        let entry = self
+        let vol_entry = self
             .store
             .get_volume_by_name(&req.volume_name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.volume_name)))?;
 
+        // Get snapshot from database to get ZFS snapshot name
+        let snap_entry = self
+            .store
+            .get_snapshot(&vol_entry.id, &req.snapshot_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| {
+                Status::not_found(format!("Snapshot '{}' not found", req.snapshot_name))
+            })?;
+
         let vol = self
             .zfs
-            .rollback_snapshot(&req.volume_name, &req.snapshot_name)
+            .rollback_snapshot(&vol_entry.id, &snap_entry.zfs_snapshot_name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(volume_to_proto(&entry, &vol)))
+        // Audit log
+        self.audit
+            .snapshot_rollback(&vol_entry.id, &req.snapshot_name)
+            .await;
+
+        Ok(Response::new(volume_to_proto(&vol_entry, &vol)))
     }
 
     // === Template operations ===
 
-    async fn create_template(
+    async fn promote_snapshot_to_template(
         &self,
-        request: Request<CreateTemplateRequest>,
+        request: Request<PromoteSnapshotRequest>,
     ) -> Result<Response<Template>, Status> {
         let req = request.into_inner();
 
@@ -485,25 +584,50 @@ impl ZfsService for ZfsServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.volume_name)))?;
 
-        // Create snapshot in ZFS
-        let snap = self
-            .zfs
-            .create_snapshot(&req.volume_name, &req.template_name)
+        // Get snapshot from database
+        let snap_entry = self
+            .store
+            .get_snapshot(&vol_entry.id, &req.snapshot_name)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| {
+                Status::not_found(format!("Snapshot '{}' not found", req.snapshot_name))
+            })?;
 
         // Get volume info for size
         let vol = self
             .zfs
-            .get_volume(&req.volume_name)
+            .get_volume(&vol_entry.id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Generate template UUID
+        let template_id = uuid::Uuid::new_v4().to_string();
+
+        // Clone the snapshot to base ZVOL
+        let snap_path = format!(
+            "{}@{}",
+            self.zfs.volume_zfs_path(&vol_entry.id),
+            snap_entry.zfs_snapshot_name
+        );
+        self.zfs
+            .clone_snapshot(&snap_path, &self.zfs.base_zvol_path(&template_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Create template snapshot (@img)
+        let snapshot_path = self
+            .zfs
+            .create_template_snapshot(&template_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Store template in database
         let template_entry = TemplateEntry::new(
+            template_id.clone(),
             req.template_name.clone(),
-            snap.full_name.clone(),
-            Some(vol_entry.id.clone()),
+            self.zfs.base_zvol_path(&template_id),
+            snapshot_path,
             vol.volsize_bytes,
         );
 
@@ -514,9 +638,16 @@ impl ZfsService for ZfsServiceImpl {
 
         info!(
             name = %req.template_name,
+            template_id = %template_id,
             source_volume = %req.volume_name,
-            "Template created"
+            source_snapshot = %req.snapshot_name,
+            "Template created from snapshot"
         );
+
+        // Audit log
+        self.audit
+            .template_created(&template_entry.id, &req.template_name, &req.volume_name)
+            .await;
 
         Ok(Response::new(template_to_proto(&template_entry, 0)))
     }
@@ -551,30 +682,21 @@ impl ZfsService for ZfsServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Template '{}' not found", req.name)))?;
 
-        // Delete the snapshot from ZFS
-        // snapshot_path format: pool/volume@snapshot
-        let parts: Vec<&str> = template.snapshot_path.split('@').collect();
-        if parts.len() == 2 {
-            let volume_path = parts[0];
-            let snap_name = parts[1];
-            // Extract volume name from path (remove pool prefix)
-            let volume_name = volume_path
-                .strip_prefix(&format!("{}/", self.pool_name))
-                .unwrap_or(volume_path);
+        let template_id = template.id.clone();
 
-            self.zfs
-                .delete_snapshot(volume_name, snap_name)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-        }
-
-        // Delete from database
+        // Delete from database only - ZFS resources stay for dependent volumes
         self.store
             .delete_template(&req.name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!(name = %req.name, "Template deleted");
+        info!(name = %req.name, template_id = %template_id, "Template deleted from database");
+
+        // Audit log
+        self.audit.template_deleted(&template_id, &req.name).await;
+
+        // Try to GC base ZVOL (will succeed only if no volumes depend on it)
+        self.maybe_gc_base_zvol(&template_id).await;
 
         Ok(Response::new(DeleteTemplateResponse { deleted: true }))
     }
@@ -595,21 +717,42 @@ impl ZfsService for ZfsServiceImpl {
                 Status::not_found(format!("Template '{}' not found", req.template_name))
             })?;
 
-        // Clone the snapshot
-        let vol = self
+        // Determine final volume size
+        let volume_size = req.size_bytes.unwrap_or(template.size_bytes);
+        if volume_size < template.size_bytes {
+            return Err(Status::invalid_argument(format!(
+                "Volume size {} is smaller than template size {}",
+                volume_size, template.size_bytes
+            )));
+        }
+
+        // Generate volume UUID
+        let volume_id = uuid::Uuid::new_v4().to_string();
+
+        // Clone the template to new volume
+        let mut vol = self
             .zfs
-            .clone_snapshot(&template.snapshot_path, &req.new_volume_name)
+            .clone_to_volume(&template.id, &volume_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Store new volume in database
+        // Expand volume if requested size is larger than template
+        if volume_size > template.size_bytes {
+            vol = self
+                .zfs
+                .resize_volume(&volume_id, volume_size)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
+
+        // Store new volume in database with origin template
         let entry = VolumeEntry::new(
+            volume_id.clone(),
             req.new_volume_name.clone(),
-            self.zfs.volume_zfs_path(&req.new_volume_name),
+            self.zfs.volume_zfs_path(&volume_id),
             vol.device_path.clone(),
-            template.size_bytes,
-            Some("clone".to_string()),
-            Some(template.snapshot_path.clone()),
+            volume_size,
+            Some(template.id.clone()), // origin_template_id
         );
 
         self.store
@@ -619,9 +762,16 @@ impl ZfsService for ZfsServiceImpl {
 
         info!(
             name = %req.new_volume_name,
+            volume_id = %volume_id,
             template = %req.template_name,
+            size_bytes = %volume_size,
             "Volume cloned from template"
         );
+
+        // Audit log
+        self.audit
+            .volume_cloned(&entry.id, &req.new_volume_name, &req.template_name)
+            .await;
 
         Ok(Response::new(volume_to_proto(&entry, &vol)))
     }
@@ -650,7 +800,7 @@ fn snapshot_to_proto(
     Snapshot {
         id: entry.id.clone(),
         name: entry.name.clone(),
-        full_name: entry.snapshot_path.clone(),
+        full_name: snap.full_name.clone(),
         used_bytes: snap.used_bytes,
         created_at: entry.created_at.clone(),
     }
@@ -661,7 +811,7 @@ fn template_to_proto(entry: &TemplateEntry, clone_count: u32) -> Template {
         id: entry.id.clone(),
         name: entry.name.clone(),
         snapshot_path: entry.snapshot_path.clone(),
-        source_volume: entry.source_volume_id.clone().unwrap_or_default(),
+        source_volume: String::new(), // No longer tracked
         size_bytes: entry.size_bytes,
         created_at: entry.created_at.clone(),
         clone_count,
@@ -675,7 +825,10 @@ fn timestamp_to_iso(ts: i64) -> String {
         .unwrap_or_default()
 }
 
-fn import_job_to_proto(entry: &crate::store::ImportJobEntry, volume: Option<Volume>) -> ImportJob {
+fn import_job_to_proto(
+    entry: &crate::store::ImportJobEntry,
+    template: Option<Template>,
+) -> ImportJob {
     let state = match entry.state.as_str() {
         "pending" => ImportJobState::Pending,
         "downloading" => ImportJobState::Downloading,
@@ -689,13 +842,13 @@ fn import_job_to_proto(entry: &crate::store::ImportJobEntry, volume: Option<Volu
 
     ImportJob {
         id: entry.id.clone(),
-        volume_name: entry.volume_name.clone(),
+        template_name: entry.template_name.clone(),
         source: entry.source.clone(),
         state: state.into(),
         bytes_written: entry.bytes_written,
         total_bytes: entry.total_bytes.unwrap_or(0),
         error: entry.error.clone(),
-        volume,
+        template,
         created_at: entry.created_at.clone(),
         completed_at: entry.completed_at.clone(),
     }
