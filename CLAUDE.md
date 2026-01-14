@@ -126,6 +126,36 @@ while let Some(entry) = stream.message().await? {
 }
 ```
 
+### Log-Level Guidelines
+
+| Level | Verwendung | Beispiele |
+|-------|------------|-----------|
+| **AUDIT** | Alle State-ändernden Operationen (CRUD + Lifecycle) | VM/Volume/NIC created/deleted/started/stopped/killed |
+| **INFO** | Informative Events ohne State-Änderung | Service gestartet, Connection hergestellt |
+| **WARN** | Degraded Operations, Retries | Connection retry, Fallback aktiviert |
+| **ERROR** | Fehlgeschlagene Operationen | VM start failed, Import failed |
+| **DEBUG** | Entwickler-Diagnostik | Detaillierte Trace-Infos |
+
+**AuditLogger Usage** (empfohlen statt direktem Client):
+```rust
+use mvirt_log::{AuditLogger, LogLevel, create_audit_logger};
+
+// In main.rs: Create shared audit logger
+let audit = create_audit_logger("http://[::1]:50052", "vmm");
+
+// Automatisch: Dual-Logging (lokal via tracing + remote via mvirt-log)
+audit.log(LogLevel::Audit, "VM created", vec![vm_id]).await;
+```
+
+**Component-specific wrappers** (in `mvirt-zfs`, `mvirt-net`):
+```rust
+// ZfsAuditLogger wraps AuditLogger with domain-specific methods
+use crate::audit::{create_audit_logger, ZfsAuditLogger};
+
+let audit = create_audit_logger(&args.log_endpoint);
+audit.volume_created(&volume_id, &volume_name, size).await;
+```
+
 ## Key Decisions
 
 - **SQLite** for persistence (not in-memory)
