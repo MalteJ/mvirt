@@ -72,10 +72,10 @@ firmware: $(FW_BIN)
 
 # ============ INITRAMFS ============
 
-$(INITRAMFS): $(CH_BIN) $(FW_BIN) $(RUST_TARGET_DIR)/pideins $(RUST_TARGET_DIR)/mvirt-cli $(RUST_TARGET_DIR)/mvirt-vmm | $(MVIRT_OS_DIR)/target
-	cp $(RUST_TARGET_DIR)/pideins $(INITRAMFS_ROOTFS)/init
+$(INITRAMFS): $(CH_BIN) $(FW_BIN) $(RUST_TARGET_DIR)/pideisn $(RUST_TARGET_DIR)/mvirt $(RUST_TARGET_DIR)/mvirt-vmm | $(MVIRT_OS_DIR)/target
+	cp $(RUST_TARGET_DIR)/pideisn $(INITRAMFS_ROOTFS)/init
 	chmod +x $(INITRAMFS_ROOTFS)/init
-	cp $(RUST_TARGET_DIR)/mvirt-cli $(INITRAMFS_ROOTFS)/usr/sbin/
+	cp $(RUST_TARGET_DIR)/mvirt $(INITRAMFS_ROOTFS)/usr/sbin/mvirt
 	cp $(RUST_TARGET_DIR)/mvirt-vmm $(INITRAMFS_ROOTFS)/usr/sbin/
 	chmod +x $(INITRAMFS_ROOTFS)/usr/sbin/*
 	cp $(CH_BIN) $(INITRAMFS_ROOTFS)/usr/bin/cloud-hypervisor
@@ -99,6 +99,50 @@ $(UKI): $(BZIMAGE) $(INITRAMFS) $(MVIRT_OS_DIR)/cmdline.txt $(MVIRT_OS_DIR)/kern
 
 uki: $(UKI)
 
+# ============ ISO (UEFI + Legacy BIOS) ============
+
+ISO := $(MVIRT_OS_DIR)/target/mvirt-os.iso
+ISO_DIR := $(MVIRT_OS_DIR)/target/iso
+
+CMDLINE := $(shell cat $(MVIRT_OS_DIR)/cmdline.txt 2>/dev/null)
+
+$(ISO): $(BZIMAGE) $(INITRAMFS) $(UKI) $(MVIRT_OS_DIR)/cmdline.txt | $(MVIRT_OS_DIR)/target
+	rm -rf $(ISO_DIR)
+	mkdir -p $(ISO_DIR)/boot/grub
+	mkdir -p $(ISO_DIR)/EFI/BOOT
+	mkdir -p $(ISO_DIR)/isolinux
+	# Copy kernel and initramfs
+	cp $(BZIMAGE) $(ISO_DIR)/boot/vmlinuz
+	cp $(INITRAMFS) $(ISO_DIR)/boot/initramfs.cpio.gz
+	# UEFI: Copy UKI as EFI bootloader
+	cp $(UKI) $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI
+	# Legacy BIOS: ISOLINUX
+	cp /usr/lib/ISOLINUX/isolinux.bin $(ISO_DIR)/isolinux/
+	cp /usr/lib/syslinux/modules/bios/ldlinux.c32 $(ISO_DIR)/isolinux/
+	cp /usr/lib/syslinux/modules/bios/libcom32.c32 $(ISO_DIR)/isolinux/
+	cp /usr/lib/syslinux/modules/bios/libutil.c32 $(ISO_DIR)/isolinux/
+	cp /usr/lib/syslinux/modules/bios/menu.c32 $(ISO_DIR)/isolinux/
+	# ISOLINUX config
+	printf 'DEFAULT mvirt\nTIMEOUT 30\nPROMPT 0\n\nLABEL mvirt\n    KERNEL /boot/vmlinuz\n    INITRD /boot/initramfs.cpio.gz\n    APPEND $(CMDLINE)\n' > $(ISO_DIR)/isolinux/isolinux.cfg
+	# GRUB config for UEFI (fallback)
+	printf 'set timeout=3\nset default=0\n\nmenuentry "mvirt-os" {\n    linux /boot/vmlinuz $(CMDLINE)\n    initrd /boot/initramfs.cpio.gz\n}\n' > $(ISO_DIR)/boot/grub/grub.cfg
+	# Create hybrid ISO (UEFI + BIOS bootable)
+	xorriso -as mkisofs \
+		-o $(ISO) \
+		-isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+		-c isolinux/boot.cat \
+		-b isolinux/isolinux.bin \
+		-no-emul-boot \
+		-boot-load-size 4 \
+		-boot-info-table \
+		-eltorito-alt-boot \
+		-e EFI/BOOT/BOOTX64.EFI \
+		-no-emul-boot \
+		-isohybrid-gpt-basdat \
+		$(ISO_DIR)
+
+iso: $(ISO)
+
 # ============ TARGET DIR ============
 
 $(MVIRT_OS_DIR)/target:
@@ -109,11 +153,12 @@ $(MVIRT_OS_DIR)/target:
 os-clean:
 	-cd $(KERNEL_DIR) && make clean
 	rm -rf $(MVIRT_OS_DIR)/target
+	rm -rf $(ISO_DIR)
 	rm -f $(INITRAMFS_ROOTFS)/init
 	rm -f $(INITRAMFS_ROOTFS)/usr/sbin/mvirt-cli
 	rm -f $(INITRAMFS_ROOTFS)/usr/sbin/mvirt-vmm
 	rm -f $(INITRAMFS_ROOTFS)/usr/bin/cloud-hypervisor
-	rm -rf $(INITRAMFS_ROOTFS)/usr/share/mvirt
+	rm -rf $(INITRAMFS_ROOTFS)/var/lib/mvirt
 
 os-distclean: os-clean
 	rm -rf $(KERNEL_DIR)
