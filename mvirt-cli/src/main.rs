@@ -9,18 +9,27 @@ pub mod proto {
     tonic::include_proto!("mvirt");
 }
 
+pub mod zfs_proto {
+    tonic::include_proto!("mvirt.zfs");
+}
+
 mod tui;
 
 use proto::vm_service_client::VmServiceClient;
 use proto::*;
+use zfs_proto::zfs_service_client::ZfsServiceClient;
 
 #[derive(Parser)]
 #[command(name = "mvirt")]
 #[command(about = "CLI for mvirt VM manager", long_about = None)]
 struct Cli {
-    /// gRPC server address
+    /// gRPC server address for mvirt-vmm
     #[arg(short, long, default_value = "http://[::1]:50051")]
     server: String,
+
+    /// gRPC server address for mvirt-zfs (storage)
+    #[arg(long, default_value = "http://[::1]:50053")]
+    zfs_server: String,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -153,19 +162,6 @@ fn format_state(state: VmState) -> String {
     }
 }
 
-async fn connect(server: &str) -> Result<VmServiceClient<Channel>, Box<dyn std::error::Error>> {
-    VmServiceClient::connect(server.to_string())
-        .await
-        .map_err(|e| {
-            let err_str = format!("{:?}", e);
-            if err_str.contains("ConnectionRefused") || err_str.contains("Connection refused") {
-                format!("Cannot connect to mvirt daemon at {}", server).into()
-            } else {
-                Box::new(e) as Box<dyn std::error::Error>
-            }
-        })
-}
-
 async fn run_console(
     client: &mut VmServiceClient<Channel>,
     vm_id: String,
@@ -273,21 +269,25 @@ async fn run_console(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let client = match connect(&cli.server).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+
+    // Try to connect to mvirt-vmm (optional for TUI - required for subcommands)
+    let vm_client = VmServiceClient::connect(cli.server.clone()).await.ok();
+
+    // Try to connect to mvirt-zfs (optional - doesn't fail if unavailable)
+    let zfs_client = ZfsServiceClient::connect(cli.zfs_server.clone()).await.ok();
 
     let Some(command) = cli.command else {
-        // No subcommand: start TUI
-        tui::run(client).await?;
+        // No subcommand: start TUI (works even without connections)
+        tui::run(vm_client, zfs_client).await?;
         return Ok(());
     };
 
-    let mut client = client;
+    // Subcommands require a connection to the VMM
+    let Some(mut client) = vm_client else {
+        eprintln!("Error: Cannot connect to mvirt daemon at {}", cli.server);
+        std::process::exit(1);
+    };
+
     match command {
         Commands::Create {
             name,

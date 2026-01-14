@@ -1,0 +1,212 @@
+syntax = "proto3";
+package mvirt.zfs;
+
+service ZfsService {
+  // Pool operations
+  rpc GetPoolStats(GetPoolStatsRequest) returns (PoolStats);
+
+  // Volume CRUD
+  rpc CreateVolume(CreateVolumeRequest) returns (Volume);
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+  rpc GetVolume(GetVolumeRequest) returns (Volume);
+  rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+  rpc ResizeVolume(ResizeVolumeRequest) returns (Volume);
+
+  // Import from image files (async job-based)
+  rpc ImportVolume(ImportVolumeRequest) returns (ImportJob);
+  rpc GetImportJob(GetImportJobRequest) returns (ImportJob);
+  rpc ListImportJobs(ListImportJobsRequest) returns (ListImportJobsResponse);
+  rpc CancelImportJob(CancelImportJobRequest) returns (CancelImportJobResponse);
+
+  // Snapshots
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (Snapshot);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+  rpc RollbackSnapshot(RollbackSnapshotRequest) returns (Volume);
+
+  // Templates (cloning)
+  rpc CreateTemplate(CreateTemplateRequest) returns (Template);
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  rpc DeleteTemplate(DeleteTemplateRequest) returns (DeleteTemplateResponse);
+  rpc CloneFromTemplate(CloneFromTemplateRequest) returns (Volume);
+}
+
+// === Core Messages ===
+
+message PoolStats {
+  string name = 1;
+  uint64 total_bytes = 2;
+  uint64 available_bytes = 3;
+  uint64 used_bytes = 4;
+  uint64 provisioned_bytes = 5;  // Sum of all volsize (may exceed total due to thin provisioning)
+  double compression_ratio = 6;
+}
+
+message Volume {
+  string id = 1;                  // UUID
+  string name = 2;                // e.g., "docker-01"
+  string path = 3;                // e.g., /dev/zvol/vmpool/docker-01
+  uint64 volsize_bytes = 4;       // Provisioned size
+  uint64 used_bytes = 5;          // Actual used (referenced)
+  uint64 volblocksize = 6;
+  double compression_ratio = 7;
+  string created_at = 8;          // ISO 8601
+  repeated Snapshot snapshots = 9;
+}
+
+message Snapshot {
+  string id = 1;                  // UUID
+  string name = 2;                // e.g., pre-update
+  string full_name = 3;           // e.g., vmpool/docker-01@pre-update
+  uint64 used_bytes = 4;
+  string created_at = 5;
+}
+
+message Template {
+  string id = 1;                  // UUID
+  string name = 2;                // e.g., debian-12-base
+  string snapshot_path = 3;       // e.g., vmpool/debian-base@v1
+  string source_volume = 4;
+  uint64 size_bytes = 5;
+  string created_at = 6;
+  uint32 clone_count = 7;         // Number of VMs cloned from this template
+}
+
+enum ImportJobState {
+  IMPORT_JOB_STATE_UNSPECIFIED = 0;
+  IMPORT_JOB_STATE_PENDING = 1;
+  IMPORT_JOB_STATE_DOWNLOADING = 2;   // For HTTP(S) sources
+  IMPORT_JOB_STATE_CONVERTING = 3;    // qcow2 -> raw conversion
+  IMPORT_JOB_STATE_WRITING = 4;       // Writing to ZVOL
+  IMPORT_JOB_STATE_COMPLETED = 5;
+  IMPORT_JOB_STATE_FAILED = 6;
+  IMPORT_JOB_STATE_CANCELLED = 7;
+}
+
+message ImportJob {
+  string id = 1;                      // UUID
+  string volume_name = 2;
+  string source = 3;                  // File path or URL
+  ImportJobState state = 4;
+  uint64 bytes_written = 5;
+  uint64 total_bytes = 6;
+  optional string error = 7;
+  optional Volume volume = 8;         // Set when state=COMPLETED
+  string created_at = 9;
+  optional string completed_at = 10;
+}
+
+// === Request/Response Messages ===
+
+// Pool
+message GetPoolStatsRequest {}
+
+// Volume CRUD
+message CreateVolumeRequest {
+  string name = 1;
+  uint64 size_bytes = 2;
+  optional uint32 volblocksize = 3;  // Default: 16k
+}
+
+message ListVolumesRequest {}
+
+message ListVolumesResponse {
+  repeated Volume volumes = 1;
+}
+
+message GetVolumeRequest {
+  string name = 1;
+}
+
+message DeleteVolumeRequest {
+  string name = 1;
+}
+
+message DeleteVolumeResponse {
+  bool deleted = 1;
+}
+
+message ResizeVolumeRequest {
+  string name = 1;
+  uint64 new_size_bytes = 2;
+}
+
+// Import
+message ImportVolumeRequest {
+  string name = 1;
+  string source = 2;                 // Local path (/path/to/file) or URL (https://...)
+  optional uint64 size_bytes = 3;    // Required for raw URLs, optional otherwise
+}
+
+message GetImportJobRequest {
+  string id = 1;
+}
+
+message ListImportJobsRequest {
+  bool include_completed = 1;  // Default: only active jobs
+}
+
+message ListImportJobsResponse {
+  repeated ImportJob jobs = 1;
+}
+
+message CancelImportJobRequest {
+  string id = 1;
+}
+
+message CancelImportJobResponse {
+  bool cancelled = 1;
+}
+
+// Snapshots
+message CreateSnapshotRequest {
+  string volume_name = 1;
+  string snapshot_name = 2;
+}
+
+message ListSnapshotsRequest {
+  string volume_name = 1;
+}
+
+message ListSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+}
+
+message DeleteSnapshotRequest {
+  string volume_name = 1;
+  string snapshot_name = 2;
+}
+
+message DeleteSnapshotResponse {
+  bool deleted = 1;
+}
+
+message RollbackSnapshotRequest {
+  string volume_name = 1;
+  string snapshot_name = 2;
+}
+
+// Templates
+message CreateTemplateRequest {
+  string volume_name = 1;
+  string template_name = 2;          // Creates volume@template_name snapshot
+}
+
+message ListTemplatesRequest {}
+
+message ListTemplatesResponse {
+  repeated Template templates = 1;
+}
+
+message DeleteTemplateRequest {
+  string name = 1;
+}
+
+message DeleteTemplateResponse {
+  bool deleted = 1;
+}
+
+message CloneFromTemplateRequest {
+  string template_name = 1;          // Template name (not full snapshot path)
+  string new_volume_name = 2;
+}

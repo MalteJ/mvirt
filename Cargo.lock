@@ -1595,6 +1595,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-build",
+ "uuid",
  "vt100",
 ]
 
@@ -1624,6 +1625,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "hyperlocal",
+ "mvirt-log",
  "nix 0.29.0",
  "prost",
  "serde",
@@ -1648,6 +1650,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "mvirt-log",
  "prost",
  "reqwest",
  "serde",

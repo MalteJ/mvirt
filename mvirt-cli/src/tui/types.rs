@@ -1,6 +1,7 @@
 use tokio::sync::mpsc;
 
 use crate::proto::{SystemInfo, Vm};
+use crate::zfs_proto::{ImportJob, PoolStats, Template, Volume};
 
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum EscapeState {
@@ -9,11 +10,12 @@ pub enum EscapeState {
     SawCtrlA,
 }
 
+/// Source type for VM boot disk
 #[derive(Clone, Copy, PartialEq, Default)]
-pub enum CreateBootMode {
+pub enum DiskSourceType {
     #[default]
-    Disk,
-    Kernel,
+    Template,
+    Volume,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -54,11 +56,8 @@ impl SshKeysConfig {
 #[derive(Clone)]
 pub struct CreateVmParams {
     pub name: Option<String>,
-    pub boot_mode: i32,
-    pub kernel: Option<String>,
-    pub initramfs: Option<String>,
-    pub cmdline: Option<String>,
-    pub disk: String,
+    pub disk_source_type: DiskSourceType,
+    pub disk_name: String, // volume or template name
     pub vcpus: u32,
     pub memory_mb: u64,
     pub nested_virt: bool,
@@ -67,7 +66,34 @@ pub struct CreateVmParams {
     pub ssh_keys_config: Option<SshKeysConfig>,
 }
 
+/// Active view in the TUI
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum View {
+    #[default]
+    Vm,
+    Storage,
+}
+
+/// Focus within storage view
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum StorageFocus {
+    #[default]
+    Volumes,
+    Templates,
+}
+
+/// Storage state from mvirt-zfs
+#[derive(Default)]
+pub struct StorageState {
+    pub pool: Option<PoolStats>,
+    pub volumes: Vec<Volume>,
+    pub templates: Vec<Template>,
+    pub import_jobs: Vec<ImportJob>,
+}
+
+#[allow(dead_code)] // Storage actions will be used when modals are implemented
 pub enum Action {
+    // VM actions
     Refresh,
     RefreshSystemInfo,
     Start(String),
@@ -79,9 +105,49 @@ pub enum Action {
         vm_id: String,
         vm_name: Option<String>,
     },
+
+    // Storage actions
+    RefreshStorage,
+    CreateVolume {
+        name: String,
+        size_bytes: u64,
+    },
+    DeleteVolume(String),
+    ResizeVolume {
+        name: String,
+        new_size: u64,
+    },
+    ImportVolume {
+        name: String,
+        source: String,
+        size_bytes: Option<u64>,
+    },
+    CancelImport(String),
+    CreateSnapshot {
+        volume: String,
+        name: String,
+    },
+    DeleteSnapshot {
+        volume: String,
+        name: String,
+    },
+    RollbackSnapshot {
+        volume: String,
+        name: String,
+    },
+    CreateTemplate {
+        volume: String,
+        name: String,
+    },
+    DeleteTemplate(String),
+    CloneTemplate {
+        template: String,
+        new_volume: String,
+    },
 }
 
 pub enum ActionResult {
+    // VM results
     Refreshed(Result<Vec<Vm>, String>),
     SystemInfoRefreshed(Result<SystemInfo, String>),
     Started(String, Result<(), String>),
@@ -96,4 +162,18 @@ pub enum ActionResult {
     },
     ConsoleOutput(Vec<u8>),
     ConsoleClosed(Option<String>),
+
+    // Storage results
+    StorageRefreshed(Result<StorageState, String>),
+    VolumeCreated(Result<(), String>),
+    VolumeDeleted(Result<(), String>),
+    VolumeResized(Result<(), String>),
+    ImportStarted(Result<String, String>),
+    ImportCancelled(Result<(), String>),
+    SnapshotCreated(Result<(), String>),
+    SnapshotDeleted(Result<(), String>),
+    SnapshotRolledBack(Result<(), String>),
+    TemplateCreated(Result<(), String>),
+    TemplateDeleted(Result<(), String>),
+    VolumeCloned(Result<(), String>),
 }

@@ -2,17 +2,23 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::types::{
-    CreateBootMode, CreateVmParams, SshKeySource, SshKeysConfig, UserDataMode,
+    CreateVmParams, DiskSourceType, SshKeySource, SshKeysConfig, UserDataMode,
 };
+use crate::zfs_proto::{Template, Volume};
 
-#[derive(Default)]
+/// Disk selection item (either a volume or template)
+#[derive(Clone)]
+pub struct DiskItem {
+    pub name: String,
+    pub size_bytes: u64,
+    pub source_type: DiskSourceType,
+}
+
 pub struct CreateModal {
     pub name: String,
-    pub boot_mode: CreateBootMode,
-    pub kernel: String,
-    pub initramfs: String,
-    pub cmdline: String,
-    pub disk: String,
+    pub disk_source_type: DiskSourceType,
+    pub disk_items: Vec<DiskItem>, // Combined list of templates and volumes
+    pub selected_disk: usize,
     pub vcpus: String,
     pub memory_mb: String,
     pub nested_virt: bool,
@@ -22,59 +28,75 @@ pub struct CreateModal {
     pub focused_field: usize,
 }
 
+impl Default for CreateModal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CreateModal {
     pub fn new() -> Self {
         Self {
+            name: String::new(),
+            disk_source_type: DiskSourceType::Template,
+            disk_items: Vec::new(),
+            selected_disk: 0,
             vcpus: "1".to_string(),
             memory_mb: "512".to_string(),
-            boot_mode: CreateBootMode::Disk,
+            nested_virt: false,
             user_data_mode: UserDataMode::None,
-            ..Default::default()
+            user_data_file: String::new(),
+            ssh_keys_config: None,
+            focused_field: 0,
         }
+    }
+
+    /// Create modal with pre-populated disk items
+    pub fn with_storage(templates: &[Template], volumes: &[Volume]) -> Self {
+        let mut modal = Self::new();
+
+        // Add templates first (default selection)
+        for tpl in templates {
+            modal.disk_items.push(DiskItem {
+                name: tpl.name.clone(),
+                size_bytes: tpl.size_bytes,
+                source_type: DiskSourceType::Template,
+            });
+        }
+
+        // Then add volumes
+        for vol in volumes {
+            modal.disk_items.push(DiskItem {
+                name: vol.name.clone(),
+                size_bytes: vol.volsize_bytes,
+                source_type: DiskSourceType::Volume,
+            });
+        }
+
+        modal
     }
 
     pub fn field_count() -> usize {
-        11
+        7 // name, disk, vcpus, memory, nested_virt, user_data, submit
     }
 
     pub fn focus_next(&mut self) {
-        loop {
-            self.focused_field = (self.focused_field + 1) % Self::field_count();
-            if self.is_field_visible(self.focused_field) {
-                break;
-            }
-        }
+        self.focused_field = (self.focused_field + 1) % Self::field_count();
     }
 
     pub fn focus_prev(&mut self) {
-        loop {
-            self.focused_field = if self.focused_field == 0 {
-                Self::field_count() - 1
-            } else {
-                self.focused_field - 1
-            };
-            if self.is_field_visible(self.focused_field) {
-                break;
-            }
-        }
-    }
-
-    pub fn is_field_visible(&self, field: usize) -> bool {
-        match field {
-            2..=4 => self.boot_mode == CreateBootMode::Kernel,
-            _ => true,
-        }
+        self.focused_field = if self.focused_field == 0 {
+            Self::field_count() - 1
+        } else {
+            self.focused_field - 1
+        };
     }
 
     pub fn current_input(&mut self) -> Option<&mut String> {
         match self.focused_field {
             0 => Some(&mut self.name),
-            2 => Some(&mut self.kernel),
-            3 => Some(&mut self.initramfs),
-            4 => Some(&mut self.cmdline),
-            5 => Some(&mut self.disk),
-            6 => Some(&mut self.vcpus),
-            7 => Some(&mut self.memory_mb),
+            2 => Some(&mut self.vcpus),
+            3 => Some(&mut self.memory_mb),
             _ => None,
         }
     }
@@ -83,20 +105,16 @@ impl CreateModal {
         self.focused_field == 0
     }
 
-    pub fn is_boot_mode_field(&self) -> bool {
+    pub fn is_disk_field(&self) -> bool {
         self.focused_field == 1
     }
 
-    pub fn is_file_field(&self) -> bool {
-        match self.focused_field {
-            2 | 3 => self.boot_mode == CreateBootMode::Kernel,
-            5 => true,
-            _ => false,
-        }
+    pub fn is_numeric_field(&self) -> bool {
+        matches!(self.focused_field, 2 | 3)
     }
 
     pub fn is_nested_virt_field(&self) -> bool {
-        self.focused_field == 8
+        self.focused_field == 4
     }
 
     pub fn toggle_nested_virt(&mut self) {
@@ -104,7 +122,7 @@ impl CreateModal {
     }
 
     pub fn is_user_data_mode_field(&self) -> bool {
-        self.focused_field == 9
+        self.focused_field == 5
     }
 
     pub fn cycle_user_data_mode(&mut self) {
@@ -127,25 +145,49 @@ impl CreateModal {
         }
     }
 
-    pub fn is_numeric_field(&self) -> bool {
-        matches!(self.focused_field, 6 | 7)
+    pub fn is_submit_field(&self) -> bool {
+        self.focused_field == 6
+    }
+
+    pub fn disk_select_next(&mut self) {
+        if !self.disk_items.is_empty() {
+            self.selected_disk = (self.selected_disk + 1) % self.disk_items.len();
+            if let Some(item) = self.disk_items.get(self.selected_disk) {
+                self.disk_source_type = item.source_type;
+            }
+        }
+    }
+
+    pub fn disk_select_prev(&mut self) {
+        if !self.disk_items.is_empty() {
+            self.selected_disk = if self.selected_disk == 0 {
+                self.disk_items.len() - 1
+            } else {
+                self.selected_disk - 1
+            };
+            if let Some(item) = self.disk_items.get(self.selected_disk) {
+                self.disk_source_type = item.source_type;
+            }
+        }
+    }
+
+    /// Toggle between showing templates or volumes only
+    pub fn toggle_disk_source_type(&mut self) {
+        self.disk_source_type = match self.disk_source_type {
+            DiskSourceType::Template => DiskSourceType::Volume,
+            DiskSourceType::Volume => DiskSourceType::Template,
+        };
+        // Find first item of the new type
+        for (idx, item) in self.disk_items.iter().enumerate() {
+            if item.source_type == self.disk_source_type {
+                self.selected_disk = idx;
+                break;
+            }
+        }
     }
 
     pub fn is_valid_name_char(c: char) -> bool {
         c.is_ascii_alphanumeric() || c == '-' || c == '_'
-    }
-
-    pub fn set_field(&mut self, field: usize, value: String) {
-        match field {
-            0 => self.name = value,
-            2 => self.kernel = value,
-            3 => self.initramfs = value,
-            4 => self.cmdline = value,
-            5 => self.disk = value,
-            6 => self.vcpus = value,
-            7 => self.memory_mb = value,
-            _ => {}
-        }
     }
 
     pub fn set_user_data_file(&mut self, path: String) {
@@ -156,26 +198,16 @@ impl CreateModal {
         self.ssh_keys_config = Some(config);
     }
 
-    pub fn toggle_boot_mode(&mut self) {
-        self.boot_mode = match self.boot_mode {
-            CreateBootMode::Disk => CreateBootMode::Kernel,
-            CreateBootMode::Kernel => CreateBootMode::Disk,
-        };
+    #[allow(dead_code)]
+    pub fn selected_disk_item(&self) -> Option<&DiskItem> {
+        self.disk_items.get(self.selected_disk)
     }
 
     pub fn validate(&self) -> Result<CreateVmParams, &'static str> {
-        match self.boot_mode {
-            CreateBootMode::Disk => {
-                if self.disk.is_empty() {
-                    return Err("Disk path is required for disk boot");
-                }
-            }
-            CreateBootMode::Kernel => {
-                if self.kernel.is_empty() {
-                    return Err("Kernel path is required for kernel boot");
-                }
-            }
-        }
+        let disk_item = self
+            .disk_items
+            .get(self.selected_disk)
+            .ok_or("No disk selected")?;
 
         match self.user_data_mode {
             UserDataMode::None => {}
@@ -194,34 +226,14 @@ impl CreateModal {
         let vcpus: u32 = self.vcpus.parse().map_err(|_| "Invalid vcpus")?;
         let memory_mb: u64 = self.memory_mb.parse().map_err(|_| "Invalid memory")?;
 
-        let boot_mode = match self.boot_mode {
-            CreateBootMode::Disk => 1,
-            CreateBootMode::Kernel => 2,
-        };
-
         Ok(CreateVmParams {
             name: if self.name.is_empty() {
                 None
             } else {
                 Some(self.name.clone())
             },
-            boot_mode,
-            kernel: if self.kernel.is_empty() {
-                None
-            } else {
-                Some(self.kernel.clone())
-            },
-            initramfs: if self.initramfs.is_empty() {
-                None
-            } else {
-                Some(self.initramfs.clone())
-            },
-            cmdline: if self.cmdline.is_empty() {
-                None
-            } else {
-                Some(self.cmdline.clone())
-            },
-            disk: self.disk.clone(),
+            disk_source_type: disk_item.source_type,
+            disk_name: disk_item.name.clone(),
             vcpus,
             memory_mb,
             nested_virt: self.nested_virt,
@@ -236,16 +248,22 @@ impl CreateModal {
     }
 }
 
+/// Format bytes to human-readable size
+fn format_size(bytes: u64) -> String {
+    const GB: u64 = 1024 * 1024 * 1024;
+    const TB: u64 = GB * 1024;
+
+    if bytes >= TB {
+        format!("{:.1}T", bytes as f64 / TB as f64)
+    } else {
+        format!("{:.1}G", bytes as f64 / GB as f64)
+    }
+}
+
 pub fn draw(frame: &mut Frame, modal: &CreateModal) {
     let area = frame.area();
     let modal_width = 70.min(area.width.saturating_sub(4));
-
-    let field_count = if modal.boot_mode == CreateBootMode::Kernel {
-        11
-    } else {
-        8
-    };
-    let modal_height = ((field_count * 2) + 3).min(area.height.saturating_sub(4) as usize) as u16;
+    let modal_height = 18.min(area.height.saturating_sub(4));
 
     let modal_area = Rect {
         x: (area.width - modal_width) / 2,
@@ -276,164 +294,188 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
     let value_focused = Style::default().fg(Color::White);
     let value_normal = Style::default().fg(Color::Gray);
 
-    let constraints: Vec<Constraint> = if modal.boot_mode == CreateBootMode::Kernel {
-        vec![
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-        ]
-    } else {
-        vec![
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-        ]
-    };
-
     let field_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(1), // Padding
+            Constraint::Length(2), // Name
+            Constraint::Length(4), // Disk selector (expanded)
+            Constraint::Length(2), // VCPUs
+            Constraint::Length(2), // Memory
+            Constraint::Length(2), // Nested virt
+            Constraint::Length(2), // User-data
+            Constraint::Length(2), // Submit
+        ])
         .split(inner);
 
-    let render_field =
-        |frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool, hint: &str| {
-            let cursor = if focused { "\u{258c}" } else { "" };
-            let hint_span = if focused && !hint.is_empty() {
-                Span::styled(format!(" [{}]", hint), Style::default().fg(Color::Yellow))
-            } else {
-                Span::raw("")
-            };
-            let line = Line::from(vec![
-                Span::styled(
-                    format!(" {:<12}", label),
-                    if focused { label_focused } else { label_normal },
-                ),
-                Span::styled(
-                    format!("{}{}", value, cursor),
-                    if focused { value_focused } else { value_normal },
-                ),
-                hint_span,
-            ]);
-            frame.render_widget(Paragraph::new(line), area);
-        };
-
-    let mut row = 1;
-
-    render_field(
-        frame,
-        field_chunks[row],
-        "Name:",
-        &modal.name,
-        modal.focused_field == 0,
-        "",
-    );
-    row += 1;
-
-    let boot_str = match modal.boot_mode {
-        CreateBootMode::Disk => "(\u{25cf}) Disk  ( ) Kernel",
-        CreateBootMode::Kernel => "( ) Disk  (\u{25cf}) Kernel",
-    };
-    let boot_focused = modal.focused_field == 1;
-    let boot_line = Line::from(vec![
+    // Name field
+    let name_focused = modal.focused_field == 0;
+    let cursor = if name_focused { "\u{258c}" } else { "" };
+    let name_line = Line::from(vec![
         Span::styled(
-            " Boot:       ",
-            if boot_focused {
+            " Name:       ",
+            if name_focused {
                 label_focused
             } else {
                 label_normal
             },
         ),
         Span::styled(
-            boot_str,
-            if boot_focused {
+            format!("{}{}", modal.name, cursor),
+            if name_focused {
                 value_focused
             } else {
                 value_normal
             },
         ),
-        if boot_focused {
-            Span::styled(" [Space: toggle]", Style::default().fg(Color::Yellow))
+    ]);
+    frame.render_widget(Paragraph::new(name_line), field_chunks[1]);
+
+    // Disk selector
+    let disk_focused = modal.focused_field == 1;
+    let type_str = match modal.disk_source_type {
+        DiskSourceType::Template => "Template",
+        DiskSourceType::Volume => "Volume",
+    };
+
+    // Show selected disk with navigation hints
+    let disk_header = Line::from(vec![
+        Span::styled(
+            " Boot Disk:  ",
+            if disk_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("[{}]", type_str),
+            if disk_focused {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ),
+        if disk_focused {
+            Span::styled(
+                " [Space: switch type, ↑↓: select]",
+                Style::default().fg(Color::Yellow),
+            )
         } else {
             Span::raw("")
         },
     ]);
-    frame.render_widget(Paragraph::new(boot_line), field_chunks[row]);
-    row += 1;
+    frame.render_widget(Paragraph::new(disk_header), field_chunks[2]);
 
-    if modal.boot_mode == CreateBootMode::Kernel {
-        render_field(
-            frame,
-            field_chunks[row],
-            "Kernel:",
-            &modal.kernel,
-            modal.focused_field == 2,
-            "Enter: browse",
-        );
-        row += 1;
-        render_field(
-            frame,
-            field_chunks[row],
-            "Initramfs:",
-            &modal.initramfs,
-            modal.focused_field == 3,
-            "Enter: browse",
-        );
-        row += 1;
-        render_field(
-            frame,
-            field_chunks[row],
-            "Cmdline:",
-            &modal.cmdline,
-            modal.focused_field == 4,
-            "",
-        );
-        row += 1;
+    // Show disk list (3 items visible with current selection in middle)
+    let disk_list_area = Rect {
+        x: field_chunks[2].x + 13,
+        y: field_chunks[2].y + 1,
+        width: field_chunks[2].width.saturating_sub(14),
+        height: 3,
+    };
+
+    if modal.disk_items.is_empty() {
+        let no_disks = Line::from(vec![Span::styled(
+            "No templates or volumes available",
+            Style::default().fg(Color::Red),
+        )]);
+        frame.render_widget(Paragraph::new(no_disks), disk_list_area);
+    } else {
+        // Filter items by current source type
+        let filtered_items: Vec<(usize, &DiskItem)> = modal
+            .disk_items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.source_type == modal.disk_source_type)
+            .collect();
+
+        // Find position of selected item in filtered list
+        let selected_in_filtered = filtered_items
+            .iter()
+            .position(|(idx, _)| *idx == modal.selected_disk)
+            .unwrap_or(0);
+
+        // Show up to 3 items centered around selection
+        let start = selected_in_filtered.saturating_sub(1);
+        let visible: Vec<_> = filtered_items.iter().skip(start).take(3).collect();
+
+        let mut lines = Vec::new();
+        for (orig_idx, item) in visible.iter() {
+            let is_selected = *orig_idx == modal.selected_disk;
+            let prefix = if is_selected { "▶ " } else { "  " };
+            let style = if is_selected && disk_focused {
+                Style::default().fg(Color::White).bold()
+            } else if is_selected {
+                Style::default().fg(Color::Gray)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(format!("{:<20}", item.name), style),
+                Span::styled(format!(" {}", format_size(item.size_bytes)), style),
+            ]));
+        }
+
+        // Pad if less than 3 items
+        while lines.len() < 3 {
+            lines.push(Line::from(""));
+        }
+
+        frame.render_widget(Paragraph::new(lines), disk_list_area);
     }
 
-    render_field(
-        frame,
-        field_chunks[row],
-        "Disk:",
-        &modal.disk,
-        modal.focused_field == 5,
-        "Enter: browse",
-    );
-    row += 1;
-    render_field(
-        frame,
-        field_chunks[row],
-        "VCPUs:",
-        &modal.vcpus,
-        modal.focused_field == 6,
-        "",
-    );
-    row += 1;
-    render_field(
-        frame,
-        field_chunks[row],
-        "Memory:",
-        &modal.memory_mb,
-        modal.focused_field == 7,
-        "MB",
-    );
-    row += 1;
+    // VCPUs
+    let vcpus_focused = modal.focused_field == 2;
+    let vcpus_cursor = if vcpus_focused { "\u{258c}" } else { "" };
+    let vcpus_line = Line::from(vec![
+        Span::styled(
+            " VCPUs:      ",
+            if vcpus_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("{}{}", modal.vcpus, vcpus_cursor),
+            if vcpus_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(vcpus_line), field_chunks[3]);
 
-    let nested_focused = modal.focused_field == 8;
+    // Memory
+    let memory_focused = modal.focused_field == 3;
+    let memory_cursor = if memory_focused { "\u{258c}" } else { "" };
+    let memory_line = Line::from(vec![
+        Span::styled(
+            " Memory:     ",
+            if memory_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("{}{}", modal.memory_mb, memory_cursor),
+            if memory_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+        Span::styled(" MB", Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(memory_line), field_chunks[4]);
+
+    // Nested Virt
+    let nested_focused = modal.focused_field == 4;
     let nested_str = if modal.nested_virt {
         "[x] Enabled"
     } else {
@@ -462,10 +504,10 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
             Span::raw("")
         },
     ]);
-    frame.render_widget(Paragraph::new(nested_line), field_chunks[row]);
-    row += 1;
+    frame.render_widget(Paragraph::new(nested_line), field_chunks[5]);
 
-    let user_data_focused = modal.focused_field == 9;
+    // User-Data
+    let user_data_focused = modal.focused_field == 5;
     let (user_data_mode_str, user_data_value, user_data_hint) = match modal.user_data_mode {
         UserDataMode::None => ("None", "".to_string(), "[Space: cycle]"),
         UserDataMode::SshKeys => {
@@ -526,10 +568,10 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
             Span::raw("")
         },
     ]);
-    frame.render_widget(Paragraph::new(user_data_line), field_chunks[row]);
-    row += 1;
+    frame.render_widget(Paragraph::new(user_data_line), field_chunks[6]);
 
-    let submit_style = if modal.focused_field == 10 {
+    // Submit button
+    let submit_style = if modal.focused_field == 6 {
         Style::default().fg(Color::Black).bg(Color::Green).bold()
     } else {
         Style::default().fg(Color::Green)
@@ -538,6 +580,6 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
         "  \u{25b6} Create VM  ",
         submit_style,
     )]))
-    .alignment(ratatui::prelude::Alignment::Center);
-    frame.render_widget(submit, field_chunks[row]);
+    .alignment(Alignment::Center);
+    frame.render_widget(submit, field_chunks[7]);
 }

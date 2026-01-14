@@ -8,6 +8,7 @@ pub struct FilePicker {
     pub entries: Vec<PathBuf>,
     pub selected: usize,
     pub scroll_offset: usize,
+    #[allow(dead_code)]
     pub target_field: usize,
 }
 

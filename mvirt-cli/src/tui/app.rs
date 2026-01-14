@@ -7,53 +7,114 @@ use tokio::sync::mpsc;
 use crate::proto::{SystemInfo, Vm, VmState};
 use crate::tui::modals::ssh_keys::SshKeysModal;
 use crate::tui::modals::vm_create::CreateModal;
-use crate::tui::types::{Action, ActionResult, UserDataMode};
+use crate::tui::modals::volume_clone::VolumeCloneModal;
+use crate::tui::modals::volume_create::VolumeCreateModal;
+use crate::tui::modals::volume_import::VolumeImportModal;
+use crate::tui::modals::volume_resize::VolumeResizeModal;
+use crate::tui::modals::volume_snapshot::VolumeSnapshotModal;
+use crate::tui::modals::volume_template::VolumeTemplateModal;
+use crate::tui::types::{Action, ActionResult, StorageFocus, StorageState, UserDataMode, View};
 use crate::tui::widgets::console::ConsoleSession;
 use crate::tui::widgets::file_picker::FilePicker;
+use crate::zfs_proto::{Template, Volume};
 
 pub struct App {
+    // VM state
     pub vms: Vec<Vm>,
     pub system_info: Option<SystemInfo>,
     pub table_state: TableState,
+
+    // Common state
     pub should_quit: bool,
     pub status_message: Option<String>,
     pub action_tx: mpsc::UnboundedSender<Action>,
     pub result_rx: mpsc::UnboundedReceiver<ActionResult>,
     pub busy: bool,
+    pub last_refresh: Option<chrono::DateTime<chrono::Local>>,
+
+    // View navigation
+    pub active_view: View,
+    pub vm_available: bool,
+    pub zfs_available: bool,
+
+    // VM-specific state
     pub confirm_delete: Option<String>,
     pub confirm_kill: Option<String>,
-    pub last_refresh: Option<chrono::DateTime<chrono::Local>>,
     pub create_modal: Option<CreateModal>,
     pub file_picker: Option<FilePicker>,
     pub file_picker_for_user_data: bool,
     pub ssh_keys_modal: Option<SshKeysModal>,
     pub detail_view: Option<String>,
     pub console_session: Option<ConsoleSession>,
+
+    // Storage state
+    pub storage: StorageState,
+    pub volume_table_state: TableState,
+    pub template_table_state: TableState,
+    pub storage_focus: StorageFocus,
+    pub confirm_delete_volume: Option<String>,
+    pub confirm_delete_template: Option<String>,
+
+    // Storage modals
+    pub volume_create_modal: Option<VolumeCreateModal>,
+    pub volume_import_modal: Option<VolumeImportModal>,
+    pub volume_resize_modal: Option<VolumeResizeModal>,
+    pub volume_snapshot_modal: Option<VolumeSnapshotModal>,
+    pub volume_template_modal: Option<VolumeTemplateModal>,
+    pub volume_clone_modal: Option<VolumeCloneModal>,
 }
 
 impl App {
     pub fn new(
         action_tx: mpsc::UnboundedSender<Action>,
         result_rx: mpsc::UnboundedReceiver<ActionResult>,
+        vm_available: bool,
+        zfs_available: bool,
     ) -> Self {
         Self {
+            // VM state
             vms: Vec::new(),
             system_info: None,
             table_state: TableState::default(),
+
+            // Common state
             should_quit: false,
             status_message: None,
             action_tx,
             result_rx,
             busy: false,
+            last_refresh: None,
+
+            // View navigation
+            active_view: View::Vm,
+            vm_available,
+            zfs_available,
+
+            // VM-specific state
             confirm_delete: None,
             confirm_kill: None,
-            last_refresh: None,
             create_modal: None,
             file_picker: None,
             file_picker_for_user_data: false,
             ssh_keys_modal: None,
             detail_view: None,
             console_session: None,
+
+            // Storage state
+            storage: StorageState::default(),
+            volume_table_state: TableState::default(),
+            template_table_state: TableState::default(),
+            storage_focus: StorageFocus::Volumes,
+            confirm_delete_volume: None,
+            confirm_delete_template: None,
+
+            // Storage modals
+            volume_create_modal: None,
+            volume_import_modal: None,
+            volume_resize_modal: None,
+            volume_snapshot_modal: None,
+            volume_template_modal: None,
+            volume_clone_modal: None,
         }
     }
 
@@ -146,6 +207,109 @@ impl App {
                     self.status_message = Some("Console disconnected".to_string());
                 }
             }
+
+            // Storage results
+            ActionResult::StorageRefreshed(Ok(state)) => {
+                self.storage = state;
+                self.status_message = None;
+                self.last_refresh = Some(Local::now());
+                // Update table selections
+                if self.storage.volumes.is_empty() {
+                    self.volume_table_state.select(None);
+                } else if self.volume_table_state.selected().is_none() {
+                    self.volume_table_state.select(Some(0));
+                } else if let Some(selected) = self.volume_table_state.selected()
+                    && selected >= self.storage.volumes.len()
+                {
+                    self.volume_table_state
+                        .select(Some(self.storage.volumes.len().saturating_sub(1)));
+                }
+                if self.storage.templates.is_empty() {
+                    self.template_table_state.select(None);
+                } else if self.template_table_state.selected().is_none() {
+                    self.template_table_state.select(Some(0));
+                }
+            }
+            ActionResult::StorageRefreshed(Err(e)) => {
+                self.status_message = Some(format!("Storage error: {}", e));
+            }
+            ActionResult::VolumeCreated(Ok(())) => {
+                self.status_message = Some("Volume created".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::VolumeCreated(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::VolumeDeleted(Ok(())) => {
+                self.status_message = Some("Volume deleted".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::VolumeDeleted(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::VolumeResized(Ok(())) => {
+                self.status_message = Some("Volume resized".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::VolumeResized(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::ImportStarted(Ok(job_id)) => {
+                self.status_message = Some(format!("Import started: {}", &job_id[..8]));
+                self.refresh_storage();
+            }
+            ActionResult::ImportStarted(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::ImportCancelled(Ok(())) => {
+                self.status_message = Some("Import cancelled".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::ImportCancelled(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::SnapshotCreated(Ok(())) => {
+                self.status_message = Some("Snapshot created".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::SnapshotCreated(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::SnapshotDeleted(Ok(())) => {
+                self.status_message = Some("Snapshot deleted".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::SnapshotDeleted(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::SnapshotRolledBack(Ok(())) => {
+                self.status_message = Some("Snapshot rolled back".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::SnapshotRolledBack(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::TemplateCreated(Ok(())) => {
+                self.status_message = Some("Template created".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::TemplateCreated(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::TemplateDeleted(Ok(())) => {
+                self.status_message = Some("Template deleted".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::TemplateDeleted(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
+            ActionResult::VolumeCloned(Ok(())) => {
+                self.status_message = Some("Volume cloned".to_string());
+                self.refresh_storage();
+            }
+            ActionResult::VolumeCloned(Err(e)) => {
+                self.status_message = Some(format!("Error: {}", e));
+            }
         }
     }
 
@@ -225,7 +389,11 @@ impl App {
     }
 
     pub fn open_create_modal(&mut self) {
-        self.create_modal = Some(CreateModal::new());
+        // Pass storage data so user can select boot disk from templates/volumes
+        self.create_modal = Some(CreateModal::with_storage(
+            &self.storage.templates,
+            &self.storage.volumes,
+        ));
     }
 
     pub fn close_create_modal(&mut self) {
@@ -247,15 +415,6 @@ impl App {
         }
     }
 
-    pub fn open_file_picker(&mut self) {
-        if let Some(modal) = &self.create_modal
-            && modal.is_file_field()
-        {
-            let start_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-            self.file_picker = Some(FilePicker::new(start_path, modal.focused_field));
-        }
-    }
-
     pub fn close_file_picker(&mut self) {
         self.file_picker = None;
     }
@@ -265,15 +424,10 @@ impl App {
             && let Some(path) = picker.enter_selected()
         {
             let path_str = path.to_string_lossy().to_string();
-            if self.file_picker_for_user_data {
-                if let Some(modal) = &mut self.create_modal {
-                    modal.set_user_data_file(path_str);
-                }
-            } else {
-                let target_field = picker.target_field;
-                if let Some(modal) = &mut self.create_modal {
-                    modal.set_field(target_field, path_str);
-                }
+            if self.file_picker_for_user_data
+                && let Some(modal) = &mut self.create_modal
+            {
+                modal.set_user_data_file(path_str);
             }
             self.file_picker = None;
             self.file_picker_for_user_data = false;
@@ -385,5 +539,363 @@ impl App {
                 }
             }
         }
+    }
+
+    // === View Navigation ===
+
+    pub fn toggle_view(&mut self) {
+        if !self.zfs_available {
+            self.status_message =
+                Some("Storage not available (mvirt-zfs not connected)".to_string());
+            return;
+        }
+        self.active_view = match self.active_view {
+            View::Vm => View::Storage,
+            View::Storage => View::Vm,
+        };
+        if self.active_view == View::Storage {
+            self.refresh_storage();
+        }
+    }
+
+    pub fn set_view(&mut self, view: View) {
+        if view == View::Storage && !self.zfs_available {
+            self.status_message =
+                Some("Storage not available (mvirt-zfs not connected)".to_string());
+            return;
+        }
+        self.active_view = view;
+        if view == View::Storage {
+            self.refresh_storage();
+        }
+    }
+
+    // === Storage Methods ===
+
+    pub fn refresh_storage(&mut self) {
+        if self.zfs_available {
+            let _ = self.action_tx.send(Action::RefreshStorage);
+        }
+    }
+
+    pub fn toggle_storage_focus(&mut self) {
+        self.storage_focus = match self.storage_focus {
+            StorageFocus::Volumes => StorageFocus::Templates,
+            StorageFocus::Templates => StorageFocus::Volumes,
+        };
+    }
+
+    pub fn storage_next(&mut self) {
+        match self.storage_focus {
+            StorageFocus::Volumes => {
+                if self.storage.volumes.is_empty() {
+                    return;
+                }
+                let i = match self.volume_table_state.selected() {
+                    Some(i) => {
+                        if i >= self.storage.volumes.len() - 1 {
+                            0
+                        } else {
+                            i + 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.volume_table_state.select(Some(i));
+            }
+            StorageFocus::Templates => {
+                if self.storage.templates.is_empty() {
+                    return;
+                }
+                let i = match self.template_table_state.selected() {
+                    Some(i) => {
+                        if i >= self.storage.templates.len() - 1 {
+                            0
+                        } else {
+                            i + 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.template_table_state.select(Some(i));
+            }
+        }
+    }
+
+    pub fn storage_previous(&mut self) {
+        match self.storage_focus {
+            StorageFocus::Volumes => {
+                if self.storage.volumes.is_empty() {
+                    return;
+                }
+                let i = match self.volume_table_state.selected() {
+                    Some(i) => {
+                        if i == 0 {
+                            self.storage.volumes.len() - 1
+                        } else {
+                            i - 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.volume_table_state.select(Some(i));
+            }
+            StorageFocus::Templates => {
+                if self.storage.templates.is_empty() {
+                    return;
+                }
+                let i = match self.template_table_state.selected() {
+                    Some(i) => {
+                        if i == 0 {
+                            self.storage.templates.len() - 1
+                        } else {
+                            i - 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.template_table_state.select(Some(i));
+            }
+        }
+    }
+
+    pub fn selected_volume(&self) -> Option<&Volume> {
+        self.volume_table_state
+            .selected()
+            .and_then(|i| self.storage.volumes.get(i))
+    }
+
+    pub fn delete_selected_volume(&mut self) {
+        if let Some(vol) = self.selected_volume() {
+            self.confirm_delete_volume = Some(vol.name.clone());
+        }
+    }
+
+    pub fn confirm_delete_volume(&mut self) {
+        if let Some(name) = self.confirm_delete_volume.take() {
+            self.status_message = Some(format!("Deleting volume {}...", name));
+            self.send_action(Action::DeleteVolume(name));
+        }
+    }
+
+    pub fn cancel_delete_volume(&mut self) {
+        self.confirm_delete_volume = None;
+    }
+
+    pub fn delete_selected_template(&mut self) {
+        if let Some(tpl) = self
+            .template_table_state
+            .selected()
+            .and_then(|i| self.storage.templates.get(i))
+        {
+            self.confirm_delete_template = Some(tpl.name.clone());
+        }
+    }
+
+    pub fn confirm_delete_template(&mut self) {
+        if let Some(name) = self.confirm_delete_template.take() {
+            self.status_message = Some(format!("Deleting template {}...", name));
+            self.send_action(Action::DeleteTemplate(name));
+        }
+    }
+
+    pub fn cancel_delete_template(&mut self) {
+        self.confirm_delete_template = None;
+    }
+
+    pub fn selected_template(&self) -> Option<&Template> {
+        self.template_table_state
+            .selected()
+            .and_then(|i| self.storage.templates.get(i))
+    }
+
+    // === Storage Modal Methods ===
+
+    // Volume Create Modal
+    pub fn open_volume_create_modal(&mut self) {
+        self.volume_create_modal = Some(VolumeCreateModal::new());
+    }
+
+    pub fn close_volume_create_modal(&mut self) {
+        self.volume_create_modal = None;
+    }
+
+    pub fn submit_volume_create(&mut self) {
+        if let Some(modal) = &self.volume_create_modal {
+            match modal.validate() {
+                Ok((name, size_bytes)) => {
+                    self.status_message = Some(format!("Creating volume {}...", name));
+                    self.send_action(Action::CreateVolume { name, size_bytes });
+                    self.volume_create_modal = None;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    // Volume Import Modal
+    pub fn open_volume_import_modal(&mut self) {
+        self.volume_import_modal = Some(VolumeImportModal::new());
+    }
+
+    pub fn close_volume_import_modal(&mut self) {
+        self.volume_import_modal = None;
+    }
+
+    pub fn submit_volume_import(&mut self) {
+        if let Some(modal) = &self.volume_import_modal {
+            match modal.validate() {
+                Ok((name, source, size_bytes)) => {
+                    self.status_message = Some(format!("Importing volume {}...", name));
+                    self.send_action(Action::ImportVolume {
+                        name,
+                        source,
+                        size_bytes,
+                    });
+                    self.volume_import_modal = None;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    // Volume Resize Modal
+    pub fn open_volume_resize_modal(&mut self) {
+        if let Some(vol) = self.selected_volume() {
+            self.volume_resize_modal =
+                Some(VolumeResizeModal::new(vol.name.clone(), vol.volsize_bytes));
+        }
+    }
+
+    pub fn close_volume_resize_modal(&mut self) {
+        self.volume_resize_modal = None;
+    }
+
+    pub fn submit_volume_resize(&mut self) {
+        if let Some(modal) = &self.volume_resize_modal {
+            match modal.validate() {
+                Ok(new_size) => {
+                    let name = modal.volume_name.clone();
+                    self.status_message = Some(format!("Resizing volume {}...", name));
+                    self.send_action(Action::ResizeVolume { name, new_size });
+                    self.volume_resize_modal = None;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    // Volume Snapshot Modal
+    pub fn open_volume_snapshot_modal(&mut self) {
+        if let Some(vol) = self.selected_volume() {
+            self.volume_snapshot_modal = Some(VolumeSnapshotModal::new(vol.name.clone()));
+        }
+    }
+
+    pub fn close_volume_snapshot_modal(&mut self) {
+        self.volume_snapshot_modal = None;
+    }
+
+    pub fn submit_volume_snapshot(&mut self) {
+        if let Some(modal) = &self.volume_snapshot_modal {
+            match modal.validate() {
+                Ok(snapshot_name) => {
+                    let volume = modal.volume_name.clone();
+                    self.status_message =
+                        Some(format!("Creating snapshot {}@{}...", volume, snapshot_name));
+                    self.send_action(Action::CreateSnapshot {
+                        volume,
+                        name: snapshot_name,
+                    });
+                    self.volume_snapshot_modal = None;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    // Volume Template Modal
+    pub fn open_volume_template_modal(&mut self) {
+        if let Some(vol) = self.selected_volume() {
+            self.volume_template_modal = Some(VolumeTemplateModal::new(vol.name.clone()));
+        }
+    }
+
+    pub fn close_volume_template_modal(&mut self) {
+        self.volume_template_modal = None;
+    }
+
+    pub fn submit_volume_template(&mut self) {
+        if let Some(modal) = &self.volume_template_modal {
+            match modal.validate() {
+                Ok(template_name) => {
+                    let volume = modal.volume_name.clone();
+                    self.status_message = Some(format!(
+                        "Creating template {} from {}...",
+                        template_name, volume
+                    ));
+                    self.send_action(Action::CreateTemplate {
+                        volume,
+                        name: template_name,
+                    });
+                    self.volume_template_modal = None;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    // Volume Clone Modal
+    pub fn open_volume_clone_modal(&mut self) {
+        if let Some(tpl) = self.selected_template() {
+            self.volume_clone_modal = Some(VolumeCloneModal::new(tpl.name.clone(), tpl.size_bytes));
+        }
+    }
+
+    pub fn close_volume_clone_modal(&mut self) {
+        self.volume_clone_modal = None;
+    }
+
+    pub fn submit_volume_clone(&mut self) {
+        if let Some(modal) = &self.volume_clone_modal {
+            match modal.validate() {
+                Ok(new_volume) => {
+                    let template = modal.template_name.clone();
+                    self.status_message = Some(format!(
+                        "Cloning {} from template {}...",
+                        new_volume, template
+                    ));
+                    self.send_action(Action::CloneTemplate {
+                        template,
+                        new_volume,
+                    });
+                    self.volume_clone_modal = None;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    /// Check if any storage modal is currently open
+    #[allow(dead_code)]
+    pub fn has_storage_modal(&self) -> bool {
+        self.volume_create_modal.is_some()
+            || self.volume_import_modal.is_some()
+            || self.volume_resize_modal.is_some()
+            || self.volume_snapshot_modal.is_some()
+            || self.volume_template_modal.is_some()
+            || self.volume_clone_modal.is_some()
     }
 }

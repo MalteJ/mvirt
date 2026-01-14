@@ -14,6 +14,7 @@ pub fn draw(
     confirm_delete: Option<&str>,
     confirm_kill: Option<&str>,
     last_refresh: Option<chrono::DateTime<chrono::Local>>,
+    zfs_available: bool,
 ) {
     let get_vm_by_id = |id: &str| vms.iter().find(|vm| vm.id == id);
     let chunks = Layout::default()
@@ -26,8 +27,32 @@ pub fn draw(
         ])
         .split(frame.area());
 
-    // Title bar with system resource info
-    let title = if let Some(info) = system_info {
+    // Title bar with system resource info and tabs
+    let tabs = if zfs_available {
+        vec![
+            Span::styled("[", Style::default().fg(Color::DarkGray)),
+            Span::styled("VMs", Style::default().fg(Color::White).bold()),
+            Span::styled("]", Style::default().fg(Color::DarkGray)),
+            Span::styled(" Storage ", Style::default().fg(Color::DarkGray)),
+        ]
+    } else {
+        vec![
+            Span::styled("[", Style::default().fg(Color::DarkGray)),
+            Span::styled("VMs", Style::default().fg(Color::White).bold()),
+            Span::styled("]", Style::default().fg(Color::DarkGray)),
+        ]
+    };
+
+    // Title (left side): mvirt [VMs] Storage
+    let mut title_spans = vec![Span::styled(
+        " mvirt ",
+        Style::default().fg(Color::Cyan).bold(),
+    )];
+    title_spans.extend(tabs);
+    let title = Line::from(title_spans);
+
+    // Stats (right side): CPU and RAM info
+    let stats_text = if let Some(info) = system_info {
         let cpu_color = if info.allocated_cpus > info.total_cpus * 8 / 10 {
             Color::Red
         } else if info.allocated_cpus > info.total_cpus / 2 {
@@ -46,46 +71,36 @@ pub fn draw(
         let alloc_mem_gib = info.allocated_memory_mb as f64 / 1024.0;
 
         Line::from(vec![
-            Span::styled(" mvirt ", Style::default().fg(Color::Cyan).bold()),
-            Span::styled("|", Style::default().fg(Color::DarkGray)),
-            Span::styled(" CPU ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("Load {:.2} ", info.load_1),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("| CPU ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("{}", info.allocated_cpus),
                 Style::default().fg(cpu_color).bold(),
             ),
             Span::styled(
-                format!("/{}", info.total_cpus),
+                format!("/{} ", info.total_cpus),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled(" |", Style::default().fg(Color::DarkGray)),
-            Span::styled(" RAM ", Style::default().fg(Color::DarkGray)),
+            Span::styled("| RAM ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("{:.1}", alloc_mem_gib),
                 Style::default().fg(mem_color).bold(),
             ),
             Span::styled(
-                format!("/{:.1} GiB", total_mem_gib),
+                format!("/{:.1} GiB ", total_mem_gib),
                 Style::default().fg(Color::DarkGray),
             ),
         ])
     } else {
-        Line::from(vec![
-            Span::styled(" mvirt ", Style::default().fg(Color::Cyan).bold()),
-            Span::styled("|", Style::default().fg(Color::DarkGray)),
-            Span::styled(" loading...", Style::default().fg(Color::DarkGray)),
-        ])
-    };
-    let load_text = if let Some(info) = system_info {
         Line::from(vec![Span::styled(
-            format!(
-                "Load {:.2} {:.2} {:.2} ",
-                info.load_1, info.load_5, info.load_15
-            ),
+            "loading... ",
             Style::default().fg(Color::DarkGray),
         )])
-    } else {
-        Line::from("")
     };
+
     let title_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
@@ -93,11 +108,11 @@ pub fn draw(
     let title_inner = title_block.inner(chunks[0]);
     let title_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(22)])
+        .constraints([Constraint::Min(0), Constraint::Length(50)])
         .split(title_inner);
     frame.render_widget(Paragraph::new(title), title_chunks[0]);
     frame.render_widget(
-        Paragraph::new(load_text).alignment(ratatui::prelude::Alignment::Right),
+        Paragraph::new(stats_text).alignment(ratatui::prelude::Alignment::Right),
         title_chunks[1],
     );
 

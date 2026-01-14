@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 use crate::proto::vm_service_client::VmServiceClient;
+use crate::zfs_proto::zfs_service_client::ZfsServiceClient;
 
 mod app;
 pub mod modals;
@@ -20,22 +21,40 @@ pub mod widgets;
 mod worker;
 
 use app::App;
-use types::Action;
+use types::{Action, StorageFocus, View};
 
 fn draw(frame: &mut Frame, app: &mut App) {
-    // Draw base VM list view
-    views::vms::draw(
-        frame,
-        &app.vms,
-        &mut app.table_state,
-        app.system_info.as_ref(),
-        app.status_message.as_deref(),
-        app.confirm_delete.as_deref(),
-        app.confirm_kill.as_deref(),
-        app.last_refresh,
-    );
+    // Draw base view based on active view
+    match app.active_view {
+        View::Vm => {
+            views::vms::draw(
+                frame,
+                &app.vms,
+                &mut app.table_state,
+                app.system_info.as_ref(),
+                app.status_message.as_deref(),
+                app.confirm_delete.as_deref(),
+                app.confirm_kill.as_deref(),
+                app.last_refresh,
+                app.zfs_available,
+            );
+        }
+        View::Storage => {
+            views::storage::draw(
+                frame,
+                &app.storage,
+                &mut app.volume_table_state,
+                &mut app.template_table_state,
+                app.storage_focus,
+                app.status_message.as_deref(),
+                app.confirm_delete_volume.as_deref(),
+                app.confirm_delete_template.as_deref(),
+                app.last_refresh,
+            );
+        }
+    }
 
-    // Detail View overlay
+    // Detail View overlay (VM only)
     if let Some(ref vm_id) = app.detail_view
         && let Some(vm) = app.get_vm_by_id(vm_id)
     {
@@ -57,17 +76,44 @@ fn draw(frame: &mut Frame, app: &mut App) {
         modals::ssh_keys::draw(frame, modal);
     }
 
+    // Storage modals
+    if let Some(modal) = &app.volume_create_modal {
+        modals::volume_create::draw(frame, modal);
+    }
+    if let Some(modal) = &app.volume_import_modal {
+        modals::volume_import::draw(frame, modal);
+    }
+    if let Some(modal) = &app.volume_resize_modal {
+        modals::volume_resize::draw(frame, modal);
+    }
+    if let Some(modal) = &app.volume_snapshot_modal {
+        modals::volume_snapshot::draw(frame, modal);
+    }
+    if let Some(modal) = &app.volume_template_modal {
+        modals::volume_template::draw(frame, modal);
+    }
+    if let Some(modal) = &app.volume_clone_modal {
+        modals::volume_clone::draw(frame, modal);
+    }
+
     // Console takes over the whole screen
     if let Some(ref mut session) = app.console_session {
         widgets::console::draw(frame, session);
     }
 }
 
-pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
+pub async fn run(
+    vm_client: Option<VmServiceClient<Channel>>,
+    zfs_client: Option<ZfsServiceClient<Channel>>,
+) -> io::Result<()> {
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let (result_tx, result_rx) = mpsc::unbounded_channel();
 
-    tokio::spawn(worker::action_worker(client, action_rx, result_tx));
+    let vm_available = vm_client.is_some();
+    let zfs_available = zfs_client.is_some();
+    tokio::spawn(worker::action_worker(
+        vm_client, zfs_client, action_rx, result_tx,
+    ));
 
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
@@ -77,8 +123,13 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
     terminal.draw(views::splash::draw)?;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let mut app = App::new(action_tx, result_rx);
-    app.refresh();
+    let mut app = App::new(action_tx, result_rx, vm_available, zfs_available);
+    if !vm_available {
+        app.status_message = Some("Not connected to mvirt-vmm".to_string());
+    }
+    if vm_available {
+        app.refresh();
+    }
 
     let mut last_refresh = std::time::Instant::now();
 
@@ -91,7 +142,18 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
 
         // Auto-refresh every 2 seconds
         if last_refresh.elapsed() >= Duration::from_secs(2) && !app.busy {
-            app.send_action(Action::Refresh);
+            match app.active_view {
+                View::Vm => {
+                    if app.vm_available {
+                        app.send_action(Action::Refresh);
+                    }
+                }
+                View::Storage => {
+                    if app.zfs_available {
+                        app.send_action(Action::RefreshStorage);
+                    }
+                }
+            }
             last_refresh = std::time::Instant::now();
         }
 
@@ -125,6 +187,22 @@ pub async fn run(client: VmServiceClient<Channel>) -> io::Result<()> {
                 handle_confirm_kill_input(&mut app, key.code);
             } else if app.confirm_delete.is_some() {
                 handle_confirm_delete_input(&mut app, key.code);
+            } else if app.confirm_delete_volume.is_some() {
+                handle_storage_confirm_delete_volume(&mut app, key.code);
+            } else if app.confirm_delete_template.is_some() {
+                handle_storage_confirm_delete_template(&mut app, key.code);
+            } else if app.volume_create_modal.is_some() {
+                handle_volume_create_modal_input(&mut app, key.code);
+            } else if app.volume_import_modal.is_some() {
+                handle_volume_import_modal_input(&mut app, key.code);
+            } else if app.volume_resize_modal.is_some() {
+                handle_volume_resize_modal_input(&mut app, key.code);
+            } else if app.volume_snapshot_modal.is_some() {
+                handle_volume_snapshot_modal_input(&mut app, key.code);
+            } else if app.volume_template_modal.is_some() {
+                handle_volume_template_modal_input(&mut app, key.code);
+            } else if app.volume_clone_modal.is_some() {
+                handle_volume_clone_modal_input(&mut app, key.code);
             } else {
                 handle_normal_input(&mut app, key.code);
             }
@@ -217,22 +295,40 @@ fn handle_detail_view_input(app: &mut App, key_code: KeyCode) {
 fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
     match key_code {
         KeyCode::Esc => app.close_create_modal(),
-        KeyCode::Tab | KeyCode::Down => {
+        KeyCode::Tab => {
             if let Some(modal) = &mut app.create_modal {
                 modal.focus_next();
             }
         }
-        KeyCode::BackTab | KeyCode::Up => {
+        KeyCode::BackTab => {
             if let Some(modal) = &mut app.create_modal {
                 modal.focus_prev();
             }
         }
+        KeyCode::Down => {
+            if let Some(modal) = &mut app.create_modal {
+                if modal.is_disk_field() {
+                    // Navigate disk list
+                    modal.disk_select_next();
+                } else {
+                    modal.focus_next();
+                }
+            }
+        }
+        KeyCode::Up => {
+            if let Some(modal) = &mut app.create_modal {
+                if modal.is_disk_field() {
+                    // Navigate disk list
+                    modal.disk_select_prev();
+                } else {
+                    modal.focus_prev();
+                }
+            }
+        }
         KeyCode::Enter => {
             if let Some(modal) = &app.create_modal {
-                if modal.focused_field == 10 {
+                if modal.is_submit_field() {
                     app.submit_create();
-                } else if modal.is_file_field() {
-                    app.open_file_picker();
                 } else if modal.is_user_data_mode_field() {
                     app.handle_user_data_mode_action();
                 } else if let Some(modal) = &mut app.create_modal {
@@ -242,8 +338,8 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
         }
         KeyCode::Char(' ') => {
             if let Some(modal) = &mut app.create_modal {
-                if modal.is_boot_mode_field() {
-                    modal.toggle_boot_mode();
+                if modal.is_disk_field() {
+                    modal.toggle_disk_source_type();
                 } else if modal.is_nested_virt_field() {
                     modal.toggle_nested_virt();
                 } else if modal.is_user_data_mode_field() {
@@ -298,8 +394,36 @@ fn handle_confirm_delete_input(app: &mut App, key_code: KeyCode) {
 }
 
 fn handle_normal_input(app: &mut App, key_code: KeyCode) {
+    // Global keys (both views)
     match key_code {
-        KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('q') => {
+            app.should_quit = true;
+            return;
+        }
+        KeyCode::Tab => {
+            app.toggle_view();
+            return;
+        }
+        KeyCode::Char('1') => {
+            app.set_view(View::Vm);
+            return;
+        }
+        KeyCode::Char('2') => {
+            app.set_view(View::Storage);
+            return;
+        }
+        _ => {}
+    }
+
+    // View-specific keys
+    match app.active_view {
+        View::Vm => handle_vm_input(app, key_code),
+        View::Storage => handle_storage_input(app, key_code),
+    }
+}
+
+fn handle_vm_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
         KeyCode::Down => app.next(),
         KeyCode::Up => app.previous(),
         KeyCode::Enter => app.open_detail_view(),
@@ -309,6 +433,337 @@ fn handle_normal_input(app: &mut App, key_code: KeyCode) {
         KeyCode::Char('S') => app.stop_selected(),
         KeyCode::Char('k') => app.kill_selected(),
         KeyCode::Char('d') => app.delete_selected(),
+        _ => {}
+    }
+}
+
+fn handle_storage_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Down => app.storage_next(),
+        KeyCode::Up => app.storage_previous(),
+        KeyCode::BackTab => app.toggle_storage_focus(),
+        KeyCode::Char('d') => match app.storage_focus {
+            StorageFocus::Volumes => app.delete_selected_volume(),
+            StorageFocus::Templates => app.delete_selected_template(),
+        },
+        KeyCode::Char('n') => app.open_volume_create_modal(),
+        KeyCode::Char('i') => app.open_volume_import_modal(),
+        KeyCode::Char('r') => {
+            if app.storage_focus == StorageFocus::Volumes {
+                app.open_volume_resize_modal();
+            }
+        }
+        KeyCode::Char('s') => {
+            if app.storage_focus == StorageFocus::Volumes {
+                app.open_volume_snapshot_modal();
+            }
+        }
+        KeyCode::Char('t') => {
+            if app.storage_focus == StorageFocus::Volumes {
+                app.open_volume_template_modal();
+            }
+        }
+        KeyCode::Char('c') => {
+            if app.storage_focus == StorageFocus::Templates {
+                app.open_volume_clone_modal();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_storage_confirm_delete_volume(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_volume(),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_delete_volume(),
+        _ => {}
+    }
+}
+
+fn handle_storage_confirm_delete_template(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_template(),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_delete_template(),
+        _ => {}
+    }
+}
+
+fn handle_volume_create_modal_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc => app.close_volume_create_modal(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Some(modal) = &mut app.volume_create_modal {
+                modal.focus_next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Some(modal) = &mut app.volume_create_modal {
+                modal.focus_prev();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(modal) = &app.volume_create_modal {
+                if modal.is_submit_field() {
+                    app.submit_volume_create();
+                } else if let Some(modal) = &mut app.volume_create_modal {
+                    modal.focus_next();
+                }
+            }
+        }
+        KeyCode::Char(' ') => {
+            if let Some(modal) = &mut app.volume_create_modal
+                && modal.is_unit_field()
+            {
+                modal.toggle_unit();
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(modal) = &mut app.volume_create_modal
+                && let Some(input) = modal.current_input()
+            {
+                input.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(modal) = &mut app.volume_create_modal {
+                if modal.is_size_field()
+                    && c.is_ascii_digit()
+                    && let Some(input) = modal.current_input()
+                {
+                    input.push(c);
+                } else if modal.is_name_field()
+                    && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && let Some(input) = modal.current_input()
+                {
+                    input.push(c);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_volume_import_modal_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc => app.close_volume_import_modal(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Some(modal) = &mut app.volume_import_modal {
+                modal.focus_next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Some(modal) = &mut app.volume_import_modal {
+                modal.focus_prev();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(modal) = &app.volume_import_modal {
+                if modal.is_submit_field() {
+                    app.submit_volume_import();
+                } else if let Some(modal) = &mut app.volume_import_modal {
+                    modal.focus_next();
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(modal) = &mut app.volume_import_modal
+                && let Some(input) = modal.current_input()
+            {
+                input.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(modal) = &mut app.volume_import_modal {
+                if modal.is_size_field()
+                    && c.is_ascii_digit()
+                    && let Some(input) = modal.current_input()
+                {
+                    input.push(c);
+                } else if modal.is_name_field()
+                    && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && let Some(input) = modal.current_input()
+                {
+                    input.push(c);
+                } else if let Some(input) = modal.current_input() {
+                    input.push(c);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_volume_resize_modal_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc => app.close_volume_resize_modal(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Some(modal) = &mut app.volume_resize_modal {
+                modal.focus_next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Some(modal) = &mut app.volume_resize_modal {
+                modal.focus_prev();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(modal) = &app.volume_resize_modal {
+                if modal.is_submit_field() {
+                    app.submit_volume_resize();
+                } else if let Some(modal) = &mut app.volume_resize_modal {
+                    modal.focus_next();
+                }
+            }
+        }
+        KeyCode::Char(' ') => {
+            if let Some(modal) = &mut app.volume_resize_modal
+                && modal.is_unit_field()
+            {
+                modal.toggle_unit();
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(modal) = &mut app.volume_resize_modal
+                && let Some(input) = modal.current_input()
+            {
+                input.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(modal) = &mut app.volume_resize_modal
+                && modal.is_size_field()
+                && c.is_ascii_digit()
+                && let Some(input) = modal.current_input()
+            {
+                input.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_volume_snapshot_modal_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc => app.close_volume_snapshot_modal(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Some(modal) = &mut app.volume_snapshot_modal {
+                modal.focus_next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Some(modal) = &mut app.volume_snapshot_modal {
+                modal.focus_prev();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(modal) = &app.volume_snapshot_modal {
+                if modal.is_submit_field() {
+                    app.submit_volume_snapshot();
+                } else if let Some(modal) = &mut app.volume_snapshot_modal {
+                    modal.focus_next();
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(modal) = &mut app.volume_snapshot_modal
+                && let Some(input) = modal.current_input()
+            {
+                input.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(modal) = &mut app.volume_snapshot_modal
+                && modal.is_name_field()
+                && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                && let Some(input) = modal.current_input()
+            {
+                input.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_volume_template_modal_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc => app.close_volume_template_modal(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Some(modal) = &mut app.volume_template_modal {
+                modal.focus_next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Some(modal) = &mut app.volume_template_modal {
+                modal.focus_prev();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(modal) = &app.volume_template_modal {
+                if modal.is_submit_field() {
+                    app.submit_volume_template();
+                } else if let Some(modal) = &mut app.volume_template_modal {
+                    modal.focus_next();
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(modal) = &mut app.volume_template_modal
+                && let Some(input) = modal.current_input()
+            {
+                input.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(modal) = &mut app.volume_template_modal
+                && modal.is_name_field()
+                && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                && let Some(input) = modal.current_input()
+            {
+                input.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_volume_clone_modal_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Esc => app.close_volume_clone_modal(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Some(modal) = &mut app.volume_clone_modal {
+                modal.focus_next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Some(modal) = &mut app.volume_clone_modal {
+                modal.focus_prev();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(modal) = &app.volume_clone_modal {
+                if modal.is_submit_field() {
+                    app.submit_volume_clone();
+                } else if let Some(modal) = &mut app.volume_clone_modal {
+                    modal.focus_next();
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(modal) = &mut app.volume_clone_modal
+                && let Some(input) = modal.current_input()
+            {
+                input.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(modal) = &mut app.volume_clone_modal
+                && modal.is_name_field()
+                && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                && let Some(input) = modal.current_input()
+            {
+                input.push(c);
+            }
+        }
         _ => {}
     }
 }
