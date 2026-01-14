@@ -1,0 +1,173 @@
+syntax = "proto3";
+package mvirt.net;
+
+service NetService {
+  // Network operations
+  rpc CreateNetwork(CreateNetworkRequest) returns (Network);
+  rpc GetNetwork(GetNetworkRequest) returns (Network);
+  rpc ListNetworks(ListNetworksRequest) returns (ListNetworksResponse);
+  rpc UpdateNetwork(UpdateNetworkRequest) returns (Network);
+  rpc DeleteNetwork(DeleteNetworkRequest) returns (DeleteNetworkResponse);
+
+  // NIC operations
+  rpc CreateNic(CreateNicRequest) returns (Nic);
+  rpc GetNic(GetNicRequest) returns (Nic);
+  rpc ListNics(ListNicsRequest) returns (ListNicsResponse);
+  rpc UpdateNic(UpdateNicRequest) returns (Nic);
+  rpc DeleteNic(DeleteNicRequest) returns (DeleteNicResponse);
+}
+
+// === Core Messages ===
+
+message Network {
+  string id = 1;                     // UUID
+  string name = 2;                   // Unique name
+
+  // IPv4 configuration
+  bool ipv4_enabled = 3;
+  string ipv4_subnet = 4;            // CIDR notation, e.g., "10.0.0.0/24"
+
+  // IPv6 configuration
+  bool ipv6_enabled = 5;
+  string ipv6_prefix = 6;            // CIDR notation, e.g., "fd00::/64"
+
+  // Services announced via DHCP
+  repeated string dns_servers = 7;
+  repeated string ntp_servers = 8;
+
+  // Statistics
+  uint32 nic_count = 9;              // Number of NICs in this network
+
+  string created_at = 10;            // ISO 8601
+  string updated_at = 11;
+}
+
+message Nic {
+  string id = 1;                     // UUID
+  string name = 2;                   // Optional friendly name
+  string network_id = 3;             // FK -> Network
+
+  string mac_address = 4;            // e.g., "52:54:00:12:34:56"
+
+  // Assigned addresses (via DHCP to VM)
+  string ipv4_address = 5;           // /32, e.g., "10.0.0.5"
+  string ipv6_address = 6;           // /128, e.g., "fd00::5"
+
+  // Routed prefixes (traffic to these goes to this NIC)
+  repeated string routed_ipv4_prefixes = 7;  // CIDR notation
+  repeated string routed_ipv6_prefixes = 8;
+
+  // vhost-user socket
+  string socket_path = 9;            // e.g., "/run/mvirt-net/nic-xxx.sock"
+
+  NicState state = 10;
+
+  string created_at = 11;
+  string updated_at = 12;
+}
+
+enum NicState {
+  NIC_STATE_UNSPECIFIED = 0;
+  NIC_STATE_CREATED = 1;             // Socket ready, VM not connected
+  NIC_STATE_ACTIVE = 2;              // VM connected
+  NIC_STATE_ERROR = 3;               // Error state
+}
+
+// === Network Request/Response Messages ===
+
+message CreateNetworkRequest {
+  string name = 1;                   // Required: unique name
+
+  // IPv4 (at least one of ipv4 or ipv6 must be enabled)
+  bool ipv4_enabled = 2;
+  string ipv4_subnet = 3;            // Required if ipv4_enabled
+
+  // IPv6
+  bool ipv6_enabled = 4;
+  string ipv6_prefix = 5;            // Required if ipv6_enabled
+
+  // Services
+  repeated string dns_servers = 6;
+  repeated string ntp_servers = 7;
+}
+
+message GetNetworkRequest {
+  oneof identifier {
+    string id = 1;
+    string name = 2;
+  }
+}
+
+message ListNetworksRequest {}
+
+message ListNetworksResponse {
+  repeated Network networks = 1;
+}
+
+message UpdateNetworkRequest {
+  string id = 1;                     // Required
+
+  // Only these fields can be updated
+  repeated string dns_servers = 2;
+  repeated string ntp_servers = 3;
+}
+
+message DeleteNetworkRequest {
+  string id = 1;
+  bool force = 2;                    // Delete even if NICs exist
+}
+
+message DeleteNetworkResponse {
+  bool deleted = 1;
+  uint32 nics_deleted = 2;           // Number of NICs also deleted (if force=true)
+}
+
+// === NIC Request/Response Messages ===
+
+message CreateNicRequest {
+  string network_id = 1;             // Required: network UUID or name
+  string name = 2;                   // Optional: friendly name
+
+  // Optional: specify MAC (auto-generated if empty)
+  string mac_address = 3;
+
+  // Optional: request specific addresses (auto-allocated if empty)
+  string ipv4_address = 4;
+  string ipv6_address = 5;
+
+  // Optional: routed prefixes
+  repeated string routed_ipv4_prefixes = 6;
+  repeated string routed_ipv6_prefixes = 7;
+}
+
+message GetNicRequest {
+  oneof identifier {
+    string id = 1;
+    string name = 2;
+  }
+}
+
+message ListNicsRequest {
+  string network_id = 1;             // Optional: filter by network
+}
+
+message ListNicsResponse {
+  repeated Nic nics = 1;
+}
+
+message UpdateNicRequest {
+  string id = 1;                     // Required
+
+  // Routed prefixes can be added/removed
+  // These replace the existing prefixes (not additive)
+  repeated string routed_ipv4_prefixes = 2;
+  repeated string routed_ipv6_prefixes = 3;
+}
+
+message DeleteNicRequest {
+  string id = 1;
+}
+
+message DeleteNicResponse {
+  bool deleted = 1;
+}
