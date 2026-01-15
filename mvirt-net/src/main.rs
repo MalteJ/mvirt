@@ -54,6 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create gRPC service
     let service = NetServiceImpl::new(args.socket_dir.clone(), store, audit);
 
+    // Recover workers for existing NICs
+    service.recover_nics().await;
+
     let addr = args.listen.parse()?;
     info!(
         addr = %addr,

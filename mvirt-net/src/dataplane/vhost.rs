@@ -27,8 +27,10 @@ const TX_QUEUE: u16 = 1;
 
 /// Virtio net features we support
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
+const VIRTIO_NET_F_STATUS: u64 = 1 << 16;
 const VIRTIO_RING_F_EVENT_IDX: u64 = 1 << 29;
 const VIRTIO_F_RING_INDIRECT_DESC: u64 = 1 << 28;
+const VHOST_USER_F_PROTOCOL_FEATURES: u64 = 1 << 30;
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
 /// Virtio net header
@@ -75,6 +77,7 @@ pub struct VhostNetBackend {
 impl VhostNetBackend {
     /// Create a new vhost-user net backend
     pub fn new(nic_config: NicEntry, shutdown: Arc<AtomicBool>) -> io::Result<Self> {
+        eprintln!("[VHOST] VhostNetBackend::new() called for NIC {}", nic_config.id);
         Ok(Self {
             nic_config,
             mem: RwLock::new(GuestMemoryAtomic::new(GuestMemoryMmap::new())),
@@ -243,21 +246,34 @@ impl VhostUserBackend for VhostNetBackend {
     }
 
     fn features(&self) -> u64 {
-        VIRTIO_F_VERSION_1
+        // VHOST_USER_F_PROTOCOL_FEATURES is required by cloud-hypervisor
+        // When set, vrings must be enabled via SET_VRING_ENABLE messages
+        let f = VIRTIO_F_VERSION_1
             | VIRTIO_NET_F_MAC
+            | VIRTIO_NET_F_STATUS
             | VIRTIO_RING_F_EVENT_IDX
             | VIRTIO_F_RING_INDIRECT_DESC
+            | VHOST_USER_F_PROTOCOL_FEATURES;
+        eprintln!("[VHOST] features() called, returning {:#x}", f);
+        tracing::debug!(features = f, "features() called");
+        f
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
-        VhostUserProtocolFeatures::CONFIG | VhostUserProtocolFeatures::MQ
+        let pf = VhostUserProtocolFeatures::CONFIG | VhostUserProtocolFeatures::MQ;
+        eprintln!("[VHOST] protocol_features() called, returning {:?}", pf);
+        tracing::debug!(?pf, "protocol_features() called");
+        pf
     }
 
     fn set_event_idx(&self, enabled: bool) {
+        eprintln!("[VHOST] set_event_idx({})", enabled);
         *self.event_idx.write().unwrap() = enabled;
     }
 
     fn update_memory(&self, mem: GuestMemoryAtomic<GuestMemoryMmap>) -> io::Result<()> {
+        eprintln!("[VHOST] update_memory() called");
+        tracing::debug!("update_memory called");
         *self.mem.write().unwrap() = mem;
         Ok(())
     }
@@ -269,6 +285,8 @@ impl VhostUserBackend for VhostNetBackend {
         vrings: &[Self::Vring],
         _thread_id: usize,
     ) -> io::Result<()> {
+        eprintln!("[VHOST] handle_event called: device_event={}, evset={:?}", device_event, evset);
+        tracing::debug!(device_event, ?evset, "handle_event called");
         if evset != EventSet::IN {
             return Ok(());
         }
@@ -306,6 +324,10 @@ impl VhostUserBackend for VhostNetBackend {
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
         // Virtio net config: 6 bytes MAC + 2 bytes status
         let mac = self.mac_bytes();
+        eprintln!(
+            "[VHOST] get_config(offset={}, size={}) mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            offset, size, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
         let mut config = [0u8; 8];
         config[..6].copy_from_slice(&mac);
         config[6..8].copy_from_slice(&[1, 0]); // VIRTIO_NET_S_LINK_UP

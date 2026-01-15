@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::audit::NetAuditLogger;
 use crate::config::{NetworkEntry, NicEntry, NicEntryBuilder, NicState};
+use crate::dataplane::WorkerManager;
 use crate::proto::net_service_server::NetService;
 use crate::proto::*;
 use crate::store::Store;
@@ -13,6 +14,7 @@ pub struct NetServiceImpl {
     socket_dir: String,
     store: Arc<Store>,
     audit: Arc<NetAuditLogger>,
+    workers: Mutex<WorkerManager>,
 }
 
 impl NetServiceImpl {
@@ -21,6 +23,42 @@ impl NetServiceImpl {
             socket_dir,
             store,
             audit,
+            workers: Mutex::new(WorkerManager::new()),
+        }
+    }
+
+    /// Recover workers for existing NICs after service restart
+    pub async fn recover_nics(&self) {
+        info!("Recovering workers for existing NICs");
+
+        let nics = match self.store.list_nics(None).await {
+            Ok(nics) => nics,
+            Err(e) => {
+                warn!(error = %e, "Failed to list NICs for recovery");
+                return;
+            }
+        };
+
+        for nic in nics {
+            // Get the network for this NIC
+            let network = match self.store.get_network(&nic.network_id).await {
+                Ok(Some(n)) => n,
+                Ok(None) => {
+                    warn!(nic_id = %nic.id, "Network not found for NIC, skipping");
+                    continue;
+                }
+                Err(e) => {
+                    warn!(nic_id = %nic.id, error = %e, "Failed to get network, skipping");
+                    continue;
+                }
+            };
+
+            // Start worker for this NIC
+            if let Err(e) = self.workers.lock().unwrap().start(nic.clone(), network) {
+                warn!(nic_id = %nic.id, error = %e, "Failed to recover worker for NIC");
+            } else {
+                info!(nic_id = %nic.id, socket = %nic.socket_path, "Recovered worker for NIC");
+            }
         }
     }
 
@@ -497,7 +535,18 @@ impl NetService for NetServiceImpl {
             )
             .await;
 
-        // TODO: Spawn vhost-user worker thread
+        // Spawn vhost-user worker thread
+        if let Err(e) = self
+            .workers
+            .lock()
+            .unwrap()
+            .start(entry.clone(), network.clone())
+        {
+            warn!(nic_id = %entry.id, error = %e, "Failed to start vhost-user worker");
+            return Err(Status::internal(format!(
+                "Failed to start vhost-user worker: {e}"
+            )));
+        }
 
         Ok(Response::new(nic_to_proto(&entry)))
     }
@@ -627,7 +676,11 @@ impl NetService for NetServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("NIC not found"))?;
 
-        // TODO: Stop vhost-user worker thread
+        // Stop vhost-user worker thread
+        if let Err(e) = self.workers.lock().unwrap().stop(&nic.id) {
+            // Not fatal - worker might not be running (e.g., after restart)
+            warn!(nic_id = %nic.id, error = %e, "Failed to stop worker (may not be running)");
+        }
 
         // Deallocate addresses
         self.store

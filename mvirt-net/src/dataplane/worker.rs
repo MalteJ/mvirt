@@ -5,7 +5,7 @@
 //! - Packet processing (ARP, NDP, DHCP, routing)
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::unix::net::UnixListener;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,10 +13,13 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{Receiver, Sender};
 use ipnet::{Ipv4Net, Ipv6Net};
+use nix::libc;
 use smoltcp::wire::Ipv6Address;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
+use vhost::vhost_user::Listener;
 use vhost_user_backend::VhostUserDaemon;
 use vm_memory::GuestMemoryAtomic;
+use vmm_sys_util::eventfd::EventFd;
 
 use crate::config::{NetworkEntry, NicEntry};
 
@@ -53,8 +56,10 @@ pub struct WorkerConfig {
 pub struct WorkerHandle {
     /// Worker thread join handle
     thread: Option<JoinHandle<()>>,
-    /// Shutdown signal
+    /// Shutdown signal (atomic bool)
     shutdown: Arc<AtomicBool>,
+    /// Exit event for waking up blocked worker
+    exit_event: EventFd,
     /// NIC ID
     pub nic_id: String,
     /// Socket path
@@ -65,6 +70,10 @@ impl WorkerHandle {
     /// Signal the worker to stop
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        // Wake up worker if it's blocked
+        if let Err(e) = self.exit_event.write(1) {
+            warn!(nic_id = %self.nic_id, error = %e, "Failed to signal exit event");
+        }
     }
 
     /// Wait for the worker to finish
@@ -101,18 +110,36 @@ pub fn spawn_worker(config: WorkerConfig) -> Result<WorkerHandle, String> {
     let socket_path = PathBuf::from(&config.nic.socket_path);
     let socket_path_clone = socket_path.clone();
 
+    // Create exit event for clean shutdown
+    let exit_event = EventFd::new(libc::EFD_NONBLOCK)
+        .map_err(|e| format!("Failed to create exit event: {e}"))?;
+    let exit_event_clone = exit_event
+        .try_clone()
+        .map_err(|e| format!("Failed to clone exit event: {e}"))?;
+
+    // Channel to signal when socket is ready
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(0);
+
     let thread = thread::Builder::new()
         .name(format!("nic-{}", &nic_id[..8]))
         .spawn(move || {
-            if let Err(e) = run_worker(config, shutdown_clone) {
+            if let Err(e) = run_worker(config, shutdown_clone, exit_event_clone, ready_tx) {
                 error!(nic_id = %nic_id_for_thread, error = %e, "Worker failed");
             }
         })
         .map_err(|e| format!("Failed to spawn worker thread: {e}"))?;
 
+    // Wait for socket to be ready (with timeout)
+    match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err("Timeout waiting for socket to be ready".to_string()),
+    }
+
     Ok(WorkerHandle {
         thread: Some(thread),
         shutdown,
+        exit_event,
         nic_id,
         socket_path: socket_path_clone,
     })
@@ -259,7 +286,12 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
 }
 
 /// Main worker loop
-fn run_worker(config: WorkerConfig, shutdown: Arc<AtomicBool>) -> Result<(), String> {
+fn run_worker(
+    config: WorkerConfig,
+    shutdown: Arc<AtomicBool>,
+    exit_event: EventFd,
+    ready_tx: std::sync::mpsc::SyncSender<Result<(), String>>,
+) -> Result<(), String> {
     let nic_id = &config.nic.id;
     let socket_path = &config.nic.socket_path;
 
@@ -276,23 +308,15 @@ fn run_worker(config: WorkerConfig, shutdown: Arc<AtomicBool>) -> Result<(), Str
     let (worker_tx, _) = crossbeam_channel::unbounded();
     config.router.register_nic(nic_id.clone(), worker_tx);
 
-    // Remove existing socket if present
-    let _ = std::fs::remove_file(socket_path);
-
-    // Create vhost-user backend
-    let backend = Arc::new(
-        VhostNetBackend::new(config.nic.clone(), shutdown.clone())
-            .map_err(|e| format!("Failed to create backend: {e}"))?,
-    );
-
-    // Set up packet processor
-    let processor = PacketProcessor::new(&config.nic, &config.network, config.router.clone());
-
-    backend.set_packet_handler(Box::new(move |packet| processor.process(packet)));
-
-    // Create Unix listener
-    let listener = UnixListener::bind(socket_path)
-        .map_err(|e| format!("Failed to bind socket {socket_path}: {e}"))?;
+    // Create listener BEFORE signaling ready - this binds the socket
+    let listener = match Listener::new(socket_path, true) {
+        Ok(l) => l,
+        Err(e) => {
+            let err = format!("Failed to create listener: {e}");
+            let _ = ready_tx.send(Err(err.clone()));
+            return Err(err);
+        }
+    };
 
     info!(
         nic_id = %nic_id,
@@ -300,74 +324,142 @@ fn run_worker(config: WorkerConfig, shutdown: Arc<AtomicBool>) -> Result<(), Str
         "Listening for vhost-user connections"
     );
 
-    // Set socket to non-blocking for shutdown handling
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("Failed to set non-blocking: {e}"))?;
+    // Signal that we're ready - socket is now bound
+    let _ = ready_tx.send(Ok(()));
+    drop(ready_tx); // Don't need anymore
 
-    // Wait for connection
-    let mut daemon = None;
-    while !shutdown.load(Ordering::Relaxed) {
-        match listener.accept() {
-            Ok((socket, _addr)) => {
-                info!(nic_id = %nic_id, "VM connected");
+    // Main loop - keeps worker alive to accept new VM connections after disconnect
+    let mut listener = Some(listener);
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            info!(nic_id = %nic_id, "Shutdown requested");
+            config.router.unregister_nic(nic_id);
+            return Ok(());
+        }
 
-                // Create vhost-user daemon
-                let d = VhostUserDaemon::new(
-                    format!("mvirt-net-{}", &nic_id[..8]),
-                    backend.clone(),
-                    GuestMemoryAtomic::new(vm_memory::GuestMemoryMmap::new()),
-                )
-                .map_err(|e| format!("Failed to create daemon: {e}"))?;
-
-                daemon = Some((d, socket));
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No connection yet, check for routed packets
-                while let Ok(routed) = config.router_rx.try_recv() {
-                    debug!(
-                        nic_id = %nic_id,
-                        from_len = routed.data.len(),
-                        "Received routed packet"
-                    );
-                    backend.inject_packet(routed.data);
+        // Create a new listener if we don't have one (e.g., after VM disconnect)
+        let current_listener = if let Some(l) = listener.take() {
+            l
+        } else {
+            info!(nic_id = %nic_id, "Creating new listener after disconnect");
+            match Listener::new(socket_path, true) {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(nic_id = %nic_id, error = %e, "Failed to create new listener");
+                    // Wait a bit before retrying
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
             }
+        };
+
+        // Wait for VM connection with exit event polling
+        let connected = loop {
+            if shutdown.load(Ordering::SeqCst) {
+                info!(nic_id = %nic_id, "Shutdown requested before VM connected");
+                config.router.unregister_nic(nic_id);
+                return Ok(());
+            }
+
+            // Poll the listener socket for incoming connections
+            let listener_fd = current_listener.as_raw_fd();
+            let exit_fd = exit_event.as_raw_fd();
+
+            let mut pollfds = [
+                libc::pollfd {
+                    fd: listener_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: exit_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+
+            let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), 2, 1000) };
+            debug!(
+                nic_id = %nic_id,
+                poll_ret = ret,
+                listener_fd = listener_fd,
+                exit_fd = exit_fd,
+                listener_revents = pollfds[0].revents,
+                exit_revents = pollfds[1].revents,
+                "Poll returned"
+            );
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                error!(nic_id = %nic_id, error = %err, "Poll failed");
+                break false;
+            }
+
+            // Check for exit event
+            if pollfds[1].revents & libc::POLLIN != 0 {
+                info!(nic_id = %nic_id, "Exit event received");
+                config.router.unregister_nic(nic_id);
+                return Ok(());
+            }
+
+            // Check for incoming connection
+            if pollfds[0].revents & libc::POLLIN != 0 {
+                info!(nic_id = %nic_id, "VM connecting");
+                break true;
+            }
+        };
+
+        if !connected {
+            // Poll error, retry with new listener
+            continue;
+        }
+
+        // Create new daemon and backend for each connection
+        let backend = match VhostNetBackend::new(config.nic.clone(), shutdown.clone()) {
+            Ok(b) => Arc::new(b),
             Err(e) => {
-                return Err(format!("Accept failed: {e}"));
+                error!(nic_id = %nic_id, error = %e, "Failed to create backend");
+                continue;
             }
-        }
-    }
+        };
 
-    // If we got a connection, run the daemon
-    if let Some((_d, _socket)) = daemon {
-        info!(nic_id = %nic_id, "Running vhost-user daemon");
+        // Set up packet processor for this connection
+        let processor = PacketProcessor::new(&config.nic, &config.network, config.router.clone());
+        backend.set_packet_handler(Box::new(move |packet| processor.process(packet)));
 
-        // Start daemon (this blocks until connection closes or error)
-        // Note: The actual vhost-user-backend crate runs its own epoll loop
-        // For now we use a simple approach
-        while !shutdown.load(Ordering::Relaxed) {
-            // Process routed packets
-            while let Ok(routed) = config.router_rx.try_recv() {
-                debug!(
-                    nic_id = %nic_id,
-                    from_len = routed.data.len(),
-                    "Received routed packet"
-                );
-                backend.inject_packet(routed.data);
+        // Create vhost-user daemon
+        let mut daemon = match VhostUserDaemon::new(
+            format!("mvirt-net-{}", &nic_id[..8]),
+            backend.clone(),
+            GuestMemoryAtomic::new(vm_memory::GuestMemoryMmap::new()),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                error!(nic_id = %nic_id, error = %e, "Failed to create daemon");
+                continue;
             }
+        };
 
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        // Start the daemon (accepts connection and spawns handler thread)
+        info!(nic_id = %nic_id, "Starting vhost-user daemon");
+        if let Err(e) = daemon.start(current_listener) {
+            error!(nic_id = %nic_id, error = %e, "Failed to start daemon");
+            continue;
         }
+
+        info!(nic_id = %nic_id, "VM connected, running vhost-user daemon");
+
+        // Wait for daemon to finish (VM disconnect)
+        if let Err(e) = daemon.wait() {
+            // Disconnects are expected, only log real errors
+            error!(nic_id = %nic_id, error = %e, "Daemon error");
+        }
+
+        info!(nic_id = %nic_id, "VM disconnected, waiting for new connection");
+        // listener is None now, will be recreated at top of loop
     }
-
-    // Unregister from router
-    config.router.unregister_nic(nic_id);
-
-    info!(nic_id = %nic_id, "Worker shutting down");
-    Ok(())
 }
 
 /// Register routes for a NIC in the router
