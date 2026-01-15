@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 mod grpc;
 mod hypervisor;
 mod store;
+mod system_info;
 
 pub mod proto {
     tonic::include_proto!("mvirt");

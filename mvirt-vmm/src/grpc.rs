@@ -35,15 +35,24 @@ impl VmServiceImpl {
 impl VmService for VmServiceImpl {
     // System
 
+    async fn get_version(
+        &self,
+        _request: Request<GetVersionRequest>,
+    ) -> Result<Response<VersionInfo>, Status> {
+        Ok(Response::new(VersionInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }))
+    }
+
     async fn get_system_info(
         &self,
         _request: Request<GetSystemInfoRequest>,
     ) -> Result<Response<SystemInfo>, Status> {
+        use crate::system_info;
         use sysinfo::System;
 
-        let mut sys = System::new();
-        sys.refresh_cpu_all();
-        sys.refresh_memory();
+        let mut sys = system_info::create_system();
+        system_info::refresh_system(&mut sys);
 
         let total_cpus = sys.cpus().len() as u32;
         let total_memory_mb = sys.total_memory() / 1024 / 1024;
@@ -64,6 +73,14 @@ impl VmService for VmServiceImpl {
 
         let load_avg = System::load_average();
 
+        // Collect detailed system information
+        let host = system_info::collect_host_info();
+        let cpu = system_info::collect_cpu_info(&sys);
+        let memory = system_info::collect_memory_info(&sys);
+        let numa_nodes = system_info::collect_numa_nodes();
+        let disks = system_info::collect_disk_info();
+        let nics = system_info::collect_nic_info();
+
         Ok(Response::new(SystemInfo {
             total_cpus,
             total_memory_mb,
@@ -72,6 +89,12 @@ impl VmService for VmServiceImpl {
             load_1: load_avg.one as f32,
             load_5: load_avg.five as f32,
             load_15: load_avg.fifteen as f32,
+            host: Some(host),
+            cpu: Some(cpu),
+            memory: Some(memory),
+            numa_nodes,
+            disks,
+            nics,
         }))
     }
 

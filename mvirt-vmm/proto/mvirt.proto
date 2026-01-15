@@ -63,6 +63,7 @@ message NicConfig {
 
 service VmService {
   // System
+  rpc GetVersion(GetVersionRequest) returns (VersionInfo);
   rpc GetSystemInfo(GetSystemInfoRequest) returns (SystemInfo);
 
   // CRUD
@@ -95,9 +96,16 @@ service VmService {
 
 // System
 
+message GetVersionRequest {}
+
+message VersionInfo {
+  string version = 1;
+}
+
 message GetSystemInfoRequest {}
 
 message SystemInfo {
+  // Basic info (existing)
   uint32 total_cpus = 1;
   uint64 total_memory_mb = 2;
   uint32 allocated_cpus = 3;
@@ -105,6 +113,79 @@ message SystemInfo {
   float load_1 = 5;
   float load_5 = 6;
   float load_15 = 7;
+
+  // Detailed system info (new)
+  HostInfo host = 10;
+  CpuInfo cpu = 11;
+  MemoryInfo memory = 12;
+  repeated NumaNode numa_nodes = 13;
+  repeated DiskInfo disks = 14;
+  repeated NicInfo nics = 15;
+}
+
+message HostInfo {
+  string hostname = 1;
+  string kernel_version = 2;
+  uint64 uptime_seconds = 3;
+}
+
+message CpuInfo {
+  string model = 1;
+  string vendor = 2;
+  uint32 physical_cores = 3;
+  uint32 logical_cores = 4;
+  uint32 sockets = 5;
+  repeated CpuCore cores = 6;
+  repeated string flags = 7;  // vmx, svm, aes, etc.
+}
+
+message CpuCore {
+  uint32 id = 1;
+  uint64 frequency_mhz = 2;
+  float usage_percent = 3;
+  uint32 numa_node = 4;
+}
+
+message MemoryInfo {
+  uint64 total_bytes = 1;
+  uint64 available_bytes = 2;
+  uint64 cached_bytes = 3;
+  uint64 swap_total_bytes = 4;
+  uint64 swap_used_bytes = 5;
+  uint64 hugepages_total = 6;
+  uint64 hugepages_free = 7;
+  uint64 hugepage_size_kb = 8;
+}
+
+message NumaNode {
+  uint32 id = 1;
+  uint64 total_memory_bytes = 2;
+  uint64 free_memory_bytes = 3;
+  repeated uint32 cpu_ids = 4;
+}
+
+message DiskInfo {
+  string device = 1;
+  string model = 2;
+  string serial = 3;
+  uint64 size_bytes = 4;
+  bool smart_available = 5;
+  bool smart_healthy = 6;
+  optional int32 temperature_celsius = 7;
+  optional uint64 power_on_hours = 8;
+}
+
+message NicInfo {
+  string name = 1;
+  string mac = 2;
+  bool is_up = 3;
+  optional uint32 speed_mbps = 4;
+  string duplex = 5;
+  repeated string ipv4 = 6;
+  repeated string ipv6 = 7;
+  string driver = 8;
+  uint64 rx_bytes = 9;
+  uint64 tx_bytes = 10;
 }
 
 // CRUD
