@@ -38,14 +38,14 @@ This loose coupling means:
 
 ## Requirements
 
-- ZFS pool (default: `vmpool`)
+- ZFS pool (default: `mvirt`)
 - libzfs development headers (`libzfs-dev` on Debian/Ubuntu)
 
 ## Usage
 
 ```bash
 # Start the daemon
-mvirt-zfs --pool vmpool --listen [::1]:50053
+mvirt-zfs --pool mvirt --listen [::1]:50053
 
 # With custom pool
 mvirt-zfs --pool mypool --listen 0.0.0.0:50053
@@ -86,39 +86,36 @@ The daemon exposes `ZfsService` on port 50052:
 ## Storage Layout
 
 ```
-vmpool/
-├── .mvirt-zfs/           # Metadata directory
-│   └── metadata.db       # SQLite database
+mvirt/
 ├── .tmp/                 # Temporary files for imports
-├── debian-base           # Base volume (template source)
-├── worker-01             # VM volume (clone of debian-base@v1)
-├── worker-02             # VM volume (clone of debian-base@v1)
-└── docker-01             # VM volume (imported from raw)
+├── <uuid>                # Template ZVOL
+├── <uuid>                # Volume ZVOL (clone of template@img)
+└── <uuid>                # Volume ZVOL (clone of template@img)
 ```
 
-Snapshots: `vmpool/debian-base@v1`, `vmpool/docker-01@pre-update`
+Snapshots: `mvirt/<uuid>@img`, `mvirt/<uuid>@<snap-uuid>`
 
 ## Import Workflow
 
 ### Local Raw File
 ```
-Source: /tmp/disk.raw → Stream → /dev/zvol/vmpool/my-vm
+Source: /tmp/disk.raw → Stream → /dev/zvol/mvirt/<uuid>
 ```
 
 ### Local qcow2 File
 ```
-Source: /tmp/disk.qcow2 → Read (random access) → Convert → /dev/zvol/vmpool/my-vm
+Source: /tmp/disk.qcow2 → Read (random access) → Convert → /dev/zvol/mvirt/<uuid>
 ```
 
 ### HTTP(S) Raw
 ```
-Source: https://example.com/disk.raw → Stream → /dev/zvol/vmpool/my-vm
+Source: https://example.com/disk.raw → Stream → /dev/zvol/mvirt/<uuid>
 ```
 
 ### HTTP(S) qcow2
 ```
-Source: https://example.com/disk.qcow2 → Download → /vmpool/.tmp/import-{uuid}.qcow2
-                                       → Convert → /dev/zvol/vmpool/my-vm
+Source: https://example.com/disk.qcow2 → Download → /mvirt/.tmp/import-{uuid}.qcow2
+                                       → Convert → /dev/zvol/mvirt/<uuid>
                                        → Cleanup temp file
 ```
 

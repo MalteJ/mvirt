@@ -1,7 +1,7 @@
 //! Integration tests for mvirt-zfs storage lifecycle
 //!
 //! These tests require:
-//! - A ZFS pool named "vmpool" (or set MVIRT_ZFS_POOL env var)
+//! - A ZFS pool named "mvirt" (or set MVIRT_ZFS_POOL env var)
 //! - Root/sudo permissions for ZFS operations
 //! - Network access to download test image
 //!
