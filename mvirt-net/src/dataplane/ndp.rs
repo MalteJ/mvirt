@@ -282,8 +282,8 @@ mod tests {
 
     #[test]
     fn test_build_unsolicited_ra() {
-        let mut responder = NdpResponder::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
-        responder.set_prefix(Ipv6Address::new(0xfd00, 0, 0, 0, 0, 0, 0, 0), 64);
+        // No prefix - all addresses via DHCPv6, forces routing through gateway
+        let responder = NdpResponder::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
 
         let ra = responder.build_unsolicited_ra();
         assert!(!ra.is_empty());

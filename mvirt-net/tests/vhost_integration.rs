@@ -548,6 +548,12 @@ fn test_ndp_router_solicitation_gets_advertisement() {
     assert!(ra.managed, "RA should have M flag (managed via DHCPv6)");
     assert!(ra.other_config, "RA should have O flag");
     assert!(ra.router_lifetime > 0, "Router lifetime should be > 0");
+    // No prefix should be advertised - all addresses via DHCPv6 only
+    // This ensures VMs route all IPv6 traffic through the gateway
+    assert!(
+        ra.prefix.is_none(),
+        "RA should NOT contain prefix (forces routing through gateway)"
+    );
 }
 
 // ============================================================================

@@ -18,7 +18,6 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nix::libc;
 use nix::sys::eventfd::{EfdFlags, EventFd as NixEventFd};
-use smoltcp::wire::Ipv6Address;
 use tracing::{debug, error, info, warn};
 use vhost::vhost_user::Listener;
 use vhost_user_backend::VhostUserDaemon;
@@ -180,16 +179,9 @@ impl PacketProcessor {
         // Set up ICMPv6 responder for gateway (IPv6)
         let icmpv6 = Icmpv6Responder::new();
 
-        // Set up NDP responder with prefix if IPv6 is enabled
-        let mut ndp = NdpResponder::new(mac);
-        if network.ipv6_enabled
-            && let Some(ref prefix_str) = network.ipv6_prefix
-            && let Ok(prefix) = prefix_str.parse::<Ipv6Net>()
-        {
-            let addr_bytes = prefix.network().octets();
-            let addr = Ipv6Address::from_bytes(&addr_bytes);
-            ndp.set_prefix(addr, prefix.prefix_len());
-        }
+        // Set up NDP responder (no prefix - all addresses via DHCPv6 only)
+        // This ensures VMs route all IPv6 traffic through the gateway
+        let ndp = NdpResponder::new(mac);
 
         // Set up DHCPv4 server if IPv4 is enabled and address is assigned
         let dhcpv4 = if network.ipv4_enabled {
