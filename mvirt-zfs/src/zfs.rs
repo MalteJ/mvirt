@@ -41,17 +41,17 @@ impl ZfsManager {
 
     /// Get the ZFS path for a base ZVOL (template storage)
     pub fn base_zvol_path(&self, uuid: &str) -> String {
-        format!("{}/.base/{}", self.pool_name, uuid)
+        format!("{}/.templates/{}", self.pool_name, uuid)
     }
 
     /// Get the device path for a base ZVOL
     pub fn base_device_path(&self, uuid: &str) -> String {
-        format!("/dev/zvol/{}/.base/{}", self.pool_name, uuid)
+        format!("/dev/zvol/{}/.templates/{}", self.pool_name, uuid)
     }
 
     /// Get the snapshot path for a template (base@img)
     pub fn template_snapshot_path(&self, uuid: &str) -> String {
-        format!("{}/.base/{}@img", self.pool_name, uuid)
+        format!("{}/.templates/{}@img", self.pool_name, uuid)
     }
 
     // === Pool Operations ===
@@ -400,9 +400,9 @@ impl ZfsManager {
 
     // === Template/Base ZVOL Operations ===
 
-    /// Ensure the .base dataset exists for storing template base ZVOLs
+    /// Ensure the .templates dataset exists for storing template base ZVOLs
     pub async fn ensure_base_dataset(&self) -> Result<()> {
-        let base_path = format!("{}/.base", self.pool_name);
+        let base_path = format!("{}/.templates", self.pool_name);
 
         // Check if it exists
         let output = Command::new("zfs")
@@ -415,23 +415,23 @@ impl ZfsManager {
         }
 
         // Create it
-        info!(path = %base_path, "Creating .base dataset");
+        info!(path = %base_path, "Creating .templates dataset");
 
         let output = Command::new("zfs")
             .args(["create", &base_path])
             .output()
             .await
-            .context("Failed to create .base dataset")?;
+            .context("Failed to create .templates dataset")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("zfs create .base failed: {}", stderr));
+            return Err(anyhow!("zfs create .templates failed: {}", stderr));
         }
 
         Ok(())
     }
 
-    /// Create a base ZVOL for a template (at vmpool/.base/<uuid>)
+    /// Create a base ZVOL for a template (at vmpool/.templates/<uuid>)
     pub async fn create_base_zvol(&self, uuid: &str, size_bytes: u64) -> Result<String> {
         self.ensure_base_dataset().await?;
 

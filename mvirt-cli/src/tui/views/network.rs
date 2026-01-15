@@ -175,6 +175,7 @@ fn draw_networks_table(
     };
 
     let header = Row::new(vec![
+        Cell::from("ID").style(Style::default().fg(Color::Cyan)),
         Cell::from("NAME").style(Style::default().fg(Color::Cyan)),
         Cell::from("IPv4 SUBNET").style(Style::default().fg(Color::Cyan)),
         Cell::from("IPv6 PREFIX").style(Style::default().fg(Color::Cyan)),
@@ -196,6 +197,8 @@ fn draw_networks_table(
                 Color::Reset
             };
 
+            let short_id = format!("{}\u{2026}", &net.id[..8]);
+
             let ipv4 = if net.ipv4_enabled && !net.ipv4_subnet.is_empty() {
                 net.ipv4_subnet.clone()
             } else {
@@ -209,6 +212,10 @@ fn draw_networks_table(
             };
 
             Row::new(vec![
+                Cell::from(Span::styled(
+                    short_id,
+                    Style::default().fg(Color::DarkGray).bg(bg),
+                )),
                 Cell::from(Span::styled(
                     net.name.clone(),
                     Style::default()
@@ -238,6 +245,7 @@ fn draw_networks_table(
     let table = Table::new(
         rows,
         [
+            Constraint::Length(11),
             Constraint::Min(15),
             Constraint::Length(18),
             Constraint::Length(20),
@@ -283,6 +291,7 @@ fn draw_nics_table(
     };
 
     let header = Row::new(vec![
+        Cell::from("ID").style(Style::default().fg(Color::Cyan)),
         Cell::from("NAME").style(Style::default().fg(Color::Cyan)),
         Cell::from("MAC").style(Style::default().fg(Color::Cyan)),
         Cell::from("IPv4").style(Style::default().fg(Color::Cyan)),
@@ -304,6 +313,8 @@ fn draw_nics_table(
             } else {
                 Color::Reset
             };
+
+            let short_id = format!("{}\u{2026}", &nic.id[..8]);
 
             let state = NicState::try_from(nic.state).unwrap_or(NicState::Unspecified);
             let state_indicator = match state {
@@ -338,6 +349,10 @@ fn draw_nics_table(
 
             Row::new(vec![
                 Cell::from(Span::styled(
+                    short_id,
+                    Style::default().fg(Color::DarkGray).bg(bg),
+                )),
+                Cell::from(Span::styled(
                     name,
                     Style::default()
                         .fg(if is_selected {
@@ -367,6 +382,7 @@ fn draw_nics_table(
     let table = Table::new(
         rows,
         [
+            Constraint::Length(11),
             Constraint::Min(10),
             Constraint::Length(19),
             Constraint::Length(15),

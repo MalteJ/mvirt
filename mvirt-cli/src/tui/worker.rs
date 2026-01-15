@@ -287,7 +287,7 @@ pub async fn action_worker(
                                     .clone_from_template(CloneFromTemplateRequest {
                                         template_name: params.disk_name.clone(),
                                         new_volume_name: new_vol_name.clone(),
-                                        size_bytes: None,
+                                        size_bytes: params.volume_size_bytes,
                                     })
                                     .await
                                 {
@@ -355,7 +355,11 @@ pub async fn action_worker(
                                     let nic = response.into_inner();
                                     NicConfig {
                                         tap: None,
-                                        mac: None,
+                                        mac: if nic.mac_address.is_empty() {
+                                            None
+                                        } else {
+                                            Some(nic.mac_address)
+                                        },
                                         vhost_socket: Some(nic.socket_path),
                                     }
                                 }
@@ -732,11 +736,31 @@ pub async fn action_worker(
             }
 
             Action::PrepareVolumeDetailModal { volume_name } => {
+                // Fetch volume with snapshots
+                let volume = if let Some(ref mut zfs) = zfs_client {
+                    match zfs
+                        .get_volume(GetVolumeRequest {
+                            name: volume_name.clone(),
+                        })
+                        .await
+                    {
+                        Ok(response) => Some(response.into_inner()),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+
+                // If volume not found, return early
+                let Some(volume) = volume else {
+                    return;
+                };
+
                 // Fetch logs for this volume
                 let logs = if let Some(ref mut log) = log_client {
                     match log
                         .query(QueryRequest {
-                            object_id: Some(volume_name.clone()),
+                            object_id: Some(volume.id.clone()),
                             start_time_ns: None,
                             end_time_ns: None,
                             limit: 50,
@@ -762,7 +786,7 @@ pub async fn action_worker(
                     vec![]
                 };
 
-                ActionResult::VolumeDetailModalReady { volume_name, logs }
+                ActionResult::VolumeDetailModalReady { volume, logs }
             }
 
             Action::PrepareCreateVmModal => {

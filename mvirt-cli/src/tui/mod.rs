@@ -44,13 +44,20 @@ fn draw(frame: &mut Frame, app: &mut App) {
             views::storage::draw(
                 frame,
                 &app.storage,
-                &mut app.volume_table_state,
+                &app.volume_selection,
                 &mut app.template_table_state,
                 app.storage_focus,
                 app.status_message.as_deref(),
                 app.confirm_delete_volume.as_deref(),
                 app.confirm_delete_template.as_deref(),
+                app.confirm_delete_snapshot
+                    .as_ref()
+                    .map(|(v, s)| (v.as_str(), s.as_str())),
+                app.confirm_rollback_snapshot
+                    .as_ref()
+                    .map(|(v, s)| (v.as_str(), s.as_str())),
                 app.last_refresh,
+                &app.expanded_volumes,
             );
         }
         View::Logs => {
@@ -100,9 +107,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     // Storage modals
-    if let Some(ref volume_name) = app.volume_detail_view
-        && let Some(volume) = app.get_volume_by_name(volume_name)
-    {
+    if let Some(ref volume) = app.volume_detail_volume {
         modals::volume_detail::draw(frame, volume, &app.volume_detail_logs);
     }
     if let Some(modal) = &app.volume_create_modal {
@@ -261,6 +266,10 @@ pub async fn run(
                 handle_storage_confirm_delete_volume(&mut app, key.code);
             } else if app.confirm_delete_template.is_some() {
                 handle_storage_confirm_delete_template(&mut app, key.code);
+            } else if app.confirm_delete_snapshot.is_some() {
+                handle_storage_confirm_delete_snapshot(&mut app, key.code);
+            } else if app.confirm_rollback_snapshot.is_some() {
+                handle_storage_confirm_rollback_snapshot(&mut app, key.code);
             } else if app.volume_create_modal.is_some() {
                 handle_volume_create_modal_input(&mut app, key.code);
             } else if app.volume_import_modal.is_some() {
@@ -283,7 +292,7 @@ pub async fn run(
                 handle_confirm_delete_nic(&mut app, key.code);
             } else if app.log_detail_index.is_some() {
                 handle_log_detail_input(&mut app, key.code);
-            } else if app.volume_detail_view.is_some() {
+            } else if app.volume_detail_volume.is_some() {
                 handle_volume_detail_input(&mut app, key.code);
             } else {
                 handle_normal_input(&mut app, key.code);
@@ -393,6 +402,8 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
                     modal.disk_select_next();
                 } else if modal.is_network_field() {
                     modal.network_select_next();
+                } else if modal.is_user_data_mode_field() {
+                    modal.cycle_user_data_mode_next();
                 } else {
                     modal.focus_next();
                 }
@@ -404,6 +415,8 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
                     modal.disk_select_prev();
                 } else if modal.is_network_field() {
                     modal.network_select_prev();
+                } else if modal.is_user_data_mode_field() {
+                    modal.cycle_user_data_mode_prev();
                 } else {
                     modal.focus_prev();
                 }
@@ -426,8 +439,6 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
                     modal.toggle_disk_source_type();
                 } else if modal.is_nested_virt_field() {
                     modal.toggle_nested_virt();
-                } else if modal.is_user_data_mode_field() {
-                    modal.cycle_user_data_mode();
                 }
             }
         }
@@ -541,25 +552,44 @@ fn handle_storage_input(app: &mut App, key_code: KeyCode) {
                 app.open_volume_detail_view();
             }
         }
+        KeyCode::Char(' ') => {
+            if app.storage_focus == StorageFocus::Volumes {
+                app.toggle_volume_expanded();
+            }
+        }
         KeyCode::Char('d') => match app.storage_focus {
-            StorageFocus::Volumes => app.delete_selected_volume(),
+            StorageFocus::Volumes => {
+                if app.is_snapshot_selected() {
+                    app.delete_selected_snapshot();
+                } else {
+                    app.delete_selected_volume();
+                }
+            }
             StorageFocus::Templates => app.delete_selected_template(),
         },
         KeyCode::Char('n') => app.open_volume_create_modal(),
         KeyCode::Char('i') => app.open_volume_import_modal(),
         KeyCode::Char('r') => {
             if app.storage_focus == StorageFocus::Volumes {
-                app.open_volume_resize_modal();
+                if app.is_snapshot_selected() {
+                    app.rollback_selected_snapshot();
+                } else {
+                    app.open_volume_resize_modal();
+                }
             }
         }
         KeyCode::Char('s') => {
-            if app.storage_focus == StorageFocus::Volumes {
+            if app.storage_focus == StorageFocus::Volumes && !app.is_snapshot_selected() {
                 app.open_volume_snapshot_modal();
             }
         }
         KeyCode::Char('t') => {
             if app.storage_focus == StorageFocus::Volumes {
-                app.open_volume_template_modal();
+                if app.is_snapshot_selected() {
+                    app.open_snapshot_template_modal();
+                } else {
+                    app.open_volume_template_modal();
+                }
             }
         }
         KeyCode::Char('c') => {
@@ -609,6 +639,22 @@ fn handle_storage_confirm_delete_template(app: &mut App, key_code: KeyCode) {
     match key_code {
         KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_template(),
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_delete_template(),
+        _ => {}
+    }
+}
+
+fn handle_storage_confirm_delete_snapshot(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_snapshot(),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_delete_snapshot(),
+        _ => {}
+    }
+}
+
+fn handle_storage_confirm_rollback_snapshot(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_rollback_snapshot(),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_rollback_snapshot(),
         _ => {}
     }
 }
@@ -881,12 +927,18 @@ fn handle_volume_clone_modal_input(app: &mut App, key_code: KeyCode) {
             }
         }
         KeyCode::Char(c) => {
-            if let Some(modal) = &mut app.volume_clone_modal
-                && modal.is_name_field()
-                && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                && let Some(input) = modal.current_input()
-            {
-                input.push(c);
+            if let Some(modal) = &mut app.volume_clone_modal {
+                let allowed = if modal.is_name_field() {
+                    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+                } else if modal.focused_field == 1 {
+                    // Size field: digits only (in GB)
+                    c.is_ascii_digit()
+                } else {
+                    false
+                };
+                if allowed && let Some(input) = modal.current_input() {
+                    input.push(c);
+                }
             }
         }
         _ => {}

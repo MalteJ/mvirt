@@ -59,7 +59,8 @@ impl SshKeysConfig {
 pub struct CreateVmParams {
     pub name: Option<String>,
     pub disk_source_type: DiskSourceType,
-    pub disk_name: String, // volume or template name
+    pub disk_name: String,              // volume or template name
+    pub volume_size_bytes: Option<u64>, // Size for new volume when cloning from template
     pub vcpus: u32,
     pub memory_mb: u64,
     pub nested_virt: bool,
@@ -92,6 +93,13 @@ pub enum StorageFocus {
     #[default]
     Volumes,
     Templates,
+}
+
+/// Selection in volumes table (volume or snapshot)
+#[derive(Clone, Debug, PartialEq)]
+pub enum VolumeSelection {
+    Volume(usize),          // Index in storage.volumes
+    Snapshot(usize, usize), // (volume_index, snapshot_index)
 }
 
 /// Storage state from mvirt-zfs
@@ -255,7 +263,7 @@ pub enum ActionResult {
         logs: Vec<LogEntry>,
     },
     VolumeDetailModalReady {
-        volume_name: String,
+        volume: Volume,
         logs: Vec<LogEntry>,
     },
 

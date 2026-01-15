@@ -136,6 +136,15 @@ enum Commands {
         /// VM ID
         id: String,
     },
+
+    /// Import a template from URL or file
+    Import {
+        /// Template name
+        name: String,
+
+        /// Source URL or file path
+        source: String,
+    },
 }
 
 #[derive(Tabled)]
@@ -302,7 +311,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
-    // Subcommands require a connection to the VMM
+    // Handle storage commands (require zfs_client, not vm_client)
+    if let Commands::Import { name, source } = &command {
+        let Some(mut zfs_client) = zfs_client else {
+            eprintln!("Error: Cannot connect to mvirt-zfs at {}", cli.zfs_server);
+            std::process::exit(1);
+        };
+
+        // Start import
+        let response = zfs_client
+            .import_template(zfs_proto::ImportTemplateRequest {
+                name: name.clone(),
+                source: source.clone(),
+                size_bytes: None,
+            })
+            .await?;
+
+        let job = response.into_inner();
+        println!("Import started: {} (job {})", name, job.id);
+
+        // Poll for completion
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            let status = zfs_client
+                .get_import_job(zfs_proto::GetImportJobRequest { id: job.id.clone() })
+                .await?
+                .into_inner();
+
+            let state = zfs_proto::ImportJobState::try_from(status.state)
+                .unwrap_or(zfs_proto::ImportJobState::Unspecified);
+
+            let progress = if status.total_bytes > 0 {
+                format!(
+                    "{:.1}%",
+                    status.bytes_written as f64 / status.total_bytes as f64 * 100.0
+                )
+            } else {
+                format!("{} bytes", status.bytes_written)
+            };
+
+            println!("  {:?}: {}", state, progress);
+
+            match state {
+                zfs_proto::ImportJobState::Completed => {
+                    if let Some(template) = status.template {
+                        println!("Import completed: {} ({})", template.name, template.id);
+                    } else {
+                        println!("Import completed!");
+                    }
+                    return Ok(());
+                }
+                zfs_proto::ImportJobState::Failed => {
+                    eprintln!("Import failed: {}", status.error.unwrap_or_default());
+                    std::process::exit(1);
+                }
+                zfs_proto::ImportJobState::Cancelled => {
+                    eprintln!("Import cancelled");
+                    std::process::exit(1);
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    // Other subcommands require a connection to the VMM
     let Some(mut client) = vm_client else {
         eprintln!("Error: Cannot connect to mvirt daemon at {}", cli.server);
         std::process::exit(1);
@@ -465,6 +538,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Console { id } => {
             run_console(&mut client, id).await?;
+        }
+
+        Commands::Import { .. } => {
+            // Handled above
+            unreachable!()
         }
     }
 

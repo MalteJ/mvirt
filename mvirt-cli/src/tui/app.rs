@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,7 @@ use crate::tui::modals::volume_snapshot::VolumeSnapshotModal;
 use crate::tui::modals::volume_template::VolumeTemplateModal;
 use crate::tui::types::{
     Action, ActionResult, NetworkFocus, NetworkItem, NetworkState, StorageFocus, StorageState,
-    UserDataMode, View,
+    UserDataMode, View, VolumeSelection,
 };
 use crate::tui::widgets::console::ConsoleSession;
 use crate::tui::widgets::file_picker::FilePicker;
@@ -65,13 +66,16 @@ pub struct App {
 
     // Storage state
     pub storage: StorageState,
-    pub volume_table_state: TableState,
     pub template_table_state: TableState,
     pub storage_focus: StorageFocus,
     pub confirm_delete_volume: Option<String>,
     pub confirm_delete_template: Option<String>,
-    pub volume_detail_view: Option<String>,
+    pub confirm_delete_snapshot: Option<(String, String)>, // (volume_name, snapshot_name)
+    pub confirm_rollback_snapshot: Option<(String, String)>, // (volume_name, snapshot_name)
+    pub volume_detail_volume: Option<Volume>,
     pub volume_detail_logs: Vec<LogEntry>,
+    pub expanded_volumes: HashSet<String>,
+    pub volume_selection: Option<VolumeSelection>,
 
     // Storage modals
     pub volume_create_modal: Option<VolumeCreateModal>,
@@ -143,13 +147,16 @@ impl App {
 
             // Storage state
             storage: StorageState::default(),
-            volume_table_state: TableState::default(),
             template_table_state: TableState::default(),
             storage_focus: StorageFocus::Volumes,
             confirm_delete_volume: None,
             confirm_delete_template: None,
-            volume_detail_view: None,
+            confirm_delete_snapshot: None,
+            confirm_rollback_snapshot: None,
+            volume_detail_volume: None,
             volume_detail_logs: Vec::new(),
+            expanded_volumes: HashSet::new(),
+            volume_selection: None,
 
             // Storage modals
             volume_create_modal: None,
@@ -284,17 +291,35 @@ impl App {
                 self.storage = state;
                 self.clear_status_if_expired();
                 self.last_refresh = Some(Local::now());
-                // Update table selections
+                // Update volume selection
                 if self.storage.volumes.is_empty() {
-                    self.volume_table_state.select(None);
-                } else if self.volume_table_state.selected().is_none() {
-                    self.volume_table_state.select(Some(0));
-                } else if let Some(selected) = self.volume_table_state.selected()
-                    && selected >= self.storage.volumes.len()
-                {
-                    self.volume_table_state
-                        .select(Some(self.storage.volumes.len().saturating_sub(1)));
+                    self.volume_selection = None;
+                } else if self.volume_selection.is_none() {
+                    self.volume_selection = Some(VolumeSelection::Volume(0));
+                } else {
+                    // Clamp selection to valid range
+                    match &self.volume_selection {
+                        Some(VolumeSelection::Volume(idx))
+                            if *idx >= self.storage.volumes.len() =>
+                        {
+                            self.volume_selection = Some(VolumeSelection::Volume(
+                                self.storage.volumes.len().saturating_sub(1),
+                            ));
+                        }
+                        Some(VolumeSelection::Snapshot(vol_idx, snap_idx)) => {
+                            if *vol_idx >= self.storage.volumes.len() {
+                                self.volume_selection = Some(VolumeSelection::Volume(
+                                    self.storage.volumes.len().saturating_sub(1),
+                                ));
+                            } else if *snap_idx >= self.storage.volumes[*vol_idx].snapshots.len() {
+                                // Snapshot was deleted, select the volume instead
+                                self.volume_selection = Some(VolumeSelection::Volume(*vol_idx));
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+                // Update template selection
                 if self.storage.templates.is_empty() {
                     self.template_table_state.select(None);
                 } else if self.template_table_state.selected().is_none() {
@@ -411,8 +436,8 @@ impl App {
                 self.status_message = None;
                 self.status_message_time = None;
             }
-            ActionResult::VolumeDetailModalReady { volume_name, logs } => {
-                self.volume_detail_view = Some(volume_name);
+            ActionResult::VolumeDetailModalReady { volume, logs } => {
+                self.volume_detail_volume = Some(volume);
                 self.volume_detail_logs = logs;
                 self.status_message = None;
                 self.status_message_time = None;
@@ -637,7 +662,17 @@ impl App {
     }
 
     pub fn open_ssh_keys_modal(&mut self) {
-        self.ssh_keys_modal = Some(SshKeysModal::new());
+        // Use existing config if available, otherwise create new
+        let modal = if let Some(create_modal) = &self.create_modal {
+            if let Some(config) = &create_modal.ssh_keys_config {
+                SshKeysModal::with_config(config.clone())
+            } else {
+                SshKeysModal::new()
+            }
+        } else {
+            SshKeysModal::new()
+        };
+        self.ssh_keys_modal = Some(modal);
     }
 
     pub fn close_ssh_keys_modal(&mut self) {
@@ -809,20 +844,7 @@ impl App {
     pub fn storage_next(&mut self) {
         match self.storage_focus {
             StorageFocus::Volumes => {
-                if self.storage.volumes.is_empty() {
-                    return;
-                }
-                let i = match self.volume_table_state.selected() {
-                    Some(i) => {
-                        if i >= self.storage.volumes.len() - 1 {
-                            0
-                        } else {
-                            i + 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.volume_table_state.select(Some(i));
+                self.volume_selection = self.next_volume_selection();
             }
             StorageFocus::Templates => {
                 if self.storage.templates.is_empty() {
@@ -846,20 +868,7 @@ impl App {
     pub fn storage_previous(&mut self) {
         match self.storage_focus {
             StorageFocus::Volumes => {
-                if self.storage.volumes.is_empty() {
-                    return;
-                }
-                let i = match self.volume_table_state.selected() {
-                    Some(i) => {
-                        if i == 0 {
-                            self.storage.volumes.len() - 1
-                        } else {
-                            i - 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.volume_table_state.select(Some(i));
+                self.volume_selection = self.prev_volume_selection();
             }
             StorageFocus::Templates => {
                 if self.storage.templates.is_empty() {
@@ -880,14 +889,130 @@ impl App {
         }
     }
 
+    fn next_volume_selection(&self) -> Option<VolumeSelection> {
+        if self.storage.volumes.is_empty() {
+            return None;
+        }
+
+        match &self.volume_selection {
+            None => Some(VolumeSelection::Volume(0)),
+            Some(VolumeSelection::Volume(vol_idx)) => {
+                let vol = &self.storage.volumes[*vol_idx];
+                // If expanded and has snapshots, go to first snapshot
+                if self.expanded_volumes.contains(&vol.id) && !vol.snapshots.is_empty() {
+                    Some(VolumeSelection::Snapshot(*vol_idx, 0))
+                } else if *vol_idx + 1 < self.storage.volumes.len() {
+                    Some(VolumeSelection::Volume(*vol_idx + 1))
+                } else {
+                    Some(VolumeSelection::Volume(0))
+                }
+            }
+            Some(VolumeSelection::Snapshot(vol_idx, snap_idx)) => {
+                let vol = &self.storage.volumes[*vol_idx];
+                if *snap_idx + 1 < vol.snapshots.len() {
+                    Some(VolumeSelection::Snapshot(*vol_idx, *snap_idx + 1))
+                } else if *vol_idx + 1 < self.storage.volumes.len() {
+                    Some(VolumeSelection::Volume(*vol_idx + 1))
+                } else {
+                    Some(VolumeSelection::Volume(0))
+                }
+            }
+        }
+    }
+
+    fn prev_volume_selection(&self) -> Option<VolumeSelection> {
+        if self.storage.volumes.is_empty() {
+            return None;
+        }
+
+        match &self.volume_selection {
+            None => {
+                // Select last item
+                let last_vol_idx = self.storage.volumes.len() - 1;
+                let last_vol = &self.storage.volumes[last_vol_idx];
+                if self.expanded_volumes.contains(&last_vol.id) && !last_vol.snapshots.is_empty() {
+                    Some(VolumeSelection::Snapshot(
+                        last_vol_idx,
+                        last_vol.snapshots.len() - 1,
+                    ))
+                } else {
+                    Some(VolumeSelection::Volume(last_vol_idx))
+                }
+            }
+            Some(VolumeSelection::Volume(vol_idx)) => {
+                if *vol_idx == 0 {
+                    // Wrap to last item
+                    let last_vol_idx = self.storage.volumes.len() - 1;
+                    let last_vol = &self.storage.volumes[last_vol_idx];
+                    if self.expanded_volumes.contains(&last_vol.id)
+                        && !last_vol.snapshots.is_empty()
+                    {
+                        Some(VolumeSelection::Snapshot(
+                            last_vol_idx,
+                            last_vol.snapshots.len() - 1,
+                        ))
+                    } else {
+                        Some(VolumeSelection::Volume(last_vol_idx))
+                    }
+                } else {
+                    // Go to previous volume's last snapshot (if expanded) or the volume itself
+                    let prev_vol_idx = *vol_idx - 1;
+                    let prev_vol = &self.storage.volumes[prev_vol_idx];
+                    if self.expanded_volumes.contains(&prev_vol.id)
+                        && !prev_vol.snapshots.is_empty()
+                    {
+                        Some(VolumeSelection::Snapshot(
+                            prev_vol_idx,
+                            prev_vol.snapshots.len() - 1,
+                        ))
+                    } else {
+                        Some(VolumeSelection::Volume(prev_vol_idx))
+                    }
+                }
+            }
+            Some(VolumeSelection::Snapshot(vol_idx, snap_idx)) => {
+                if *snap_idx == 0 {
+                    Some(VolumeSelection::Volume(*vol_idx))
+                } else {
+                    Some(VolumeSelection::Snapshot(*vol_idx, *snap_idx - 1))
+                }
+            }
+        }
+    }
+
     pub fn selected_volume(&self) -> Option<&Volume> {
-        self.volume_table_state
-            .selected()
-            .and_then(|i| self.storage.volumes.get(i))
+        match &self.volume_selection {
+            Some(VolumeSelection::Volume(idx)) => self.storage.volumes.get(*idx),
+            Some(VolumeSelection::Snapshot(vol_idx, _)) => self.storage.volumes.get(*vol_idx),
+            None => None,
+        }
+    }
+
+    /// Returns (volume, snapshot) if a snapshot is selected
+    pub fn selected_snapshot(&self) -> Option<(&Volume, &crate::zfs_proto::Snapshot)> {
+        match &self.volume_selection {
+            Some(VolumeSelection::Snapshot(vol_idx, snap_idx)) => self
+                .storage
+                .volumes
+                .get(*vol_idx)
+                .and_then(|vol| vol.snapshots.get(*snap_idx).map(|snap| (vol, snap))),
+            _ => None,
+        }
+    }
+
+    /// Returns true if a snapshot is currently selected
+    pub fn is_snapshot_selected(&self) -> bool {
+        matches!(
+            &self.volume_selection,
+            Some(VolumeSelection::Snapshot(_, _))
+        )
     }
 
     pub fn delete_selected_volume(&mut self) {
-        if let Some(vol) = self.selected_volume() {
+        // Only delete if a volume (not snapshot) is selected
+        if let Some(VolumeSelection::Volume(_)) = &self.volume_selection
+            && let Some(vol) = self.selected_volume()
+        {
             self.confirm_delete_volume = Some(vol.name.clone());
         }
     }
@@ -901,6 +1026,50 @@ impl App {
 
     pub fn cancel_delete_volume(&mut self) {
         self.confirm_delete_volume = None;
+    }
+
+    // Snapshot actions
+    pub fn delete_selected_snapshot(&mut self) {
+        if let Some((vol, snap)) = self.selected_snapshot() {
+            self.confirm_delete_snapshot = Some((vol.name.clone(), snap.name.clone()));
+        }
+    }
+
+    pub fn confirm_delete_snapshot(&mut self) {
+        if let Some((volume, name)) = self.confirm_delete_snapshot.take() {
+            self.set_status(format!("Deleting snapshot {}@{}...", volume, name));
+            self.send_action(Action::DeleteSnapshot { volume, name });
+        }
+    }
+
+    pub fn cancel_delete_snapshot(&mut self) {
+        self.confirm_delete_snapshot = None;
+    }
+
+    pub fn rollback_selected_snapshot(&mut self) {
+        if let Some((vol, snap)) = self.selected_snapshot() {
+            self.confirm_rollback_snapshot = Some((vol.name.clone(), snap.name.clone()));
+        }
+    }
+
+    pub fn confirm_rollback_snapshot(&mut self) {
+        if let Some((volume, name)) = self.confirm_rollback_snapshot.take() {
+            self.set_status(format!("Rolling back to {}@{}...", volume, name));
+            self.send_action(Action::RollbackSnapshot { volume, name });
+        }
+    }
+
+    pub fn cancel_rollback_snapshot(&mut self) {
+        self.confirm_rollback_snapshot = None;
+    }
+
+    pub fn open_snapshot_template_modal(&mut self) {
+        if let Some((vol, snap)) = self.selected_snapshot() {
+            self.volume_template_modal = Some(VolumeTemplateModal::new_for_snapshot(
+                vol.name.clone(),
+                snap.name.clone(),
+            ));
+        }
     }
 
     pub fn delete_selected_template(&mut self) {
@@ -939,12 +1108,22 @@ impl App {
     }
 
     pub fn close_volume_detail_view(&mut self) {
-        self.volume_detail_view = None;
+        self.volume_detail_volume = None;
         self.volume_detail_logs.clear();
     }
 
-    pub fn get_volume_by_name(&self, name: &str) -> Option<&Volume> {
-        self.storage.volumes.iter().find(|v| v.name == name)
+    pub fn toggle_volume_expanded(&mut self) {
+        // Only toggle if a volume (not snapshot) is selected
+        if let Some(VolumeSelection::Volume(vol_idx)) = &self.volume_selection
+            && let Some(vol) = self.storage.volumes.get(*vol_idx)
+        {
+            let vol_id = vol.id.clone();
+            if self.expanded_volumes.contains(&vol_id) {
+                self.expanded_volumes.remove(&vol_id);
+            } else {
+                self.expanded_volumes.insert(vol_id);
+            }
+        }
     }
 
     // === Storage Modal Methods ===

@@ -19,30 +19,37 @@ use tokio::time::sleep;
 /// Test configuration
 struct TestConfig {
     pool_name: String,
-    pool_mountpoint: String,
+    state_dir: String,
     test_image_url: String,
     db_path: String,
 }
 
 impl TestConfig {
     fn new() -> Self {
-        let pool_name = std::env::var("MVIRT_ZFS_POOL").unwrap_or_else(|_| "vmpool".to_string());
-        let pool_mountpoint = format!("/{}", pool_name);
-        // Use a directory under pool mountpoint for database (Store expects a directory)
-        let db_dir = format!("{}/.mvirt-zfs-test", pool_mountpoint);
+        let pool_name = std::env::var("MVIRT_ZFS_POOL").unwrap_or_else(|_| "testpool".to_string());
+        // Use target directory for state and database (pool is not mounted)
+        let target_dir = env!("CARGO_MANIFEST_DIR").to_string() + "/../target";
+        let state_dir = format!("{}/mvirt-zfs-test", target_dir);
+        let db_dir = format!("{}/db", state_dir);
         Self {
             pool_name,
-            pool_mountpoint,
+            state_dir,
             test_image_url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2".to_string(),
             db_path: db_dir,
         }
     }
 }
 
+impl TestConfig {
+    /// Clean up state directory before/after tests
+    fn cleanup(&self) {
+        let _ = std::fs::remove_dir_all(&self.state_dir);
+    }
+}
+
 impl Drop for TestConfig {
     fn drop(&mut self) {
-        // Cleanup: remove test database directory
-        let _ = std::fs::remove_dir_all(&self.db_path);
+        self.cleanup();
     }
 }
 
@@ -117,8 +124,8 @@ mod tests {
         println!("Pool: {}", config.pool_name);
         println!("Image: {}", config.test_image_url);
 
-        // Create test db directory
-        let _ = std::fs::remove_dir_all(&config.db_path);
+        // Clean up before starting (ensure fresh state)
+        config.cleanup();
         std::fs::create_dir_all(&config.db_path).expect("Failed to create test db directory");
 
         // Initialize components
@@ -126,7 +133,7 @@ mod tests {
             .await
             .expect("Failed to create store");
         let zfs = mvirt_zfs::zfs::ZfsManager::new(config.pool_name.clone());
-        let audit = mvirt_zfs::audit::AuditLogger::new_noop();
+        let audit = mvirt_zfs::audit::ZfsAuditLogger::new_noop();
 
         let store = Arc::new(store);
         let zfs = Arc::new(zfs);
@@ -134,7 +141,7 @@ mod tests {
 
         let import_manager = mvirt_zfs::import::ImportManager::new(
             config.pool_name.clone(),
-            config.pool_mountpoint.clone(),
+            config.state_dir.clone(),
             Arc::clone(&store),
             Arc::clone(&zfs),
             Arc::clone(&audit),
@@ -282,19 +289,31 @@ mod tests {
         println!("\n--- Step 3: Create Snapshot of Volume ---");
 
         let snapshot_name = "before-update";
-        let snapshot_id = uuid::Uuid::new_v4().to_string();
+        let zfs_snap_id = uuid::Uuid::new_v4().to_string();
+        let mvirt_snap_id = uuid::Uuid::new_v4().to_string();
 
         let snap_info = zfs
-            .create_snapshot(&volume_id, &snapshot_id)
+            .create_snapshot(&volume_id, &zfs_snap_id)
             .await
             .expect("Failed to create snapshot");
 
-        // Store snapshot in database
+        // First create ZFS snapshot entry
+        let zfs_snapshot_entry = mvirt_zfs::store::ZfsSnapshotEntry::new(
+            zfs_snap_id.clone(),
+            volume_id.clone(),
+            zfs_snap_id.clone(), // zfs_name is the UUID used in the ZFS path
+        );
+        store
+            .create_zfs_snapshot(&zfs_snapshot_entry)
+            .await
+            .expect("Failed to store ZFS snapshot");
+
+        // Then create mvirt snapshot entry referencing the ZFS snapshot
         let snapshot_entry = mvirt_zfs::store::SnapshotEntry::new(
-            snapshot_id.clone(),
+            mvirt_snap_id.clone(),
             volume_id.clone(),
             snapshot_name.to_string(),
-            snapshot_id.clone(), // zfs_snapshot_name is the UUID
+            zfs_snap_id.clone(), // zfs_snapshot_id references zfs_snapshots table
         );
 
         store
@@ -318,7 +337,7 @@ mod tests {
         println!("Snapshot in DB for volume: {}", snap_db.volume_id);
 
         // Verify snapshot exists in ZFS
-        let snap_full = format!("{}@{}", vol_zvol, snapshot_id);
+        let snap_full = format!("{}@{}", vol_zvol, zfs_snap_id);
         assert!(
             zfs_snapshot_exists(&snap_full),
             "Snapshot should exist: {}",
@@ -333,7 +352,7 @@ mod tests {
         let new_template_id = uuid::Uuid::new_v4().to_string();
 
         // Clone snapshot to new base ZVOL
-        let snap_path = format!("{}@{}", zfs.volume_zfs_path(&volume_id), snapshot_id);
+        let snap_path = format!("{}@{}", zfs.volume_zfs_path(&volume_id), zfs_snap_id);
         zfs.clone_snapshot(&snap_path, &zfs.base_zvol_path(&new_template_id))
             .await
             .expect("Failed to clone snapshot to base");
@@ -345,7 +364,7 @@ mod tests {
             .expect("Failed to create template snapshot");
 
         // Store new template
-        let new_template_entry = mvirt_zfs::store::TemplateEntry::new(
+        let new_template_entry = mvirt_zfs::store::TemplateEntry::new_from_import(
             new_template_id.clone(),
             new_template_name.to_string(),
             zfs.base_zvol_path(&new_template_id),
@@ -429,12 +448,43 @@ mod tests {
 
         let _origin_template_id = vol_db.origin_template_id.clone();
 
+        // First delete all mvirt snapshots and their backing zfs_snapshots
+        let snapshots = store
+            .list_snapshots(&volume_id)
+            .await
+            .expect("Failed to list snapshots");
+        for snap in &snapshots {
+            // Delete mvirt snapshot
+            store
+                .delete_snapshot(&volume_id, &snap.name)
+                .await
+                .expect("Failed to delete snapshot");
+
+            // Check ref count for the zfs_snapshot
+            let ref_count = store
+                .count_zfs_snapshot_refs(&snap.zfs_snapshot_id)
+                .await
+                .expect("Failed to count refs");
+
+            // If no more references, delete the zfs_snapshot entry
+            if ref_count == 0 {
+                store
+                    .delete_zfs_snapshot(&snap.zfs_snapshot_id)
+                    .await
+                    .expect("Failed to delete zfs_snapshot");
+            }
+            println!(
+                "  Deleted snapshot: {} (refs remaining: {})",
+                snap.name, ref_count
+            );
+        }
+
         // Delete from ZFS (recursive, includes snapshots)
         zfs.delete_volume_recursive(&volume_id)
             .await
             .expect("Failed to delete volume from ZFS");
 
-        // Delete from database
+        // Delete volume from database
         store
             .delete_volume(&volume_id)
             .await
@@ -450,13 +500,13 @@ mod tests {
         assert!(vol_gone.is_none(), "Volume should be gone from database");
         println!("Volume removed from database");
 
-        // Verify snapshots gone from database (cascade)
+        // Verify snapshots gone from database
         let snaps_gone = store.list_snapshots(&volume_id).await.expect("DB error");
         assert!(
             snaps_gone.is_empty(),
             "Snapshots should be gone from database"
         );
-        println!("Snapshots removed from database (cascade)");
+        println!("Snapshots removed from database");
 
         // Verify volume ZVOL gone
         assert!(
@@ -524,7 +574,7 @@ mod tests {
         println!("Remaining datasets in pool:");
         for ds in &remaining {
             // Filter out unrelated datasets
-            if ds.contains(".base/") || ds.contains(&volume_id) || ds.contains(&template.id) {
+            if ds.contains(".templates/") || ds.contains(&volume_id) || ds.contains(&template.id) {
                 println!("  UNEXPECTED: {}", ds);
             }
         }
@@ -565,9 +615,10 @@ mod tests {
 
         println!("=== Testing GC with dependent volume ===");
 
-        // Use a unique directory for this test (in pool mountpoint for write access)
-        let db_dir = format!("{}/.mvirt-zfs-test-gc", config.pool_mountpoint);
-        let _ = std::fs::remove_dir_all(&db_dir);
+        // Use state_dir for this test
+        let gc_state_dir = format!("{}-gc", config.state_dir);
+        let db_dir = format!("{}/db", gc_state_dir);
+        let _ = std::fs::remove_dir_all(&gc_state_dir);
         std::fs::create_dir_all(&db_dir).expect("Failed to create test db directory");
 
         let store = Arc::new(
@@ -599,7 +650,7 @@ mod tests {
             .expect("Failed to create template snapshot");
 
         // Store template
-        let template_entry = mvirt_zfs::store::TemplateEntry::new(
+        let template_entry = mvirt_zfs::store::TemplateEntry::new_from_import(
             template_id.clone(),
             template_name.to_string(),
             zfs.base_zvol_path(&template_id),
@@ -696,7 +747,7 @@ mod tests {
         println!("Base ZVOL garbage collected after volume deletion");
 
         // Cleanup
-        let _ = std::fs::remove_dir_all(&db_dir);
+        let _ = std::fs::remove_dir_all(&gc_state_dir);
 
         println!("=== GC test completed successfully! ===");
     }

@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 
-use crate::tui::types::{StorageFocus, StorageState};
+use crate::tui::types::{StorageFocus, StorageState, VolumeSelection};
 use crate::zfs_proto::ImportJobState;
 
 /// Format bytes to human-readable size
@@ -28,13 +30,16 @@ fn format_size(bytes: u64) -> String {
 pub fn draw(
     frame: &mut Frame,
     storage: &StorageState,
-    volume_table_state: &mut TableState,
+    volume_selection: &Option<VolumeSelection>,
     template_table_state: &mut TableState,
     focus: StorageFocus,
     status_message: Option<&str>,
     confirm_delete_volume: Option<&str>,
     confirm_delete_template: Option<&str>,
+    confirm_delete_snapshot: Option<(&str, &str)>,
+    confirm_rollback_snapshot: Option<(&str, &str)>,
     last_refresh: Option<chrono::DateTime<chrono::Local>>,
+    expanded_volumes: &HashSet<String>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -55,8 +60,9 @@ pub fn draw(
         frame,
         chunks[1],
         storage,
-        volume_table_state,
+        volume_selection,
         focus == StorageFocus::Volumes,
+        expanded_volumes,
     );
 
     // Templates table
@@ -76,18 +82,16 @@ pub fn draw(
 
     let legend = match focus {
         StorageFocus::Volumes => Line::from(vec![
-            Span::styled(" n", Style::default().fg(Color::Green).bold()),
+            Span::styled(" ↵", Style::default().fg(Color::Cyan).bold()),
+            Span::styled(":detail ", Style::default().fg(Color::DarkGray)),
+            Span::styled("␣", Style::default().fg(Color::Cyan).bold()),
+            Span::styled(":expand ", Style::default().fg(Color::DarkGray)),
+            Span::styled("n", Style::default().fg(Color::Green).bold()),
             Span::styled(":new ", Style::default().fg(Color::DarkGray)),
-            Span::styled("i", Style::default().fg(Color::Green).bold()),
-            Span::styled(":import ", Style::default().fg(Color::DarkGray)),
-            Span::styled("r", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(":resize ", Style::default().fg(Color::DarkGray)),
             Span::styled("s", Style::default().fg(Color::Cyan).bold()),
             Span::styled(":snap ", Style::default().fg(Color::DarkGray)),
-            Span::styled("t", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(":template ", Style::default().fg(Color::DarkGray)),
             Span::styled("d", Style::default().fg(Color::Red).bold()),
-            Span::styled(":delete ", Style::default().fg(Color::DarkGray)),
+            Span::styled(":del ", Style::default().fg(Color::DarkGray)),
             Span::styled("S-Tab", Style::default().fg(Color::Magenta).bold()),
             Span::styled(":templates ", Style::default().fg(Color::DarkGray)),
             Span::styled("q", Style::default().fg(Color::Magenta).bold()),
@@ -142,6 +146,32 @@ pub fn draw(
             Span::styled(
                 format!("Delete template {}? ", name),
                 Style::default().fg(Color::Red).bold(),
+            ),
+            Span::styled("[y]", Style::default().fg(Color::Green).bold()),
+            Span::styled("es / ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[n]", Style::default().fg(Color::Red).bold()),
+            Span::styled("o", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(confirm_line), chunks[4]);
+    } else if let Some((vol, snap)) = confirm_delete_snapshot {
+        let confirm_line = Line::from(vec![
+            Span::styled(" \u{26a0} ", Style::default().fg(Color::Red)),
+            Span::styled(
+                format!("Delete snapshot {}@{}? ", vol, snap),
+                Style::default().fg(Color::Red).bold(),
+            ),
+            Span::styled("[y]", Style::default().fg(Color::Green).bold()),
+            Span::styled("es / ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[n]", Style::default().fg(Color::Red).bold()),
+            Span::styled("o", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(confirm_line), chunks[4]);
+    } else if let Some((vol, snap)) = confirm_rollback_snapshot {
+        let confirm_line = Line::from(vec![
+            Span::styled(" \u{26a0} ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("Rollback to {}@{}? ", vol, snap),
+                Style::default().fg(Color::Yellow).bold(),
             ),
             Span::styled("[y]", Style::default().fg(Color::Green).bold()),
             Span::styled("es / ", Style::default().fg(Color::DarkGray)),
@@ -238,8 +268,9 @@ fn draw_volumes_table(
     frame: &mut Frame,
     area: Rect,
     storage: &StorageState,
-    table_state: &mut TableState,
+    volume_selection: &Option<VolumeSelection>,
     is_focused: bool,
+    expanded_volumes: &HashSet<String>,
 ) {
     let border_color = if is_focused {
         Color::Cyan
@@ -248,36 +279,60 @@ fn draw_volumes_table(
     };
 
     let header = Row::new(vec![
+        Cell::from("").style(Style::default().fg(Color::Cyan)),
+        Cell::from("ID").style(Style::default().fg(Color::Cyan)),
         Cell::from("NAME").style(Style::default().fg(Color::Cyan)),
         Cell::from("SIZE").style(Style::default().fg(Color::Cyan)),
         Cell::from("USED").style(Style::default().fg(Color::Cyan)),
-        Cell::from("SOURCE").style(Style::default().fg(Color::Cyan)),
         Cell::from("CREATED").style(Style::default().fg(Color::Cyan)),
     ])
     .style(Style::default().bold())
     .bottom_margin(1);
 
-    let selected_idx = table_state.selected();
-
-    // Build rows from volumes and active import jobs
+    // Build rows from volumes (with snapshots) and active import jobs
     let mut rows: Vec<Row> = Vec::new();
+    let mut selected_row: Option<usize> = None;
 
     // Add completed volumes
-    for (idx, vol) in storage.volumes.iter().enumerate() {
-        let is_selected = is_focused && selected_idx == Some(idx);
-        let bg = if is_selected {
+    for (vol_idx, vol) in storage.volumes.iter().enumerate() {
+        let is_volume_selected = is_focused
+            && matches!(volume_selection, Some(VolumeSelection::Volume(i)) if *i == vol_idx);
+        let bg = if is_volume_selected {
             Color::Indexed(236)
         } else {
             Color::Reset
         };
 
+        let is_expanded = expanded_volumes.contains(&vol.id);
+        let has_snapshots = !vol.snapshots.is_empty();
+
+        // Expand/collapse indicator
+        let expand_indicator = if has_snapshots {
+            if is_expanded { "▼" } else { "▶" }
+        } else {
+            " "
+        };
+
         let created = vol.created_at.split('T').next().unwrap_or(&vol.created_at);
+        let short_id = format!("{}\u{2026}", &vol.id[..8]);
+
+        if is_volume_selected {
+            selected_row = Some(rows.len());
+        }
 
         rows.push(Row::new(vec![
             Cell::from(Span::styled(
+                expand_indicator,
+                Style::default().fg(Color::DarkGray).bg(bg),
+            )),
+            Cell::from(Span::styled(
+                short_id,
+                Style::default().fg(Color::DarkGray).bg(bg),
+            )),
+            Cell::from(Span::styled(
                 vol.name.clone(),
                 Style::default()
-                    .fg(if is_selected {
+                    .fg(if is_volume_selected {
                         Color::White
                     } else {
                         Color::Reset
@@ -293,77 +348,65 @@ fn draw_volumes_table(
                 Style::default().fg(Color::DarkGray).bg(bg),
             )),
             Cell::from(Span::styled(
-                "-",
-                Style::default().fg(Color::DarkGray).bg(bg),
-            )),
-            Cell::from(Span::styled(
                 created.to_string(),
                 Style::default().fg(Color::DarkGray).bg(bg),
             )),
         ]));
-    }
 
-    // Add active import jobs
-    for job in &storage.import_jobs {
-        let state = ImportJobState::try_from(job.state).unwrap_or(ImportJobState::Unspecified);
-        if matches!(
-            state,
-            ImportJobState::Pending
-                | ImportJobState::Downloading
-                | ImportJobState::Converting
-                | ImportJobState::Writing
-        ) {
-            let progress = if job.total_bytes > 0 {
-                (job.bytes_written as f64 / job.total_bytes as f64 * 100.0) as u64
-            } else {
-                0
-            };
+        // Add snapshot rows if expanded
+        if is_expanded {
+            for (snap_idx, snap) in vol.snapshots.iter().enumerate() {
+                let is_snap_selected = is_focused
+                    && matches!(volume_selection, Some(VolumeSelection::Snapshot(vi, si)) if *vi == vol_idx && *si == snap_idx);
+                let snap_bg = if is_snap_selected {
+                    Color::Indexed(236)
+                } else {
+                    Color::Reset
+                };
 
-            let state_str = match state {
-                ImportJobState::Pending => "pending",
-                ImportJobState::Downloading => "download",
-                ImportJobState::Converting => "convert",
-                ImportJobState::Writing => "writing",
-                _ => "...",
-            };
+                if is_snap_selected {
+                    selected_row = Some(rows.len());
+                }
 
-            // Progress bar
-            let bar_width = 10;
-            let filled = (progress as usize * bar_width / 100).min(bar_width);
-            let empty = bar_width - filled;
-            let progress_bar = format!(
-                "[{}{}] {}%",
-                "\u{2588}".repeat(filled),
-                "\u{2591}".repeat(empty),
-                progress
-            );
-
-            rows.push(Row::new(vec![
-                Cell::from(Span::styled(
-                    format!("[{}] {}", state_str, job.template_name),
-                    Style::default().fg(Color::Yellow),
-                )),
-                Cell::from(Span::styled(
-                    format_size(job.total_bytes),
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Cell::from(Span::styled(progress_bar, Style::default().fg(Color::Cyan))),
-                Cell::from(Span::styled(
-                    truncate_source(&job.source),
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Cell::from(Span::styled("-", Style::default().fg(Color::DarkGray))),
-            ]));
+                rows.push(Row::new(vec![
+                    Cell::from(Span::styled("", Style::default().bg(snap_bg))),
+                    Cell::from(Span::styled("", Style::default().bg(snap_bg))),
+                    Cell::from(Span::styled(
+                        format!("  └─ @{}", snap.name),
+                        Style::default()
+                            .fg(if is_snap_selected {
+                                Color::White
+                            } else {
+                                Color::DarkGray
+                            })
+                            .bg(snap_bg),
+                    )),
+                    Cell::from(Span::styled("", Style::default().bg(snap_bg))),
+                    Cell::from(Span::styled(
+                        format_size(snap.used_bytes),
+                        Style::default().fg(Color::DarkGray).bg(snap_bg),
+                    )),
+                    Cell::from(Span::styled(
+                        snap.created_at.split('T').next().unwrap_or("-"),
+                        Style::default().fg(Color::DarkGray).bg(snap_bg),
+                    )),
+                ]));
+            }
         }
     }
+
+    // Set up display state for the table
+    let mut display_state = TableState::default();
+    display_state.select(selected_row);
 
     let table = Table::new(
         rows,
         [
+            Constraint::Length(2),
+            Constraint::Length(11),
             Constraint::Min(15),
             Constraint::Length(10),
-            Constraint::Length(20),
-            Constraint::Length(20),
+            Constraint::Length(10),
             Constraint::Length(12),
         ],
     )
@@ -376,7 +419,7 @@ fn draw_volumes_table(
     )
     .row_highlight_style(Style::default().bg(Color::Indexed(236)));
 
-    frame.render_stateful_widget(table, area, table_state);
+    frame.render_stateful_widget(table, area, &mut display_state);
 }
 
 fn draw_templates_table(
@@ -393,63 +436,101 @@ fn draw_templates_table(
     };
 
     let header = Row::new(vec![
+        Cell::from("ID").style(Style::default().fg(Color::Cyan)),
         Cell::from("NAME").style(Style::default().fg(Color::Cyan)),
         Cell::from("SIZE").style(Style::default().fg(Color::Cyan)),
-        Cell::from("CLONES").style(Style::default().fg(Color::Cyan)),
-        Cell::from("CREATED").style(Style::default().fg(Color::Cyan)),
+        Cell::from("STATUS").style(Style::default().fg(Color::Cyan)),
     ])
     .style(Style::default().bold())
     .bottom_margin(1);
 
     let selected_idx = table_state.selected();
-    let rows: Vec<Row> = storage
-        .templates
-        .iter()
-        .enumerate()
-        .map(|(idx, tpl)| {
-            let is_selected = is_focused && selected_idx == Some(idx);
-            let bg = if is_selected {
-                Color::Indexed(236)
-            } else {
-                Color::Reset
+    let mut rows: Vec<Row> = Vec::new();
+
+    // Add active import jobs first
+    for job in &storage.import_jobs {
+        let state = ImportJobState::try_from(job.state).unwrap_or(ImportJobState::Unspecified);
+        if matches!(
+            state,
+            ImportJobState::Pending
+                | ImportJobState::Downloading
+                | ImportJobState::Converting
+                | ImportJobState::Writing
+        ) {
+            let status_str = match state {
+                ImportJobState::Pending => "pending",
+                ImportJobState::Downloading => "downloading",
+                ImportJobState::Converting => "converting",
+                ImportJobState::Writing => "writing",
+                _ => "...",
             };
 
-            let created = tpl.created_at.split('T').next().unwrap_or(&tpl.created_at);
+            let short_id = format!("{}\u{2026}", &job.id[..8]);
 
-            Row::new(vec![
+            rows.push(Row::new(vec![
+                Cell::from(Span::styled(short_id, Style::default().fg(Color::DarkGray))),
                 Cell::from(Span::styled(
-                    tpl.name.clone(),
-                    Style::default()
-                        .fg(if is_selected {
-                            Color::White
-                        } else {
-                            Color::Reset
-                        })
-                        .bg(bg),
+                    job.template_name.clone(),
+                    Style::default().fg(Color::Yellow),
                 )),
                 Cell::from(Span::styled(
-                    format_size(tpl.size_bytes),
-                    Style::default().fg(Color::DarkGray).bg(bg),
+                    if job.total_bytes > 0 {
+                        format_size(job.total_bytes)
+                    } else {
+                        "-".to_string()
+                    },
+                    Style::default().fg(Color::DarkGray),
                 )),
-                Cell::from(Span::styled(
-                    tpl.clone_count.to_string(),
-                    Style::default().fg(Color::DarkGray).bg(bg),
-                )),
-                Cell::from(Span::styled(
-                    created.to_string(),
-                    Style::default().fg(Color::DarkGray).bg(bg),
-                )),
-            ])
-        })
-        .collect();
+                Cell::from(Span::styled(status_str, Style::default().fg(Color::Yellow))),
+            ]));
+        }
+    }
+
+    // Add existing templates
+    let import_count = rows.len();
+    for (idx, tpl) in storage.templates.iter().enumerate() {
+        let is_selected = is_focused && selected_idx == Some(idx + import_count);
+        let bg = if is_selected {
+            Color::Indexed(236)
+        } else {
+            Color::Reset
+        };
+
+        let short_id = format!("{}\u{2026}", &tpl.id[..8]);
+
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(
+                short_id,
+                Style::default().fg(Color::DarkGray).bg(bg),
+            )),
+            Cell::from(Span::styled(
+                tpl.name.clone(),
+                Style::default()
+                    .fg(if is_selected {
+                        Color::White
+                    } else {
+                        Color::Reset
+                    })
+                    .bg(bg),
+            )),
+            Cell::from(Span::styled(
+                format_size(tpl.size_bytes),
+                Style::default().fg(Color::DarkGray).bg(bg),
+            )),
+            Cell::from(Span::styled(
+                "ready",
+                Style::default().fg(Color::Green).bg(bg),
+            )),
+        ]));
+    }
 
     let table = Table::new(
         rows,
         [
-            Constraint::Min(20),
+            Constraint::Length(11),
+            Constraint::Min(15),
             Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(12),
+            Constraint::Length(16),
         ],
     )
     .header(header)
@@ -462,12 +543,4 @@ fn draw_templates_table(
     .row_highlight_style(Style::default().bg(Color::Indexed(236)));
 
     frame.render_stateful_widget(table, area, table_state);
-}
-
-fn truncate_source(source: &str) -> String {
-    if source.len() > 18 {
-        format!("{}...", &source[..15])
-    } else {
-        source.to_string()
-    }
 }

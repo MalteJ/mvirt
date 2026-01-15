@@ -86,29 +86,17 @@ impl VolumeCloneModal {
     }
 }
 
-/// Parse size string like "10G", "1T", "500M" to bytes
+/// Parse size string as GB to bytes
 fn parse_size(s: &str) -> Result<u64, String> {
-    let s = s.trim().to_uppercase();
+    let s = s.trim();
     if s.is_empty() {
         return Err("Size cannot be empty".to_string());
     }
 
-    let (num_str, multiplier) = if s.ends_with('T') {
-        (&s[..s.len() - 1], 1024u64 * 1024 * 1024 * 1024)
-    } else if s.ends_with('G') {
-        (&s[..s.len() - 1], 1024u64 * 1024 * 1024)
-    } else if s.ends_with('M') {
-        (&s[..s.len() - 1], 1024u64 * 1024)
-    } else {
-        // Assume bytes if no suffix
-        (s.as_str(), 1u64)
-    };
+    let num: u64 = s.parse().map_err(|_| format!("Invalid number: {}", s))?;
 
-    let num: f64 = num_str
-        .parse()
-        .map_err(|_| format!("Invalid number: {}", num_str))?;
-
-    Ok((num * multiplier as f64) as u64)
+    const GB: u64 = 1024 * 1024 * 1024;
+    Ok(num * GB)
 }
 
 fn format_size(bytes: u64) -> String {
@@ -177,20 +165,18 @@ pub fn draw(frame: &mut Frame, modal: &VolumeCloneModal) {
     } else {
         Style::default().fg(Color::White)
     };
-    let size_display = if modal.size_input.is_empty() {
-        format_size(modal.template_size_bytes)
-    } else {
-        modal.size_input.clone()
-    };
     let size_line = Line::from(vec![
         Span::styled(" Size: ", Style::default().fg(Color::Cyan)),
-        Span::styled(&size_display, size_style),
+        Span::styled(&modal.size_input, size_style),
         if modal.focused_field == 1 {
             Span::styled("_", Style::default().fg(Color::Yellow))
         } else {
             Span::raw("")
         },
-        Span::styled(" (e.g. 10G, 1T)", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" GB (min: {})", format_size(modal.template_size_bytes)),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]);
     frame.render_widget(Paragraph::new(size_line), chunks[2]);
 

@@ -34,6 +34,17 @@ impl VolumeTemplateModal {
         }
     }
 
+    /// Create modal with snapshot already selected, focus on template name
+    pub fn new_for_snapshot(volume_name: String, snapshot_name: String) -> Self {
+        let template_name = format!("{}-template", snapshot_name);
+        Self {
+            volume_name,
+            snapshot_name,
+            template_name,
+            focused_field: 1, // Focus on template name field
+        }
+    }
+
     pub fn field_count() -> usize {
         3 // snapshot name, template name, submit
     }

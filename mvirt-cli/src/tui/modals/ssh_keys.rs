@@ -16,6 +16,13 @@ impl SshKeysModal {
         }
     }
 
+    pub fn with_config(config: SshKeysConfig) -> Self {
+        Self {
+            config,
+            focused_field: 0,
+        }
+    }
+
     pub fn field_count(&self) -> usize {
         6
     }
@@ -214,34 +221,43 @@ pub fn draw(frame: &mut Frame, modal: &SshKeysModal) {
     // Root password field
     let password_focused = modal.focused_field == 3;
     let cursor = if password_focused { "\u{258c}" } else { "" };
-    let password_display = if modal.config.root_password.is_empty() {
-        "(none)".to_string()
+    let password_line = if modal.config.root_password.is_empty() {
+        Line::from(vec![
+            Span::styled(
+                " Root Pass:  ",
+                if password_focused {
+                    label_focused
+                } else {
+                    label_normal
+                },
+            ),
+            if password_focused {
+                Span::styled(cursor, value_focused)
+            } else {
+                Span::styled("optional", Style::default().fg(Color::DarkGray))
+            },
+        ])
     } else {
-        "*".repeat(modal.config.root_password.len())
+        let password_display = "*".repeat(modal.config.root_password.len());
+        Line::from(vec![
+            Span::styled(
+                " Root Pass:  ",
+                if password_focused {
+                    label_focused
+                } else {
+                    label_normal
+                },
+            ),
+            Span::styled(
+                format!("{}{}", password_display, cursor),
+                if password_focused {
+                    value_focused
+                } else {
+                    value_normal
+                },
+            ),
+        ])
     };
-    let password_line = Line::from(vec![
-        Span::styled(
-            " Root Pass:  ",
-            if password_focused {
-                label_focused
-            } else {
-                label_normal
-            },
-        ),
-        Span::styled(
-            format!("{}{}", password_display, cursor),
-            if password_focused {
-                value_focused
-            } else {
-                value_normal
-            },
-        ),
-        if !password_focused && modal.config.root_password.is_empty() {
-            Span::styled(" (optional)", Style::default().fg(Color::DarkGray))
-        } else {
-            Span::raw("")
-        },
-    ]);
     frame.render_widget(Paragraph::new(password_line), field_chunks[4]);
 
     // Buttons
@@ -262,7 +278,7 @@ pub fn draw(frame: &mut Frame, modal: &SshKeysModal) {
     };
 
     frame.render_widget(
-        Paragraph::new(Span::styled("  \u{25b6} Add  ", add_style))
+        Paragraph::new(Span::styled("  \u{25b6} OK  ", add_style))
             .alignment(ratatui::prelude::Alignment::Center),
         button_chunks[0],
     );

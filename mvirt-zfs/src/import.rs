@@ -221,7 +221,7 @@ impl ImportManager {
             let _ = tx.send(());
             // Update job state in database
             self.store
-                .update_import_job(job_id, "cancelled", 0, None)
+                .update_import_job(job_id, "cancelled", 0, None, None)
                 .await?;
             info!(job_id = %job_id, "Import job cancelled");
             return Ok(true);
@@ -289,7 +289,7 @@ impl ImportManager {
 
             // Update job state to failed
             if let Err(db_err) = store
-                .update_import_job(job_id, "failed", 0, Some(&error_msg))
+                .update_import_job(job_id, "failed", 0, None, Some(&error_msg))
                 .await
             {
                 error!(
@@ -382,7 +382,9 @@ impl ImportManager {
         cancel_rx: &mut oneshot::Receiver<()>,
     ) -> Result<()> {
         // Update state to writing
-        store.update_import_job(job_id, "writing", 0, None).await?;
+        store
+            .update_import_job(job_id, "writing", 0, None, None)
+            .await?;
 
         // Get file size
         let metadata = tokio::fs::metadata(path)
@@ -416,7 +418,7 @@ impl ImportManager {
                 // Clean up: delete the base ZVOL
                 let _ = zfs.delete_base_zvol(template_id).await;
                 store
-                    .update_import_job(job_id, "cancelled", bytes_written, None)
+                    .update_import_job(job_id, "cancelled", bytes_written, None, None)
                     .await?;
                 return Ok(());
             }
@@ -432,7 +434,7 @@ impl ImportManager {
             // Update progress every second
             if last_update.elapsed().as_secs() >= 1 {
                 store
-                    .update_import_job(job_id, "writing", bytes_written, None)
+                    .update_import_job(job_id, "writing", bytes_written, None, None)
                     .await?;
                 last_update = std::time::Instant::now();
             }
@@ -445,7 +447,7 @@ impl ImportManager {
         let snapshot_path = zfs.create_template_snapshot(template_id).await?;
 
         // Store template in database
-        let template_entry = TemplateEntry::new(
+        let template_entry = TemplateEntry::new_from_import(
             template_id.to_string(),
             template_name.to_string(),
             zfs.base_zvol_path(template_id),
@@ -456,7 +458,7 @@ impl ImportManager {
 
         // Mark completed
         store
-            .update_import_job(job_id, "completed", bytes_written, None)
+            .update_import_job(job_id, "completed", bytes_written, None, None)
             .await?;
 
         info!(
@@ -484,7 +486,7 @@ impl ImportManager {
 
         // Update state to converting
         store
-            .update_import_job(job_id, "converting", 0, None)
+            .update_import_job(job_id, "converting", 0, None, None)
             .await?;
 
         // Get virtual size from qcow2 using qemu-img info
@@ -516,7 +518,9 @@ impl ImportManager {
         let device_path = zfs.create_base_zvol(template_id, virtual_size).await?;
 
         // Update state to writing
-        store.update_import_job(job_id, "writing", 0, None).await?;
+        store
+            .update_import_job(job_id, "writing", 0, None, None)
+            .await?;
 
         // Convert qcow2 to raw directly to base ZVOL using qemu-img convert
         info!(
@@ -550,7 +554,7 @@ impl ImportManager {
         let snapshot_path = zfs.create_template_snapshot(template_id).await?;
 
         // Store template in database
-        let template_entry = TemplateEntry::new(
+        let template_entry = TemplateEntry::new_from_import(
             template_id.to_string(),
             template_name.to_string(),
             zfs.base_zvol_path(template_id),
@@ -561,7 +565,7 @@ impl ImportManager {
 
         // Mark completed
         store
-            .update_import_job(job_id, "completed", virtual_size, None)
+            .update_import_job(job_id, "completed", virtual_size, None, None)
             .await?;
 
         info!(
@@ -593,7 +597,7 @@ impl ImportManager {
 
         // Update state to downloading
         store
-            .update_import_job(job_id, "downloading", 0, None)
+            .update_import_job(job_id, "downloading", 0, None, None)
             .await?;
 
         // Create temp directory and file
@@ -632,7 +636,7 @@ impl ImportManager {
             if cancel_rx.try_recv().is_ok() {
                 let _ = tokio::fs::remove_file(&tmp_file).await;
                 store
-                    .update_import_job(job_id, "cancelled", bytes_downloaded, None)
+                    .update_import_job(job_id, "cancelled", bytes_downloaded, None, None)
                     .await?;
                 return Ok(());
             }
@@ -650,7 +654,13 @@ impl ImportManager {
 
             if last_update.elapsed().as_secs() >= 1 {
                 store
-                    .update_import_job(job_id, "downloading", bytes_downloaded, None)
+                    .update_import_job(
+                        job_id,
+                        "downloading",
+                        bytes_downloaded,
+                        content_length,
+                        None,
+                    )
                     .await?;
                 last_update = std::time::Instant::now();
             }
@@ -687,7 +697,9 @@ impl ImportManager {
                 // For raw, copy temp file to ZVOL
                 let file_size = size_bytes.or(content_length).unwrap_or(bytes_downloaded);
 
-                store.update_import_job(job_id, "writing", 0, None).await?;
+                store
+                    .update_import_job(job_id, "writing", 0, None, None)
+                    .await?;
 
                 let device_path = zfs.create_base_zvol(template_id, file_size).await?;
 
@@ -717,7 +729,7 @@ impl ImportManager {
 
                 let snapshot_path = zfs.create_template_snapshot(template_id).await?;
 
-                let template_entry = TemplateEntry::new(
+                let template_entry = TemplateEntry::new_from_import(
                     template_id.to_string(),
                     template_name.to_string(),
                     zfs.base_zvol_path(template_id),
@@ -727,7 +739,7 @@ impl ImportManager {
                 store.create_template(&template_entry).await?;
 
                 store
-                    .update_import_job(job_id, "completed", bytes_written, None)
+                    .update_import_job(job_id, "completed", bytes_written, None, None)
                     .await?;
 
                 info!(
