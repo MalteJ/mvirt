@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
 use mvirt_net::audit::create_audit_logger;
@@ -33,13 +33,16 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("mvirt_net=info".parse()?))
-        .init();
+    // Use RUST_LOG if set, otherwise default to info for mvirt_net
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mvirt_net=info"));
+
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     let args = Args::parse();
 
     info!("Initializing mvirt-net");
+    debug!("DEBUG logging enabled");
 
     // Ensure directories exist
     tokio::fs::create_dir_all(&args.socket_dir).await?;

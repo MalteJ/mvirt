@@ -4,7 +4,7 @@
 //! implementation rather than a mock, ensuring integration tests exercise
 //! the real code paths.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +20,10 @@ use vm_memory::GuestMemoryAtomic;
 
 // Import real mvirt-net types
 use mvirt_net::config::NicEntry;
-use mvirt_net::dataplane::{ArpResponder, Dhcpv4Server, IcmpResponder, VhostNetBackend};
+use mvirt_net::dataplane::{
+    ArpResponder, Dhcpv4Server, Dhcpv6Server, IcmpResponder, Icmpv6Responder, NdpResponder,
+    VhostNetBackend,
+};
 
 use super::VhostTestClient;
 
@@ -49,6 +52,13 @@ impl TestBackend {
     /// If `ipv4` is provided, the backend will respond to ARP and DHCP requests
     /// using the real ArpResponder and Dhcpv4Server implementations.
     pub fn new(mac: &str, ipv4: Option<&str>) -> Self {
+        Self::new_with_ipv6(mac, ipv4, None)
+    }
+
+    /// Create a new test backend with IPv4 and IPv6 support.
+    ///
+    /// If `ipv6` is provided, the backend will respond to NDP and DHCPv6 requests.
+    pub fn new_with_ipv6(mac: &str, ipv4: Option<&str>, ipv6: Option<&str>) -> Self {
         let tmp_dir = TempDir::new().expect("Failed to create temp dir");
         let socket_path = tmp_dir.path().join("test.sock");
         let socket_str = socket_path.to_string_lossy().to_string();
@@ -57,9 +67,16 @@ impl TestBackend {
 
         let mac_str = mac.to_string();
         let ipv4_str = ipv4.map(|s| s.to_string());
+        let ipv6_str = ipv6.map(|s| s.to_string());
 
         let thread = thread::spawn(move || {
-            run_test_backend(&socket_str, &mac_str, ipv4_str.as_deref(), shutdown_clone);
+            run_test_backend(
+                &socket_str,
+                &mac_str,
+                ipv4_str.as_deref(),
+                ipv6_str.as_deref(),
+                shutdown_clone,
+            );
         });
 
         // Wait for socket to appear
@@ -103,7 +120,13 @@ fn parse_mac(mac: &str) -> Option<[u8; 6]> {
     Some(bytes)
 }
 
-fn run_test_backend(socket_path: &str, mac: &str, ipv4: Option<&str>, shutdown: Arc<AtomicBool>) {
+fn run_test_backend(
+    socket_path: &str,
+    mac: &str,
+    ipv4: Option<&str>,
+    ipv6: Option<&str>,
+    shutdown: Arc<AtomicBool>,
+) {
     // Create NIC entry for the real VhostNetBackend
     let nic = NicEntry {
         id: "test-nic".to_string(),
@@ -111,7 +134,7 @@ fn run_test_backend(socket_path: &str, mac: &str, ipv4: Option<&str>, shutdown: 
         network_id: "test-network".to_string(),
         mac_address: mac.to_string(),
         ipv4_address: ipv4.map(|s| s.to_string()),
-        ipv6_address: None,
+        ipv6_address: ipv6.map(|s| s.to_string()),
         socket_path: socket_path.to_string(),
         routed_ipv4_prefixes: vec![],
         routed_ipv6_prefixes: vec![],
@@ -126,10 +149,12 @@ fn run_test_backend(socket_path: &str, mac: &str, ipv4: Option<&str>, shutdown: 
             .expect("Failed to create VhostNetBackend"),
     );
 
-    // Set up packet handler using real ArpResponder, IcmpResponder, and Dhcpv4Server
+    // Set up packet handler using real protocol handlers
     let mac_bytes = parse_mac(mac).expect("Invalid MAC");
-    let ipv4_addr: Option<Ipv4Addr> = ipv4.map(|s| s.parse().expect("Invalid IP"));
+    let ipv4_addr: Option<Ipv4Addr> = ipv4.map(|s| s.parse().expect("Invalid IPv4"));
+    let ipv6_addr: Option<Ipv6Addr> = ipv6.map(|s| s.parse().expect("Invalid IPv6"));
 
+    // IPv4 handlers
     let arp_responder = ArpResponder::new(mac_bytes);
     let icmp_responder = IcmpResponder::new();
     let dhcpv4_server = ipv4_addr.map(|ip| {
@@ -138,22 +163,51 @@ fn run_test_backend(socket_path: &str, mac: &str, ipv4: Option<&str>, shutdown: 
         server
     });
 
+    // IPv6 handlers
+    let ndp_responder = NdpResponder::new(mac_bytes);
+    let icmpv6_responder = Icmpv6Responder::new();
+    let dhcpv6_server = ipv6_addr.map(|ip| {
+        let mut server = Dhcpv6Server::new(ip);
+        server.set_dns_servers(vec![
+            Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111), // Cloudflare
+            Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888), // Google
+        ]);
+        server
+    });
+
     backend.set_packet_handler(Box::new(move |packet| {
-        // Try ARP first
+        // Try ARP first (IPv4)
         if let Some(reply) = arp_responder.process(packet) {
             return Some(reply);
         }
 
-        // Try ICMP (ping to gateway)
+        // Try ICMP (ping to gateway, IPv4)
         if let Some(reply) = icmp_responder.process(packet) {
             return Some(reply);
         }
 
-        // Try DHCP
-        if let Some(ref server) = dhcpv4_server {
-            if let Some(reply) = server.process(packet, mac_bytes) {
-                return Some(reply);
-            }
+        // Try DHCPv4
+        if let Some(ref server) = dhcpv4_server
+            && let Some(reply) = server.process(packet, mac_bytes)
+        {
+            return Some(reply);
+        }
+
+        // Try NDP (IPv6)
+        if let Some(reply) = ndp_responder.process(packet) {
+            return Some(reply);
+        }
+
+        // Try ICMPv6 (ping to gateway)
+        if let Some(reply) = icmpv6_responder.process(packet) {
+            return Some(reply);
+        }
+
+        // Try DHCPv6
+        if let Some(ref server) = dhcpv6_server
+            && let Some(reply) = server.process(packet, mac_bytes)
+        {
+            return Some(reply);
         }
 
         None

@@ -259,9 +259,8 @@ fn test_tx_rapid_fire() {
     let mut completed = 0u32;
 
     while completed < 100 && start.elapsed() < timeout {
-        match client.wait_tx_completion(100) {
-            Ok(n) => completed += n,
-            Err(_) => {} // Timeout on this poll, continue
+        if let Ok(n) = client.wait_tx_completion(100) {
+            completed += n; // Timeout on this poll is expected, continue
         }
     }
 
@@ -472,4 +471,285 @@ fn test_dhcp_full_flow() {
 
     // Lease time (24 hours = 86400 seconds)
     assert_eq!(ack.lease_time, Some(86400));
+}
+
+// ============================================================================
+// NDP Tests (IPv6 Neighbor Discovery)
+// ============================================================================
+
+use harness::packets::{
+    Dhcpv6MsgType, GATEWAY_IPV6, dhcpv6_request, dhcpv6_solicit, icmpv6_echo_request,
+    neighbor_solicitation, parse_dhcpv6_response, parse_icmpv6_echo_reply,
+    parse_neighbor_advertisement, parse_router_advertisement, router_solicitation,
+};
+
+#[test]
+fn test_ndp_neighbor_solicitation_gets_advertisement() {
+    let backend =
+        TestBackend::new_with_ipv6("52:54:00:12:34:56", Some("10.0.0.5"), Some("fd00::5"));
+
+    let mut client = backend.connect().expect("connect failed");
+
+    // VM's link-local address (derived from MAC using EUI-64)
+    let vm_link_local = [
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x50, 0x54, 0x00, 0xff, 0xfe, 0x12, 0x34, 0x56,
+    ];
+
+    // Send NS for gateway (fe80::1)
+    let ns = neighbor_solicitation(
+        [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+        vm_link_local,
+        GATEWAY_IPV6,
+    );
+
+    client.send_packet(&ns).expect("NS send failed");
+
+    let reply = client.recv_packet(2000);
+    assert!(
+        reply.is_ok(),
+        "Should receive Neighbor Advertisement: {:?}",
+        reply.err()
+    );
+
+    let na = parse_neighbor_advertisement(&reply.unwrap()).expect("parse NA failed");
+    assert_eq!(na.target_ip, GATEWAY_IPV6, "NA should be for gateway");
+    assert_eq!(na.target_mac, GATEWAY_MAC, "Gateway MAC should match");
+    assert!(na.router, "Gateway should have ROUTER flag");
+    assert!(na.solicited, "NA should have SOLICITED flag");
+}
+
+#[test]
+fn test_ndp_router_solicitation_gets_advertisement() {
+    let backend =
+        TestBackend::new_with_ipv6("52:54:00:12:34:56", Some("10.0.0.5"), Some("fd00::5"));
+
+    let mut client = backend.connect().expect("connect failed");
+
+    // VM's link-local address
+    let vm_link_local = [
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x50, 0x54, 0x00, 0xff, 0xfe, 0x12, 0x34, 0x56,
+    ];
+
+    // Send RS
+    let rs = router_solicitation([0x52, 0x54, 0x00, 0x12, 0x34, 0x56], vm_link_local);
+
+    client.send_packet(&rs).expect("RS send failed");
+
+    let reply = client.recv_packet(2000);
+    assert!(
+        reply.is_ok(),
+        "Should receive Router Advertisement: {:?}",
+        reply.err()
+    );
+
+    let ra = parse_router_advertisement(&reply.unwrap()).expect("parse RA failed");
+    assert_eq!(ra.src_ip, GATEWAY_IPV6, "RA should come from gateway");
+    assert_eq!(ra.src_mac, GATEWAY_MAC, "Gateway MAC should match");
+    assert!(ra.managed, "RA should have M flag (managed via DHCPv6)");
+    assert!(ra.other_config, "RA should have O flag");
+    assert!(ra.router_lifetime > 0, "Router lifetime should be > 0");
+}
+
+// ============================================================================
+// DHCPv6 Tests
+// ============================================================================
+
+#[test]
+fn test_dhcpv6_solicit_gets_advertise() {
+    let backend =
+        TestBackend::new_with_ipv6("52:54:00:12:34:56", Some("10.0.0.5"), Some("fd00::5"));
+
+    let mut client = backend.connect().expect("connect failed");
+
+    // VM's link-local address
+    let vm_link_local = [
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x50, 0x54, 0x00, 0xff, 0xfe, 0x12, 0x34, 0x56,
+    ];
+
+    let xid = [0x12, 0x34, 0x56];
+    let iaid = 0xDEADBEEF_u32; // Use non-trivial IAID to verify echoing
+    let solicit = dhcpv6_solicit(
+        [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+        vm_link_local,
+        xid,
+        iaid,
+    );
+
+    client.send_packet(&solicit).expect("SOLICIT send failed");
+
+    let reply = client.recv_packet(2000);
+    assert!(
+        reply.is_ok(),
+        "Should receive DHCPv6 ADVERTISE: {:?}",
+        reply.err()
+    );
+
+    let advertise = parse_dhcpv6_response(&reply.unwrap()).expect("parse ADVERTISE failed");
+    assert_eq!(advertise.message_type, Dhcpv6MsgType::Advertise);
+    assert_eq!(advertise.xid, xid);
+
+    // IAID should be echoed back
+    assert_eq!(
+        advertise.iaid,
+        Some(iaid),
+        "IAID should be echoed from client request"
+    );
+
+    // Should offer fd00::5
+    let expected_ip = [0xfd, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05];
+    assert_eq!(
+        advertise.assigned_ip,
+        Some(expected_ip),
+        "Should offer configured IPv6 address"
+    );
+
+    // Server DUID should be present
+    assert!(
+        !advertise.server_duid.is_empty(),
+        "Server DUID should be present"
+    );
+}
+
+#[test]
+fn test_dhcpv6_full_flow() {
+    let backend =
+        TestBackend::new_with_ipv6("52:54:00:12:34:56", Some("10.0.0.5"), Some("fd00::5"));
+
+    let mut client = backend.connect().expect("connect failed");
+
+    let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+    let vm_link_local = [
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x50, 0x54, 0x00, 0xff, 0xfe, 0x12, 0x34, 0x56,
+    ];
+    let xid = [0xde, 0xad, 0xbe];
+    let iaid = 0xCAFEBABE_u32; // Use non-trivial IAID to verify echoing
+
+    // 1. SOLICIT -> ADVERTISE
+    let solicit = dhcpv6_solicit(mac, vm_link_local, xid, iaid);
+    client.send_packet(&solicit).expect("SOLICIT send failed");
+
+    let reply = client.recv_packet(2000).expect("no ADVERTISE received");
+    let advertise = parse_dhcpv6_response(&reply).expect("parse ADVERTISE failed");
+    assert_eq!(advertise.message_type, Dhcpv6MsgType::Advertise);
+    assert_eq!(advertise.xid, xid);
+    assert_eq!(
+        advertise.iaid,
+        Some(iaid),
+        "IAID should be echoed in ADVERTISE"
+    );
+
+    let server_duid = advertise.server_duid.clone();
+    let expected_ip = [0xfd, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05];
+    assert_eq!(advertise.assigned_ip, Some(expected_ip));
+
+    // 2. REQUEST -> REPLY
+    let request = dhcpv6_request(mac, vm_link_local, xid, server_duid, iaid);
+    client.send_packet(&request).expect("REQUEST send failed");
+
+    let reply = client.recv_packet(2000).expect("no REPLY received");
+    let ack = parse_dhcpv6_response(&reply).expect("parse REPLY failed");
+
+    assert_eq!(ack.message_type, Dhcpv6MsgType::Reply);
+    assert_eq!(ack.xid, xid);
+    assert_eq!(ack.iaid, Some(iaid), "IAID should be echoed in REPLY");
+    assert_eq!(ack.assigned_ip, Some(expected_ip));
+
+    // Check lifetimes
+    assert!(ack.preferred_lifetime.is_some());
+    assert!(ack.valid_lifetime.is_some());
+    assert!(ack.valid_lifetime.unwrap() >= ack.preferred_lifetime.unwrap());
+
+    // Check DNS servers
+    assert!(!ack.dns_servers.is_empty(), "Should have DNS servers");
+}
+
+// ============================================================================
+// ICMPv6 Tests (IPv6 Ping)
+// ============================================================================
+
+#[test]
+fn test_icmpv6_ping_gateway() {
+    let backend =
+        TestBackend::new_with_ipv6("52:54:00:12:34:56", Some("10.0.0.5"), Some("fd00::5"));
+
+    let mut client = backend.connect().expect("connect failed");
+
+    let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+    // First, resolve gateway MAC via NDP (like a real VM would)
+    let vm_link_local = [
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x50, 0x54, 0x00, 0xff, 0xfe, 0x12, 0x34, 0x56,
+    ];
+    let ns = neighbor_solicitation(mac, vm_link_local, GATEWAY_IPV6);
+    client.send_packet(&ns).expect("NS send failed");
+
+    let na_reply = client.recv_packet(2000).expect("NA expected");
+    let na = parse_neighbor_advertisement(&na_reply).expect("parse NA failed");
+    assert_eq!(na.target_mac, GATEWAY_MAC);
+
+    // Now send ICMPv6 echo request to gateway
+    let ping = icmpv6_echo_request(
+        mac,
+        GATEWAY_MAC,   // dst MAC (gateway)
+        vm_link_local, // src IP
+        GATEWAY_IPV6,  // dst IP (gateway)
+        0x1234,        // ident
+        1,             // seq_no
+        b"ipv6 ping",  // data
+    );
+
+    client.send_packet(&ping).expect("ICMPv6 send failed");
+
+    let reply = client.recv_packet(2000);
+    assert!(
+        reply.is_ok(),
+        "Should receive ICMPv6 echo reply: {:?}",
+        reply.err()
+    );
+
+    let icmp = parse_icmpv6_echo_reply(&reply.unwrap()).expect("parse ICMPv6 failed");
+    assert_eq!(icmp.src_ip, GATEWAY_IPV6, "Reply should come from gateway");
+    assert_eq!(
+        icmp.dst_ip, vm_link_local,
+        "Reply should be addressed to VM"
+    );
+    assert_eq!(icmp.ident, 0x1234, "Ident should match");
+    assert_eq!(icmp.seq_no, 1, "Seq should match");
+    assert_eq!(icmp.data, b"ipv6 ping", "Data should match");
+}
+
+#[test]
+fn test_icmpv6_ping_non_gateway_ignored() {
+    let backend =
+        TestBackend::new_with_ipv6("52:54:00:12:34:56", Some("10.0.0.5"), Some("fd00::5"));
+
+    let mut client = backend.connect().expect("connect failed");
+
+    let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+    let vm_link_local = [
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x50, 0x54, 0x00, 0xff, 0xfe, 0x12, 0x34, 0x56,
+    ];
+
+    // Send ICMPv6 echo request to non-gateway IP (should not get reply)
+    let non_gateway = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+    ];
+    let ping = icmpv6_echo_request(
+        mac,
+        [0x33, 0x33, 0xff, 0x00, 0x00, 0x01], // multicast MAC
+        vm_link_local,
+        non_gateway, // Not gateway
+        0x5678,
+        1,
+        b"test",
+    );
+
+    client.send_packet(&ping).expect("send failed");
+
+    // Should not receive a reply (use short timeout)
+    let reply = client.recv_packet(500);
+    assert!(
+        reply.is_err(),
+        "Should NOT receive ICMPv6 reply for non-gateway IP"
+    );
 }

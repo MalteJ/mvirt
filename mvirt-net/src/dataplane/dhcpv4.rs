@@ -43,7 +43,7 @@ impl Dhcpv4Server {
             assigned_ip,
             subnet_mask: Ipv4Addr::new(255, 255, 255, 255), // /32
             gateway: Ipv4Addr::new(169, 254, 0, 1),
-            dns_servers: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
+            dns_servers: Vec::new(),
             lease_time: 86400, // 24 hours
             server_id: Ipv4Addr::new(169, 254, 0, 1),
         }
@@ -98,12 +98,21 @@ impl Dhcpv4Server {
                 }
             })?;
 
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            client_mac[0],
+            client_mac[1],
+            client_mac[2],
+            client_mac[3],
+            client_mac[4],
+            client_mac[5]
+        );
+
         debug!(
             msg_type = ?msg_type,
-            client_mac = %format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                client_mac[0], client_mac[1], client_mac[2],
-                client_mac[3], client_mac[4], client_mac[5]),
-            "DHCP request received"
+            xid = %format!("{:08x}", dhcp_msg.xid()),
+            client_mac = %mac_str,
+            "DHCPv4 request received"
         );
 
         match msg_type {
@@ -115,7 +124,11 @@ impl Dhcpv4Server {
 
     /// Handle DHCPDISCOVER -> send DHCPOFFER
     fn handle_discover(&self, request: &Message, client_mac: [u8; 6]) -> Option<Vec<u8>> {
-        debug!(ip = %self.assigned_ip, "Sending DHCPOFFER");
+        debug!(
+            xid = %format!("{:08x}", request.xid()),
+            offered_ip = %self.assigned_ip,
+            "Sending DHCPv4 OFFER"
+        );
 
         let response = self.build_response(request, MessageType::Offer)?;
         Some(self.wrap_in_udp_ip_eth(response, client_mac))
@@ -131,7 +144,11 @@ impl Dhcpv4Server {
             return None; // Not for us
         }
 
-        debug!(ip = %self.assigned_ip, "Sending DHCPACK");
+        debug!(
+            xid = %format!("{:08x}", request.xid()),
+            assigned_ip = %self.assigned_ip,
+            "Sending DHCPv4 ACK"
+        );
 
         let response = self.build_response(request, MessageType::Ack)?;
         Some(self.wrap_in_udp_ip_eth(response, client_mac))

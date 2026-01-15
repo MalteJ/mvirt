@@ -27,6 +27,7 @@ use super::arp::ArpResponder;
 use super::dhcpv4::Dhcpv4Server;
 use super::dhcpv6::Dhcpv6Server;
 use super::icmp::IcmpResponder;
+use super::icmpv6::Icmpv6Responder;
 use super::ndp::NdpResponder;
 use super::router::Router;
 use super::vhost::VhostNetBackend;
@@ -152,6 +153,7 @@ struct PacketProcessor {
     mac: [u8; 6],
     arp: ArpResponder,
     icmp: IcmpResponder,
+    icmpv6: Icmpv6Responder,
     ndp: NdpResponder,
     dhcpv4: Option<Dhcpv4Server>,
     dhcpv6: Option<Dhcpv6Server>,
@@ -166,8 +168,11 @@ impl PacketProcessor {
         // Set up ARP responder
         let arp = ArpResponder::new(mac);
 
-        // Set up ICMP responder for gateway
+        // Set up ICMP responder for gateway (IPv4)
         let icmp = IcmpResponder::new();
+
+        // Set up ICMPv6 responder for gateway (IPv6)
+        let icmpv6 = Icmpv6Responder::new();
 
         // Set up NDP responder with prefix if IPv6 is enabled
         let mut ndp = NdpResponder::new(mac);
@@ -227,6 +232,7 @@ impl PacketProcessor {
             mac,
             arp,
             icmp,
+            icmpv6,
             ndp,
             dhcpv4,
             dhcpv6,
@@ -242,19 +248,21 @@ impl PacketProcessor {
 
         // Try ARP
         if let Some(reply) = self.arp.process(packet) {
-            debug!(nic_id = %self.nic_id, "Sent ARP reply");
             return Some(reply);
         }
 
-        // Try ICMP (ping to gateway)
+        // Try ICMP (ping to gateway, IPv4)
         if let Some(reply) = self.icmp.process(packet) {
-            debug!(nic_id = %self.nic_id, "Sent ICMP echo reply");
             return Some(reply);
         }
 
-        // Try NDP
+        // Try NDP (Neighbor Discovery, Router Advertisement)
         if let Some(reply) = self.ndp.process(packet) {
-            debug!(nic_id = %self.nic_id, "Sent NDP reply");
+            return Some(reply);
+        }
+
+        // Try ICMPv6 (ping to gateway, IPv6)
+        if let Some(reply) = self.icmpv6.process(packet) {
             return Some(reply);
         }
 
@@ -262,7 +270,6 @@ impl PacketProcessor {
         if let Some(ref dhcpv4) = self.dhcpv4
             && let Some(reply) = dhcpv4.process(packet, self.mac)
         {
-            debug!(nic_id = %self.nic_id, "Sent DHCPv4 reply");
             return Some(reply);
         }
 
@@ -270,7 +277,6 @@ impl PacketProcessor {
         if let Some(ref dhcpv6) = self.dhcpv6
             && let Some(reply) = dhcpv6.process(packet, self.mac)
         {
-            debug!(nic_id = %self.nic_id, "Sent DHCPv6 reply");
             return Some(reply);
         }
 
@@ -465,11 +471,17 @@ fn run_worker(
 
         // Wait for daemon to finish (VM disconnect)
         if let Err(e) = daemon.wait() {
-            // Disconnects are expected, only log real errors
-            error!(nic_id = %nic_id, error = %e, "Daemon error");
+            let err_str = e.to_string();
+            if err_str.contains("disconnected") {
+                // Normal VM shutdown - not an error
+                debug!(nic_id = %nic_id, "VM disconnected from vhost-user socket");
+            } else {
+                // Real error
+                error!(nic_id = %nic_id, error = %e, "Daemon error");
+            }
         }
 
-        info!(nic_id = %nic_id, "VM disconnected, waiting for new connection");
+        info!(nic_id = %nic_id, "Waiting for new VM connection");
         // listener is None now, will be recreated at top of loop
     }
 }

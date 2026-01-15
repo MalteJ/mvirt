@@ -7,7 +7,7 @@ use std::io;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
-use tracing::debug;
+use tracing::{debug, trace};
 use vhost::vhost_user::message::VhostUserProtocolFeatures;
 use vhost_user_backend::{VhostUserBackend, VringRwLock, VringT};
 use virtio_queue::QueueT;
@@ -322,7 +322,7 @@ impl VhostUserBackend for VhostNetBackend {
         vrings: &[Self::Vring],
         _thread_id: usize,
     ) -> io::Result<()> {
-        debug!(device_event, ?evset, "Handling vring event");
+        trace!(device_event, ?evset, "Handling vring event");
         if evset != EventSet::IN {
             return Ok(());
         }

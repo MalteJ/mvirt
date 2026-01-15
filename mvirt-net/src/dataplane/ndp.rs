@@ -70,10 +70,11 @@ impl NdpResponder {
 
         let icmpv6 = Icmpv6Packet::new_checked(ipv6.payload()).ok()?;
         let src_addr = ipv6.src_addr();
+        let dst_addr = ipv6.dst_addr();
 
         match icmpv6.msg_type() {
             Icmpv6Message::NeighborSolicit => {
-                self.handle_neighbor_solicitation(&icmpv6, src_addr, frame.src_addr())
+                self.handle_neighbor_solicitation(&icmpv6, src_addr, dst_addr, frame.src_addr())
             }
             Icmpv6Message::RouterSolicit => self.handle_router_solicitation(src_addr),
             _ => None,
@@ -85,11 +86,12 @@ impl NdpResponder {
         &self,
         icmpv6: &Icmpv6Packet<&[u8]>,
         src_addr: Ipv6Address,
+        dst_addr: Ipv6Address,
         src_mac: EthernetAddress,
     ) -> Option<Vec<u8>> {
         let icmp_repr = Icmpv6Repr::parse(
             &IpAddress::Ipv6(src_addr),
-            &IpAddress::Ipv6(GATEWAY_IPV6),
+            &IpAddress::Ipv6(dst_addr),
             icmpv6,
             &smoltcp::phy::ChecksumCapabilities::default(),
         )
@@ -99,10 +101,18 @@ impl NdpResponder {
             // Only respond if asking for gateway
             if target_addr == GATEWAY_IPV6 {
                 debug!(
-                    target = %target_addr,
-                    source = %src_addr,
-                    "Neighbor Solicitation for gateway, sending NA"
+                    target_ip = %target_addr,
+                    source_ip = %src_addr,
+                    source_mac = %src_mac,
+                    "NDP Neighbor Solicitation received"
                 );
+
+                debug!(
+                    target_ip = %target_addr,
+                    target_mac = %EthernetAddress::from_bytes(&GATEWAY_MAC),
+                    "Sending NDP Neighbor Advertisement"
+                );
+
                 return Some(self.build_neighbor_advertisement(src_addr, src_mac));
             }
         }
@@ -164,7 +174,15 @@ impl NdpResponder {
 
     /// Handle Router Solicitation
     fn handle_router_solicitation(&self, src_addr: Ipv6Address) -> Option<Vec<u8>> {
-        debug!(source = %src_addr, "Router Solicitation received, sending RA");
+        debug!(source_ip = %src_addr, "NDP Router Solicitation received");
+
+        debug!(
+            router_ip = %GATEWAY_IPV6,
+            router_mac = %EthernetAddress::from_bytes(&GATEWAY_MAC),
+            prefix = ?self.prefix,
+            "Sending NDP Router Advertisement"
+        );
+
         Some(self.build_router_advertisement(src_addr))
     }
 

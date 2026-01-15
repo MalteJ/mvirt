@@ -66,7 +66,15 @@ impl IcmpResponder {
                 dst_ip = %ipv4.dst_addr(),
                 ident,
                 seq_no,
-                "ICMP echo request for gateway, sending reply"
+                "ICMPv4 Echo Request received"
+            );
+
+            debug!(
+                src_ip = %self.gateway_ip,
+                dst_ip = %ipv4.src_addr(),
+                ident,
+                seq_no,
+                "Sending ICMPv4 Echo Reply"
             );
 
             return Some(self.build_echo_reply(

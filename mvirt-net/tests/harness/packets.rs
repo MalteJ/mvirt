@@ -443,3 +443,609 @@ pub fn parse_icmp_echo_reply(frame: &[u8]) -> Option<IcmpEchoReply> {
 pub fn is_icmp_echo_reply(frame: &[u8]) -> bool {
     parse_icmp_echo_reply(frame).is_some()
 }
+
+// ============================================================================
+// IPv6 NDP Packets
+// ============================================================================
+
+use smoltcp::wire::{
+    Icmpv6Message, Icmpv6Packet, Icmpv6Repr, IpAddress, Ipv6Packet, Ipv6Repr, NdiscNeighborFlags,
+    NdiscRepr, NdiscRouterFlags, RawHardwareAddress,
+};
+
+/// Gateway IPv6 link-local address
+pub const GATEWAY_IPV6: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+
+/// Build a Neighbor Solicitation packet for the gateway
+pub fn neighbor_solicitation(src_mac: [u8; 6], src_ip: [u8; 16], target_ip: [u8; 16]) -> Vec<u8> {
+    let src_addr = smoltcp::wire::Ipv6Address::from_bytes(&src_ip);
+    let target_addr = smoltcp::wire::Ipv6Address::from_bytes(&target_ip);
+
+    // Solicited-node multicast address for target
+    let dst_addr = smoltcp::wire::Ipv6Address::new(
+        0xff02,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0xff00 | (target_ip[13] as u16),
+        ((target_ip[14] as u16) << 8) | (target_ip[15] as u16),
+    );
+
+    let lladdr = RawHardwareAddress::from_bytes(&src_mac);
+    let icmp_repr = Icmpv6Repr::Ndisc(NdiscRepr::NeighborSolicit {
+        target_addr,
+        lladdr: Some(lladdr),
+    });
+
+    let ipv6_repr = Ipv6Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Icmpv6,
+        payload_len: icmp_repr.buffer_len(),
+        hop_limit: 255,
+    };
+
+    // Solicited-node multicast MAC: 33:33:ff:XX:XX:XX
+    let dst_mac = [
+        0x33,
+        0x33,
+        0xff,
+        target_ip[13],
+        target_ip[14],
+        target_ip[15],
+    ];
+
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress::from_bytes(&src_mac),
+        dst_addr: EthernetAddress::from_bytes(&dst_mac),
+        ethertype: EthernetProtocol::Ipv6,
+    };
+
+    let total_len = eth_repr.buffer_len() + ipv6_repr.buffer_len() + icmp_repr.buffer_len();
+    let mut buffer = vec![0u8; total_len];
+
+    let mut frame = EthernetFrame::new_unchecked(&mut buffer);
+    eth_repr.emit(&mut frame);
+
+    let mut ipv6_packet = Ipv6Packet::new_unchecked(frame.payload_mut());
+    ipv6_repr.emit(&mut ipv6_packet);
+
+    let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
+    icmp_repr.emit(
+        &IpAddress::Ipv6(src_addr),
+        &IpAddress::Ipv6(dst_addr),
+        &mut icmp_packet,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    buffer
+}
+
+/// Parsed Neighbor Advertisement
+#[derive(Debug, Clone)]
+pub struct NeighborAdvertisement {
+    pub src_ip: [u8; 16],
+    pub target_ip: [u8; 16],
+    pub target_mac: [u8; 6],
+    pub router: bool,
+    pub solicited: bool,
+}
+
+/// Parse a Neighbor Advertisement from an Ethernet frame
+pub fn parse_neighbor_advertisement(frame: &[u8]) -> Option<NeighborAdvertisement> {
+    let eth = EthernetFrame::new_checked(frame).ok()?;
+    if eth.ethertype() != EthernetProtocol::Ipv6 {
+        return None;
+    }
+
+    let ipv6 = Ipv6Packet::new_checked(eth.payload()).ok()?;
+    if ipv6.next_header() != IpProtocol::Icmpv6 {
+        return None;
+    }
+
+    let icmp = Icmpv6Packet::new_checked(ipv6.payload()).ok()?;
+    if icmp.msg_type() != Icmpv6Message::NeighborAdvert {
+        return None;
+    }
+
+    let repr = Icmpv6Repr::parse(
+        &IpAddress::Ipv6(ipv6.src_addr()),
+        &IpAddress::Ipv6(ipv6.dst_addr()),
+        &icmp,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    )
+    .ok()?;
+
+    if let Icmpv6Repr::Ndisc(NdiscRepr::NeighborAdvert {
+        flags,
+        target_addr,
+        lladdr,
+    }) = repr
+    {
+        let target_mac = lladdr.map(|l| {
+            let bytes = l.as_bytes();
+            [bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]]
+        })?;
+
+        Some(NeighborAdvertisement {
+            src_ip: ipv6.src_addr().as_bytes().try_into().ok()?,
+            target_ip: target_addr.as_bytes().try_into().ok()?,
+            target_mac,
+            router: flags.contains(NdiscNeighborFlags::ROUTER),
+            solicited: flags.contains(NdiscNeighborFlags::SOLICITED),
+        })
+    } else {
+        None
+    }
+}
+
+/// Build a Router Solicitation packet
+pub fn router_solicitation(src_mac: [u8; 6], src_ip: [u8; 16]) -> Vec<u8> {
+    let src_addr = smoltcp::wire::Ipv6Address::from_bytes(&src_ip);
+    let dst_addr = smoltcp::wire::Ipv6Address::new(0xff02, 0, 0, 0, 0, 0, 0, 2); // all-routers
+
+    let lladdr = RawHardwareAddress::from_bytes(&src_mac);
+    let icmp_repr = Icmpv6Repr::Ndisc(NdiscRepr::RouterSolicit {
+        lladdr: Some(lladdr),
+    });
+
+    let ipv6_repr = Ipv6Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Icmpv6,
+        payload_len: icmp_repr.buffer_len(),
+        hop_limit: 255,
+    };
+
+    // All-routers multicast MAC: 33:33:00:00:00:02
+    let dst_mac = [0x33, 0x33, 0x00, 0x00, 0x00, 0x02];
+
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress::from_bytes(&src_mac),
+        dst_addr: EthernetAddress::from_bytes(&dst_mac),
+        ethertype: EthernetProtocol::Ipv6,
+    };
+
+    let total_len = eth_repr.buffer_len() + ipv6_repr.buffer_len() + icmp_repr.buffer_len();
+    let mut buffer = vec![0u8; total_len];
+
+    let mut frame = EthernetFrame::new_unchecked(&mut buffer);
+    eth_repr.emit(&mut frame);
+
+    let mut ipv6_packet = Ipv6Packet::new_unchecked(frame.payload_mut());
+    ipv6_repr.emit(&mut ipv6_packet);
+
+    let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
+    icmp_repr.emit(
+        &IpAddress::Ipv6(src_addr),
+        &IpAddress::Ipv6(dst_addr),
+        &mut icmp_packet,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    buffer
+}
+
+/// Parsed Router Advertisement
+#[derive(Debug, Clone)]
+pub struct RouterAdvertisement {
+    pub src_ip: [u8; 16],
+    pub src_mac: [u8; 6],
+    pub hop_limit: u8,
+    pub managed: bool,
+    pub other_config: bool,
+    pub router_lifetime: u16,
+    pub prefix: Option<([u8; 16], u8)>,
+    pub mtu: Option<u32>,
+}
+
+/// Parse a Router Advertisement from an Ethernet frame
+pub fn parse_router_advertisement(frame: &[u8]) -> Option<RouterAdvertisement> {
+    let eth = EthernetFrame::new_checked(frame).ok()?;
+    if eth.ethertype() != EthernetProtocol::Ipv6 {
+        return None;
+    }
+
+    let ipv6 = Ipv6Packet::new_checked(eth.payload()).ok()?;
+    if ipv6.next_header() != IpProtocol::Icmpv6 {
+        return None;
+    }
+
+    let icmp = Icmpv6Packet::new_checked(ipv6.payload()).ok()?;
+    if icmp.msg_type() != Icmpv6Message::RouterAdvert {
+        return None;
+    }
+
+    let repr = Icmpv6Repr::parse(
+        &IpAddress::Ipv6(ipv6.src_addr()),
+        &IpAddress::Ipv6(ipv6.dst_addr()),
+        &icmp,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    )
+    .ok()?;
+
+    if let Icmpv6Repr::Ndisc(NdiscRepr::RouterAdvert {
+        hop_limit,
+        flags,
+        router_lifetime,
+        lladdr,
+        mtu,
+        prefix_info,
+        ..
+    }) = repr
+    {
+        let src_mac = lladdr.map(|l| {
+            let bytes = l.as_bytes();
+            [bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]]
+        })?;
+
+        let prefix = prefix_info.map(|p| (p.prefix.as_bytes().try_into().unwrap(), p.prefix_len));
+
+        Some(RouterAdvertisement {
+            src_ip: ipv6.src_addr().as_bytes().try_into().ok()?,
+            src_mac,
+            hop_limit,
+            managed: flags.contains(NdiscRouterFlags::MANAGED),
+            other_config: flags.contains(NdiscRouterFlags::OTHER),
+            router_lifetime: (router_lifetime.total_millis() / 1000) as u16,
+            prefix,
+            mtu,
+        })
+    } else {
+        None
+    }
+}
+
+// ============================================================================
+// DHCPv6 Packets
+// ============================================================================
+
+use dhcproto::v6::{
+    DhcpOption as Dhcpv6Option, IANA, Message as Dhcpv6Message, MessageType as Dhcpv6MessageType,
+    OptionCode as Dhcpv6OptionCode,
+};
+
+/// DHCPv6 ports
+const DHCPV6_CLIENT_PORT: u16 = 546;
+const DHCPV6_SERVER_PORT: u16 = 547;
+
+/// All DHCPv6 servers and relay agents multicast address
+const DHCPV6_ALL_SERVERS: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2];
+
+/// Build a DHCPv6 SOLICIT packet
+pub fn dhcpv6_solicit(client_mac: [u8; 6], src_ip: [u8; 16], xid: [u8; 3], iaid: u32) -> Vec<u8> {
+    // Build client DUID (DUID-LL: type 3, hardware type 1)
+    let mut client_duid = vec![0, 3, 0, 1];
+    client_duid.extend_from_slice(&client_mac);
+
+    let mut msg = Dhcpv6Message::new(Dhcpv6MessageType::Solicit);
+    msg.set_xid(xid);
+    msg.opts_mut().insert(Dhcpv6Option::ClientId(client_duid));
+
+    // Request IA_NA (non-temporary address)
+    let iana = IANA {
+        id: iaid,
+        t1: 0,
+        t2: 0,
+        opts: Default::default(),
+    };
+    msg.opts_mut().insert(Dhcpv6Option::IANA(iana));
+
+    let dhcp_data = msg.to_vec().expect("DHCPv6 encode failed");
+    wrap_dhcpv6_in_udp_ip_eth(dhcp_data, client_mac, src_ip)
+}
+
+/// Build a DHCPv6 REQUEST packet
+pub fn dhcpv6_request(
+    client_mac: [u8; 6],
+    src_ip: [u8; 16],
+    xid: [u8; 3],
+    server_duid: Vec<u8>,
+    iaid: u32,
+) -> Vec<u8> {
+    // Build client DUID
+    let mut client_duid = vec![0, 3, 0, 1];
+    client_duid.extend_from_slice(&client_mac);
+
+    let mut msg = Dhcpv6Message::new(Dhcpv6MessageType::Request);
+    msg.set_xid(xid);
+    msg.opts_mut().insert(Dhcpv6Option::ClientId(client_duid));
+    msg.opts_mut().insert(Dhcpv6Option::ServerId(server_duid));
+
+    // Request IA_NA
+    let iana = IANA {
+        id: iaid,
+        t1: 0,
+        t2: 0,
+        opts: Default::default(),
+    };
+    msg.opts_mut().insert(Dhcpv6Option::IANA(iana));
+
+    let dhcp_data = msg.to_vec().expect("DHCPv6 encode failed");
+    wrap_dhcpv6_in_udp_ip_eth(dhcp_data, client_mac, src_ip)
+}
+
+/// Wrap DHCPv6 message in UDP/IPv6/Ethernet
+fn wrap_dhcpv6_in_udp_ip_eth(dhcp_data: Vec<u8>, client_mac: [u8; 6], src_ip: [u8; 16]) -> Vec<u8> {
+    let src_addr = smoltcp::wire::Ipv6Address::from_bytes(&src_ip);
+    let dst_addr = smoltcp::wire::Ipv6Address::from_bytes(&DHCPV6_ALL_SERVERS);
+
+    let udp_repr = UdpRepr {
+        src_port: DHCPV6_CLIENT_PORT,
+        dst_port: DHCPV6_SERVER_PORT,
+    };
+
+    let ipv6_repr = Ipv6Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Udp,
+        payload_len: udp_repr.header_len() + dhcp_data.len(),
+        hop_limit: 64,
+    };
+
+    // All DHCPv6 servers multicast MAC: 33:33:00:01:00:02
+    let dst_mac = [0x33, 0x33, 0x00, 0x01, 0x00, 0x02];
+
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress::from_bytes(&client_mac),
+        dst_addr: EthernetAddress::from_bytes(&dst_mac),
+        ethertype: EthernetProtocol::Ipv6,
+    };
+
+    let total_len =
+        eth_repr.buffer_len() + ipv6_repr.buffer_len() + udp_repr.header_len() + dhcp_data.len();
+    let mut buffer = vec![0u8; total_len];
+
+    let mut frame = EthernetFrame::new_unchecked(&mut buffer);
+    eth_repr.emit(&mut frame);
+
+    let mut ipv6_packet = Ipv6Packet::new_unchecked(frame.payload_mut());
+    ipv6_repr.emit(&mut ipv6_packet);
+
+    let mut udp_packet = UdpPacket::new_unchecked(ipv6_packet.payload_mut());
+    udp_repr.emit(
+        &mut udp_packet,
+        &IpAddress::Ipv6(src_addr),
+        &IpAddress::Ipv6(dst_addr),
+        dhcp_data.len(),
+        |buf| buf.copy_from_slice(&dhcp_data),
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    buffer
+}
+
+/// DHCPv6 message types for test assertions
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dhcpv6MsgType {
+    Solicit,
+    Advertise,
+    Request,
+    Reply,
+    Other(u8),
+}
+
+impl From<Dhcpv6MessageType> for Dhcpv6MsgType {
+    fn from(t: Dhcpv6MessageType) -> Self {
+        match t {
+            Dhcpv6MessageType::Solicit => Dhcpv6MsgType::Solicit,
+            Dhcpv6MessageType::Advertise => Dhcpv6MsgType::Advertise,
+            Dhcpv6MessageType::Request => Dhcpv6MsgType::Request,
+            Dhcpv6MessageType::Reply => Dhcpv6MsgType::Reply,
+            _ => Dhcpv6MsgType::Other(0),
+        }
+    }
+}
+
+/// Parsed DHCPv6 response
+#[derive(Debug, Clone)]
+pub struct Dhcpv6Response {
+    pub message_type: Dhcpv6MsgType,
+    pub xid: [u8; 3],
+    pub server_duid: Vec<u8>,
+    pub iaid: Option<u32>,
+    pub assigned_ip: Option<[u8; 16]>,
+    pub preferred_lifetime: Option<u32>,
+    pub valid_lifetime: Option<u32>,
+    pub dns_servers: Vec<[u8; 16]>,
+}
+
+/// Parse a DHCPv6 response from an Ethernet frame
+pub fn parse_dhcpv6_response(frame: &[u8]) -> Option<Dhcpv6Response> {
+    let eth = EthernetFrame::new_checked(frame).ok()?;
+    if eth.ethertype() != EthernetProtocol::Ipv6 {
+        return None;
+    }
+
+    let ipv6 = Ipv6Packet::new_checked(eth.payload()).ok()?;
+    if ipv6.next_header() != IpProtocol::Udp {
+        return None;
+    }
+
+    let udp = UdpPacket::new_checked(ipv6.payload()).ok()?;
+    if udp.src_port() != DHCPV6_SERVER_PORT || udp.dst_port() != DHCPV6_CLIENT_PORT {
+        return None;
+    }
+
+    let mut decoder = dhcproto::decoder::Decoder::new(udp.payload());
+    let msg = Dhcpv6Message::decode(&mut decoder).ok()?;
+
+    let server_duid = msg
+        .opts()
+        .get(Dhcpv6OptionCode::ServerId)
+        .and_then(|opt| {
+            if let Dhcpv6Option::ServerId(duid) = opt {
+                Some(duid.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    let (iaid, assigned_ip, preferred_lifetime, valid_lifetime) = msg
+        .opts()
+        .get(Dhcpv6OptionCode::IANA)
+        .and_then(|opt| {
+            if let Dhcpv6Option::IANA(iana) = opt {
+                let iaid = Some(iana.id);
+                let addr_info = iana
+                    .opts
+                    .get(Dhcpv6OptionCode::IAAddr)
+                    .and_then(|addr_opt| {
+                        if let Dhcpv6Option::IAAddr(ia_addr) = addr_opt {
+                            Some((
+                                Some(ia_addr.addr.octets()),
+                                Some(ia_addr.preferred_life),
+                                Some(ia_addr.valid_life),
+                            ))
+                        } else {
+                            None
+                        }
+                    });
+                match addr_info {
+                    Some((ip, pref, valid)) => Some((iaid, ip, pref, valid)),
+                    None => Some((iaid, None, None, None)),
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or((None, None, None, None));
+
+    let dns_servers = msg
+        .opts()
+        .get(Dhcpv6OptionCode::DomainNameServers)
+        .map(|opt| {
+            if let Dhcpv6Option::DomainNameServers(servers) = opt {
+                servers.iter().map(|ip| ip.octets()).collect()
+            } else {
+                Vec::new()
+            }
+        })
+        .unwrap_or_default();
+
+    Some(Dhcpv6Response {
+        message_type: Dhcpv6MsgType::from(msg.msg_type()),
+        xid: msg.xid(),
+        server_duid,
+        iaid,
+        assigned_ip,
+        preferred_lifetime,
+        valid_lifetime,
+        dns_servers,
+    })
+}
+
+// ============================================================================
+// ICMPv6 Echo (Ping) Packets
+// ============================================================================
+
+/// Build an ICMPv6 echo request (ping) packet
+pub fn icmpv6_echo_request(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 16],
+    dst_ip: [u8; 16],
+    ident: u16,
+    seq_no: u16,
+    data: &[u8],
+) -> Vec<u8> {
+    use smoltcp::wire::Icmpv6Repr;
+
+    let src_addr = smoltcp::wire::Ipv6Address::from_bytes(&src_ip);
+    let dst_addr = smoltcp::wire::Ipv6Address::from_bytes(&dst_ip);
+
+    let icmp_repr = Icmpv6Repr::EchoRequest {
+        ident,
+        seq_no,
+        data,
+    };
+
+    let ipv6_repr = Ipv6Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Icmpv6,
+        payload_len: icmp_repr.buffer_len(),
+        hop_limit: 64,
+    };
+
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress::from_bytes(&src_mac),
+        dst_addr: EthernetAddress::from_bytes(&dst_mac),
+        ethertype: EthernetProtocol::Ipv6,
+    };
+
+    let total_len = eth_repr.buffer_len() + ipv6_repr.buffer_len() + icmp_repr.buffer_len();
+    let mut buffer = vec![0u8; total_len];
+
+    let mut frame = EthernetFrame::new_unchecked(&mut buffer);
+    eth_repr.emit(&mut frame);
+
+    let mut ipv6_packet = Ipv6Packet::new_unchecked(frame.payload_mut());
+    ipv6_repr.emit(&mut ipv6_packet);
+
+    let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
+    icmp_repr.emit(
+        &IpAddress::Ipv6(src_addr),
+        &IpAddress::Ipv6(dst_addr),
+        &mut icmp_packet,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    buffer
+}
+
+/// Parsed ICMPv6 echo reply
+#[derive(Debug, Clone)]
+pub struct Icmpv6EchoReply {
+    pub src_ip: [u8; 16],
+    pub dst_ip: [u8; 16],
+    pub ident: u16,
+    pub seq_no: u16,
+    pub data: Vec<u8>,
+}
+
+/// Parse an ICMPv6 echo reply from an Ethernet frame
+pub fn parse_icmpv6_echo_reply(frame: &[u8]) -> Option<Icmpv6EchoReply> {
+    let eth = EthernetFrame::new_checked(frame).ok()?;
+    if eth.ethertype() != EthernetProtocol::Ipv6 {
+        return None;
+    }
+
+    let ipv6 = Ipv6Packet::new_checked(eth.payload()).ok()?;
+    if ipv6.next_header() != IpProtocol::Icmpv6 {
+        return None;
+    }
+
+    let icmp = Icmpv6Packet::new_checked(ipv6.payload()).ok()?;
+    if icmp.msg_type() != Icmpv6Message::EchoReply {
+        return None;
+    }
+
+    let repr = Icmpv6Repr::parse(
+        &IpAddress::Ipv6(ipv6.src_addr()),
+        &IpAddress::Ipv6(ipv6.dst_addr()),
+        &icmp,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    )
+    .ok()?;
+
+    if let Icmpv6Repr::EchoReply {
+        ident,
+        seq_no,
+        data,
+    } = repr
+    {
+        Some(Icmpv6EchoReply {
+            src_ip: ipv6.src_addr().as_bytes().try_into().ok()?,
+            dst_ip: ipv6.dst_addr().as_bytes().try_into().ok()?,
+            ident,
+            seq_no,
+            data: data.to_vec(),
+        })
+    } else {
+        None
+    }
+}

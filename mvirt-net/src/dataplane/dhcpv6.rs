@@ -46,12 +46,7 @@ impl Dhcpv6Server {
             assigned_ip,
             preferred_lifetime: 14400, // 4 hours
             valid_lifetime: 86400,     // 24 hours
-            dns_servers: vec![
-                // Cloudflare DNS
-                Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
-                // Google DNS
-                Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888),
-            ],
+            dns_servers: Vec::new(),
             server_duid,
         }
     }
@@ -89,11 +84,27 @@ impl Dhcpv6Server {
         let dhcp_msg = Message::decode(&mut decoder).ok()?;
         let src_addr = ipv6.src_addr();
 
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            client_mac[0],
+            client_mac[1],
+            client_mac[2],
+            client_mac[3],
+            client_mac[4],
+            client_mac[5]
+        );
+        let xid_str = format!(
+            "{:02x}{:02x}{:02x}",
+            dhcp_msg.xid()[0],
+            dhcp_msg.xid()[1],
+            dhcp_msg.xid()[2]
+        );
+
         debug!(
             msg_type = ?dhcp_msg.msg_type(),
-            client_mac = %format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                client_mac[0], client_mac[1], client_mac[2],
-                client_mac[3], client_mac[4], client_mac[5]),
+            xid = %xid_str,
+            client_mac = %mac_str,
+            client_ip = %src_addr,
             "DHCPv6 request received"
         );
 
@@ -113,7 +124,12 @@ impl Dhcpv6Server {
         client_mac: [u8; 6],
         client_addr: Ipv6Address,
     ) -> Option<Vec<u8>> {
-        debug!(ip = %self.assigned_ip, "Sending DHCPv6 ADVERTISE");
+        let xid = request.xid();
+        debug!(
+            xid = %format!("{:02x}{:02x}{:02x}", xid[0], xid[1], xid[2]),
+            offered_ip = %self.assigned_ip,
+            "Sending DHCPv6 ADVERTISE"
+        );
 
         let response = self.build_response(request, MessageType::Advertise)?;
         Some(self.wrap_in_udp_ip_eth(response, client_mac, client_addr))
@@ -126,7 +142,12 @@ impl Dhcpv6Server {
         client_mac: [u8; 6],
         client_addr: Ipv6Address,
     ) -> Option<Vec<u8>> {
-        debug!(ip = %self.assigned_ip, "Sending DHCPv6 REPLY");
+        let xid = request.xid();
+        debug!(
+            xid = %format!("{:02x}{:02x}{:02x}", xid[0], xid[1], xid[2]),
+            assigned_ip = %self.assigned_ip,
+            "Sending DHCPv6 REPLY"
+        );
 
         let response = self.build_response(request, MessageType::Reply)?;
         Some(self.wrap_in_udp_ip_eth(response, client_mac, client_addr))
@@ -139,7 +160,12 @@ impl Dhcpv6Server {
         client_mac: [u8; 6],
         client_addr: Ipv6Address,
     ) -> Option<Vec<u8>> {
-        debug!(ip = %self.assigned_ip, "Sending DHCPv6 REPLY (renew)");
+        let xid = request.xid();
+        debug!(
+            xid = %format!("{:02x}{:02x}{:02x}", xid[0], xid[1], xid[2]),
+            renewed_ip = %self.assigned_ip,
+            "Sending DHCPv6 REPLY (renew)"
+        );
 
         let response = self.build_response(request, MessageType::Reply)?;
         Some(self.wrap_in_udp_ip_eth(response, client_mac, client_addr))
@@ -152,7 +178,12 @@ impl Dhcpv6Server {
         client_mac: [u8; 6],
         client_addr: Ipv6Address,
     ) -> Option<Vec<u8>> {
-        debug!(ip = %self.assigned_ip, "Sending DHCPv6 REPLY (rebind)");
+        let xid = request.xid();
+        debug!(
+            xid = %format!("{:02x}{:02x}{:02x}", xid[0], xid[1], xid[2]),
+            rebound_ip = %self.assigned_ip,
+            "Sending DHCPv6 REPLY (rebind)"
+        );
 
         let response = self.build_response(request, MessageType::Reply)?;
         Some(self.wrap_in_udp_ip_eth(response, client_mac, client_addr))
@@ -177,6 +208,19 @@ impl Dhcpv6Server {
                 .insert(DhcpOption::ClientId(client_duid.clone()));
         }
 
+        // Extract IAID from client's IA_NA request (must echo it back)
+        let client_iaid = request
+            .opts()
+            .get(OptionCode::IANA)
+            .and_then(|opt| {
+                if let DhcpOption::IANA(iana) = opt {
+                    Some(iana.id)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(1);
+
         // Add IA_NA with address
         let ia_addr = IAAddr {
             addr: self.assigned_ip,
@@ -186,7 +230,7 @@ impl Dhcpv6Server {
         };
 
         let iana = IANA {
-            id: 1,                                 // IAID
+            id: client_iaid,                       // Echo client's IAID
             t1: self.preferred_lifetime / 2,       // Renew at 50%
             t2: (self.preferred_lifetime * 4) / 5, // Rebind at 80%
             opts: vec![DhcpOption::IAAddr(ia_addr)].into_iter().collect(),

@@ -60,13 +60,20 @@ impl ArpResponder {
             {
                 debug!(
                     target_ip = %target_protocol_addr,
-                    source_mac = %source_hardware_addr,
                     source_ip = %source_protocol_addr,
-                    "ARP request for gateway, sending reply"
+                    source_mac = %source_hardware_addr,
+                    "ARP request received"
                 );
 
                 // Respond with gateway MAC
                 let gateway_mac = EthernetAddress::from_bytes(&GATEWAY_MAC);
+
+                debug!(
+                    reply_mac = %gateway_mac,
+                    reply_ip = %target_protocol_addr,
+                    "Sending ARP reply"
+                );
+
                 return Some(build_arp_reply_frame(
                     source_hardware_addr,
                     gateway_mac,
