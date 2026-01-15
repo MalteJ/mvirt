@@ -26,6 +26,6 @@ pub use icmp::IcmpResponder;
 pub use icmpv6::Icmpv6Responder;
 pub use ndp::NdpResponder;
 pub use packet::{GATEWAY_IPV4, GATEWAY_MAC};
-pub use router::Router;
+pub use router::{NetworkRouter, NicChannel};
 pub use vhost::VhostNetBackend;
 pub use worker::{RoutedPacket, WorkerConfig, WorkerHandle, WorkerManager};

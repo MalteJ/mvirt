@@ -753,3 +753,193 @@ fn test_icmpv6_ping_non_gateway_ignored() {
         "Should NOT receive ICMPv6 reply for non-gateway IP"
     );
 }
+
+// ============================================================================
+// Inter-vNIC Routing Tests
+// ============================================================================
+
+use harness::packets::{is_icmp_echo_request, parse_icmp_echo_request};
+use harness::{RoutingNicConfig, RoutingTestBackend};
+
+#[test]
+fn test_routing_packet_from_a_to_b() {
+    // Set up two vNICs with routing
+    let backend = RoutingTestBackend::new(
+        RoutingNicConfig {
+            id: "nic-a".to_string(),
+            mac: "52:54:00:00:00:01".to_string(),
+            ipv4: "10.0.0.1".to_string(),
+        },
+        RoutingNicConfig {
+            id: "nic-b".to_string(),
+            mac: "52:54:00:00:00:02".to_string(),
+            ipv4: "10.0.0.2".to_string(),
+        },
+    );
+
+    // Connect both clients
+    let mut client_a = backend.connect_a().expect("connect A failed");
+    let mut client_b = backend.connect_b().expect("connect B failed");
+
+    // Client A sends ICMP echo request to client B's IP (10.0.0.2)
+    // Use gateway MAC as dst since we're routing through the virtual gateway
+    let ping = icmp_echo_request(
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0x01], // src MAC (client A)
+        GATEWAY_MAC,                          // dst MAC (gateway - will route)
+        [10, 0, 0, 1],                        // src IP (client A)
+        [10, 0, 0, 2],                        // dst IP (client B)
+        0xABCD,                               // ident
+        1,                                    // seq_no
+        b"routing test",                      // data
+    );
+
+    client_a.send_packet(&ping).expect("send from A failed");
+
+    // Client B should receive the routed ICMP echo request
+    let received = client_b.recv_packet(3000);
+    assert!(
+        received.is_ok(),
+        "Client B should receive routed packet: {:?}",
+        received.err()
+    );
+
+    let received = received.unwrap();
+    assert!(
+        is_icmp_echo_request(&received),
+        "Should be ICMP echo request"
+    );
+
+    let icmp = parse_icmp_echo_request(&received).expect("parse ICMP failed");
+    assert_eq!(icmp.src_ip, [10, 0, 0, 1], "Src IP should be client A");
+    assert_eq!(icmp.dst_ip, [10, 0, 0, 2], "Dst IP should be client B");
+    assert_eq!(icmp.ident, 0xABCD, "Ident should match");
+    assert_eq!(icmp.seq_no, 1, "Seq should match");
+    assert_eq!(icmp.data, b"routing test", "Data should match");
+
+    // Verify MAC addresses were rewritten by the router
+    assert_eq!(
+        icmp.dst_mac,
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0x02],
+        "Dst MAC should be client B's MAC"
+    );
+    assert_eq!(
+        icmp.src_mac, GATEWAY_MAC,
+        "Src MAC should be gateway MAC (router)"
+    );
+}
+
+#[test]
+fn test_routing_bidirectional() {
+    // Set up two vNICs with routing
+    let backend = RoutingTestBackend::new(
+        RoutingNicConfig {
+            id: "nic-a".to_string(),
+            mac: "52:54:00:00:00:11".to_string(),
+            ipv4: "10.0.0.11".to_string(),
+        },
+        RoutingNicConfig {
+            id: "nic-b".to_string(),
+            mac: "52:54:00:00:00:22".to_string(),
+            ipv4: "10.0.0.22".to_string(),
+        },
+    );
+
+    let mut client_a = backend.connect_a().expect("connect A failed");
+    let mut client_b = backend.connect_b().expect("connect B failed");
+
+    // A -> B
+    let ping_a_to_b = icmp_echo_request(
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0x11],
+        GATEWAY_MAC,
+        [10, 0, 0, 11],
+        [10, 0, 0, 22],
+        0x1111,
+        1,
+        b"a to b",
+    );
+
+    client_a
+        .send_packet(&ping_a_to_b)
+        .expect("send A->B failed");
+
+    let received_b = client_b.recv_packet(3000).expect("B should receive packet");
+    let icmp_b = parse_icmp_echo_request(&received_b).expect("parse failed");
+    assert_eq!(icmp_b.src_ip, [10, 0, 0, 11]);
+    assert_eq!(icmp_b.dst_ip, [10, 0, 0, 22]);
+    assert_eq!(icmp_b.data, b"a to b");
+    // Verify MAC rewriting
+    assert_eq!(
+        icmp_b.dst_mac,
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0x22],
+        "Dst MAC should be B's MAC"
+    );
+    assert_eq!(icmp_b.src_mac, GATEWAY_MAC, "Src MAC should be gateway");
+
+    // B -> A
+    let ping_b_to_a = icmp_echo_request(
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0x22],
+        GATEWAY_MAC,
+        [10, 0, 0, 22],
+        [10, 0, 0, 11],
+        0x2222,
+        2,
+        b"b to a",
+    );
+
+    client_b
+        .send_packet(&ping_b_to_a)
+        .expect("send B->A failed");
+
+    let received_a = client_a.recv_packet(3000).expect("A should receive packet");
+    let icmp_a = parse_icmp_echo_request(&received_a).expect("parse failed");
+    assert_eq!(icmp_a.src_ip, [10, 0, 0, 22]);
+    assert_eq!(icmp_a.dst_ip, [10, 0, 0, 11]);
+    assert_eq!(icmp_a.data, b"b to a");
+    // Verify MAC rewriting
+    assert_eq!(
+        icmp_a.dst_mac,
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0x11],
+        "Dst MAC should be A's MAC"
+    );
+    assert_eq!(icmp_a.src_mac, GATEWAY_MAC, "Src MAC should be gateway");
+}
+
+#[test]
+fn test_routing_ttl_decrement() {
+    // Verify TTL is decremented when routing
+    let backend = RoutingTestBackend::new(
+        RoutingNicConfig {
+            id: "nic-ttl-a".to_string(),
+            mac: "52:54:00:00:00:AA".to_string(),
+            ipv4: "10.0.0.100".to_string(),
+        },
+        RoutingNicConfig {
+            id: "nic-ttl-b".to_string(),
+            mac: "52:54:00:00:00:BB".to_string(),
+            ipv4: "10.0.0.200".to_string(),
+        },
+    );
+
+    let mut client_a = backend.connect_a().expect("connect A failed");
+    let mut client_b = backend.connect_b().expect("connect B failed");
+
+    // Send packet with TTL=64 (default)
+    let ping = icmp_echo_request(
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0xAA],
+        GATEWAY_MAC,
+        [10, 0, 0, 100],
+        [10, 0, 0, 200],
+        0x5555,
+        1,
+        b"ttl test",
+    );
+
+    client_a.send_packet(&ping).expect("send failed");
+
+    let received = client_b.recv_packet(3000).expect("should receive packet");
+
+    // Parse raw IPv4 packet to check TTL
+    // Ethernet header is 14 bytes, IPv4 TTL is at offset 8
+    let ttl = received[14 + 8];
+    assert_eq!(ttl, 63, "TTL should be decremented from 64 to 63");
+}

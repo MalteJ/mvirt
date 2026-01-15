@@ -57,6 +57,7 @@ dhcproto = "0.12"
 
 # IP address handling
 ipnet = "2"
+prefix-trie = "0.8"
 
 # Inter-thread communication (data plane)
 crossbeam-channel = "0.5"

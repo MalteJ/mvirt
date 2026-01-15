@@ -73,6 +73,9 @@ pub struct VhostNetBackend {
 
     /// Pending RX packets to inject into guest
     rx_queue: Mutex<Vec<Vec<u8>>>,
+
+    /// Stored vrings for external RX injection (set on first handle_event)
+    vrings: RwLock<Option<Vec<VringRwLock>>>,
 }
 
 impl VhostNetBackend {
@@ -86,6 +89,7 @@ impl VhostNetBackend {
             shutdown,
             packet_handler: Mutex::new(None),
             rx_queue: Mutex::new(Vec::new()),
+            vrings: RwLock::new(None),
         })
     }
 
@@ -99,6 +103,25 @@ impl VhostNetBackend {
     pub fn inject_packet(&self, packet: Vec<u8>) {
         let mut rx = self.rx_queue.lock().unwrap();
         rx.push(packet);
+    }
+
+    /// Inject a packet and immediately deliver it to the guest
+    /// This is used for routed packets from other vNICs
+    pub fn inject_and_deliver(&self, packet: Vec<u8>) {
+        // Add to queue
+        {
+            let mut rx = self.rx_queue.lock().unwrap();
+            rx.push(packet);
+        }
+
+        // Try to deliver immediately if vrings are available
+        let vrings_guard = self.vrings.read().unwrap();
+        if let Some(ref vrings) = *vrings_guard
+            && let Some(rx_vring) = vrings.get(RX_QUEUE as usize)
+            && let Ok(true) = self.process_rx(rx_vring)
+        {
+            let _ = rx_vring.signal_used_queue();
+        }
     }
 
     /// Get the MAC address as bytes
@@ -323,6 +346,16 @@ impl VhostUserBackend for VhostNetBackend {
         _thread_id: usize,
     ) -> io::Result<()> {
         trace!(device_event, ?evset, "Handling vring event");
+
+        // Store vrings on first call for external RX injection
+        {
+            let mut stored = self.vrings.write().unwrap();
+            if stored.is_none() {
+                debug!("Storing vrings for external RX injection");
+                *stored = Some(vrings.to_vec());
+            }
+        }
+
         if evset != EventSet::IN {
             return Ok(());
         }

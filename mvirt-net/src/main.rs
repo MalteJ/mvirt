@@ -34,8 +34,10 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Use RUST_LOG if set, otherwise default to info for mvirt_net
+    // Always suppress noisy h2 codec logs
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mvirt_net=info"));
+    let env_filter = env_filter.add_directive("h2::codec=info".parse().unwrap());
 
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 

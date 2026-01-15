@@ -444,6 +444,62 @@ pub fn is_icmp_echo_reply(frame: &[u8]) -> bool {
     parse_icmp_echo_reply(frame).is_some()
 }
 
+/// Parsed ICMP echo request
+#[derive(Debug, Clone)]
+pub struct IcmpEchoRequest {
+    pub src_mac: [u8; 6],
+    pub dst_mac: [u8; 6],
+    pub src_ip: [u8; 4],
+    pub dst_ip: [u8; 4],
+    pub ident: u16,
+    pub seq_no: u16,
+    pub data: Vec<u8>,
+}
+
+/// Parse an ICMP echo request from an Ethernet frame
+pub fn parse_icmp_echo_request(frame: &[u8]) -> Option<IcmpEchoRequest> {
+    let eth = EthernetFrame::new_checked(frame).ok()?;
+    if eth.ethertype() != EthernetProtocol::Ipv4 {
+        return None;
+    }
+
+    let ipv4 = Ipv4Packet::new_checked(eth.payload()).ok()?;
+    if ipv4.next_header() != IpProtocol::Icmp {
+        return None;
+    }
+
+    let icmp = Icmpv4Packet::new_checked(ipv4.payload()).ok()?;
+    if icmp.msg_type() != Icmpv4Message::EchoRequest {
+        return None;
+    }
+
+    let repr = Icmpv4Repr::parse(&icmp, &smoltcp::phy::ChecksumCapabilities::default()).ok()?;
+
+    if let Icmpv4Repr::EchoRequest {
+        ident,
+        seq_no,
+        data,
+    } = repr
+    {
+        Some(IcmpEchoRequest {
+            src_mac: eth.src_addr().as_bytes().try_into().ok()?,
+            dst_mac: eth.dst_addr().as_bytes().try_into().ok()?,
+            src_ip: ipv4.src_addr().as_bytes().try_into().ok()?,
+            dst_ip: ipv4.dst_addr().as_bytes().try_into().ok()?,
+            ident,
+            seq_no,
+            data: data.to_vec(),
+        })
+    } else {
+        None
+    }
+}
+
+/// Check if frame is an ICMP echo request
+pub fn is_icmp_echo_request(frame: &[u8]) -> bool {
+    parse_icmp_echo_request(frame).is_some()
+}
+
 // ============================================================================
 // IPv6 NDP Packets
 // ============================================================================

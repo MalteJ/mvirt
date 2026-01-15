@@ -3,17 +3,21 @@
 //! Each vNIC gets its own worker thread that handles:
 //! - vhost-user socket listener
 //! - Packet processing (ARP, NDP, DHCP, routing)
+//! - RX injection for routed packets from other vNICs
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nix::libc;
+use nix::sys::eventfd::{EfdFlags, EventFd as NixEventFd};
 use smoltcp::wire::Ipv6Address;
 use tracing::{debug, error, info, warn};
 use vhost::vhost_user::Listener;
@@ -29,7 +33,7 @@ use super::dhcpv6::Dhcpv6Server;
 use super::icmp::IcmpResponder;
 use super::icmpv6::Icmpv6Responder;
 use super::ndp::NdpResponder;
-use super::router::Router;
+use super::router::{NetworkRouter, NicChannel};
 use super::vhost::VhostNetBackend;
 
 /// Message for inter-worker routing
@@ -46,12 +50,10 @@ pub struct WorkerConfig {
     pub nic: NicEntry,
     /// Network configuration
     pub network: NetworkEntry,
-    /// Sender for routed packets (to other workers)
-    pub router_tx: Sender<RoutedPacket>,
     /// Receiver for routed packets (from other workers)
     pub router_rx: Receiver<RoutedPacket>,
-    /// Shared router for inter-vNIC routing
-    pub router: Router,
+    /// Shared router for inter-vNIC routing (per-network)
+    pub router: NetworkRouter,
 }
 
 /// Handle to a running worker
@@ -66,6 +68,8 @@ pub struct WorkerHandle {
     pub nic_id: String,
     /// Socket path
     pub socket_path: PathBuf,
+    /// Network ID this worker belongs to
+    pub network_id: String,
 }
 
 impl WorkerHandle {
@@ -109,6 +113,7 @@ pub fn spawn_worker(config: WorkerConfig) -> Result<WorkerHandle, String> {
     let shutdown_clone = shutdown.clone();
     let nic_id = config.nic.id.clone();
     let nic_id_for_thread = nic_id.clone();
+    let network_id = config.network.id.clone();
     let socket_path = PathBuf::from(&config.nic.socket_path);
     let socket_path_clone = socket_path.clone();
 
@@ -144,6 +149,7 @@ pub fn spawn_worker(config: WorkerConfig) -> Result<WorkerHandle, String> {
         exit_event,
         nic_id,
         socket_path: socket_path_clone,
+        network_id,
     })
 }
 
@@ -157,11 +163,11 @@ struct PacketProcessor {
     ndp: NdpResponder,
     dhcpv4: Option<Dhcpv4Server>,
     dhcpv6: Option<Dhcpv6Server>,
-    router: Router,
+    router: NetworkRouter,
 }
 
 impl PacketProcessor {
-    fn new(nic: &NicEntry, network: &NetworkEntry, router: Router) -> Self {
+    fn new(nic: &NicEntry, network: &NetworkEntry, router: NetworkRouter) -> Self {
         // Parse MAC address
         let mac = parse_mac(&nic.mac_address).unwrap_or([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
 
@@ -322,10 +328,6 @@ fn run_worker(
     // Register routes for this NIC
     register_nic_routes(&config.router, &config.nic, &config.network);
 
-    // Register this NIC's channel with the router
-    let (worker_tx, _) = crossbeam_channel::unbounded();
-    config.router.register_nic(nic_id.clone(), worker_tx);
-
     // Create listener BEFORE signaling ready - this binds the socket
     let listener = match Listener::new(socket_path, true) {
         Ok(l) => l,
@@ -447,6 +449,19 @@ fn run_worker(
         let processor = PacketProcessor::new(&config.nic, &config.network, config.router.clone());
         backend.set_packet_handler(Box::new(move |packet| processor.process(packet)));
 
+        // Spawn RX injection thread to handle routed packets from other vNICs
+        let rx_channel = config.router_rx.clone();
+        let backend_for_rx = backend.clone();
+        let shutdown_for_rx = shutdown.clone();
+        let nic_id_for_rx = nic_id.clone();
+
+        let rx_thread = thread::Builder::new()
+            .name(format!("rx-{}", &nic_id[..8]))
+            .spawn(move || {
+                run_rx_injection(rx_channel, backend_for_rx, shutdown_for_rx, nic_id_for_rx);
+            })
+            .map_err(|e| format!("Failed to spawn RX injection thread: {e}"))?;
+
         // Create vhost-user daemon
         let mut daemon = match VhostUserDaemon::new(
             format!("mvirt-net-{}", &nic_id[..8]),
@@ -481,13 +496,50 @@ fn run_worker(
             }
         }
 
+        // RX thread will exit when it sees shutdown or channel disconnect
+        // We don't need to explicitly join it here as it will terminate on its own
+        drop(rx_thread);
+
         info!(nic_id = %nic_id, "Waiting for new VM connection");
         // listener is None now, will be recreated at top of loop
     }
 }
 
+/// RX injection thread - reads routed packets from channel and injects them into the VM
+fn run_rx_injection(
+    rx_channel: Receiver<RoutedPacket>,
+    backend: Arc<VhostNetBackend>,
+    shutdown: Arc<AtomicBool>,
+    nic_id: String,
+) {
+    debug!(nic_id = %nic_id, "RX injection thread started");
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            debug!(nic_id = %nic_id, "RX injection thread shutting down");
+            break;
+        }
+
+        match rx_channel.recv_timeout(Duration::from_millis(100)) {
+            Ok(packet) => {
+                debug!(
+                    nic_id = %nic_id,
+                    len = packet.data.len(),
+                    "Injecting routed packet"
+                );
+                backend.inject_and_deliver(packet.data);
+            }
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                debug!(nic_id = %nic_id, "RX channel disconnected");
+                break;
+            }
+        }
+    }
+}
+
 /// Register routes for a NIC in the router
-fn register_nic_routes(router: &Router, nic: &NicEntry, network: &NetworkEntry) {
+fn register_nic_routes(router: &NetworkRouter, nic: &NicEntry, network: &NetworkEntry) {
     // Add direct route for NIC's IPv4 address
     if network.ipv4_enabled {
         if let Some(ref addr_str) = nic.ipv4_address
@@ -527,20 +579,20 @@ fn register_nic_routes(router: &Router, nic: &NicEntry, network: &NetworkEntry) 
     }
 }
 
-/// Worker manager that tracks all active workers
+/// Worker manager that tracks all active workers with per-network routing
 pub struct WorkerManager {
     /// Active workers by NIC ID
-    workers: std::collections::HashMap<String, WorkerHandle>,
-    /// Shared router for inter-vNIC routing
-    router: Router,
+    workers: HashMap<String, WorkerHandle>,
+    /// Per-network routers
+    routers: HashMap<String, NetworkRouter>,
 }
 
 impl WorkerManager {
     /// Create a new worker manager
     pub fn new() -> Self {
         Self {
-            workers: std::collections::HashMap::new(),
-            router: Router::new(),
+            workers: HashMap::new(),
+            routers: HashMap::new(),
         }
     }
 
@@ -550,18 +602,39 @@ impl WorkerManager {
             return Err(format!("Worker for NIC {} already running", nic.id));
         }
 
+        // Get or create router for this network
+        let router = self
+            .routers
+            .entry(network.id.clone())
+            .or_insert_with(|| NetworkRouter::new(network.id.clone()))
+            .clone();
+
         // Create dedicated channel for this worker
         let (worker_tx, worker_rx) = crossbeam_channel::unbounded();
 
-        // Register with router
-        self.router.register_nic(nic.id.clone(), worker_tx.clone());
+        // Create wakeup EventFd for RX injection signaling
+        let wakeup_eventfd = NixEventFd::from_flags(EfdFlags::EFD_NONBLOCK)
+            .map_err(|e| format!("Failed to create wakeup eventfd: {e}"))?;
+
+        // Parse NIC MAC address for Ethernet header rewriting
+        let mac = parse_mac(&nic.mac_address)
+            .ok_or_else(|| format!("Invalid MAC address: {}", nic.mac_address))?;
+
+        // Register with router including wakeup signal and MAC
+        router.register_nic(
+            nic.id.clone(),
+            NicChannel {
+                sender: worker_tx,
+                wakeup: Arc::new(wakeup_eventfd),
+                mac,
+            },
+        );
 
         let config = WorkerConfig {
             nic: nic.clone(),
             network,
-            router_tx: worker_tx,
             router_rx: worker_rx,
-            router: self.router.clone(),
+            router,
         };
 
         let handle = spawn_worker(config)?;
@@ -573,7 +646,10 @@ impl WorkerManager {
     pub fn stop(&mut self, nic_id: &str) -> Result<(), String> {
         if let Some(handle) = self.workers.remove(nic_id) {
             handle.stop();
-            self.router.unregister_nic(nic_id);
+            // Unregister from the network's router
+            if let Some(router) = self.routers.get(&handle.network_id) {
+                router.unregister_nic(nic_id);
+            }
             Ok(())
         } else {
             Err(format!("No worker for NIC {}", nic_id))
@@ -584,8 +660,15 @@ impl WorkerManager {
     pub fn stop_all(&mut self) {
         for (nic_id, handle) in self.workers.drain() {
             handle.stop();
-            self.router.unregister_nic(&nic_id);
+            if let Some(router) = self.routers.get(&handle.network_id) {
+                router.unregister_nic(&nic_id);
+            }
         }
+    }
+
+    /// Remove a network's router (call when network is deleted)
+    pub fn remove_network(&mut self, network_id: &str) {
+        self.routers.remove(network_id);
     }
 
     /// Check if a worker is running
@@ -598,9 +681,9 @@ impl WorkerManager {
         self.workers.keys().cloned().collect()
     }
 
-    /// Get a reference to the router (for external route management)
-    pub fn router(&self) -> &Router {
-        &self.router
+    /// Get router for a network (if it exists)
+    pub fn router(&self, network_id: &str) -> Option<&NetworkRouter> {
+        self.routers.get(network_id)
     }
 }
 

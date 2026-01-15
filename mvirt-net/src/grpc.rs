@@ -372,6 +372,9 @@ impl NetService for NetServiceImpl {
         if deleted {
             info!(network_id = %req.id, nics_deleted = nic_count, "Network deleted");
             self.audit.network_deleted(&req.id, &network.name).await;
+
+            // Clean up the network's router
+            self.workers.lock().unwrap().remove_network(&req.id);
         }
 
         Ok(Response::new(DeleteNetworkResponse {
