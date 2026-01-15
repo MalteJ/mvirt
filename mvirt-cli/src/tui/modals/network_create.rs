@@ -8,6 +8,7 @@ pub struct NetworkCreateModal {
     pub name: String,
     pub ipv4_subnet: String,
     pub ipv6_prefix: String,
+    pub is_public: bool,
     pub focused_field: usize,
 }
 
@@ -17,7 +18,7 @@ impl NetworkCreateModal {
     }
 
     pub fn field_count() -> usize {
-        4 // name, ipv4_subnet, ipv6_prefix, submit
+        5 // name, ipv4_subnet, ipv6_prefix, is_public, submit
     }
 
     pub fn focus_next(&mut self) {
@@ -45,12 +46,22 @@ impl NetworkCreateModal {
         self.focused_field == 0
     }
 
-    pub fn is_submit_field(&self) -> bool {
+    pub fn is_checkbox_field(&self) -> bool {
         self.focused_field == 3
     }
 
-    /// Returns (name, ipv4_subnet or None, ipv6_prefix or None)
-    pub fn validate(&self) -> Result<(String, Option<String>, Option<String>), String> {
+    pub fn toggle_checkbox(&mut self) {
+        if self.focused_field == 3 {
+            self.is_public = !self.is_public;
+        }
+    }
+
+    pub fn is_submit_field(&self) -> bool {
+        self.focused_field == 4
+    }
+
+    /// Returns (name, ipv4_subnet or None, ipv6_prefix or None, is_public)
+    pub fn validate(&self) -> Result<(String, Option<String>, Option<String>, bool), String> {
         if self.name.is_empty() {
             return Err("Name is required".to_string());
         }
@@ -86,12 +97,12 @@ impl NetworkCreateModal {
             return Err("At least one of IPv4 or IPv6 must be configured".to_string());
         }
 
-        Ok((self.name.clone(), ipv4, ipv6))
+        Ok((self.name.clone(), ipv4, ipv6, self.is_public))
     }
 }
 
 pub fn draw(frame: &mut Frame, modal: &NetworkCreateModal) {
-    let area = centered_rect(60, 14, frame.area());
+    let area = centered_rect(60, 16, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -108,6 +119,7 @@ pub fn draw(frame: &mut Frame, modal: &NetworkCreateModal) {
             Constraint::Length(2), // Name
             Constraint::Length(2), // IPv4 Subnet
             Constraint::Length(2), // IPv6 Prefix
+            Constraint::Length(2), // Public checkbox
             Constraint::Length(1), // Spacing
             Constraint::Length(2), // Submit
         ])
@@ -177,15 +189,32 @@ pub fn draw(frame: &mut Frame, modal: &NetworkCreateModal) {
     ]);
     frame.render_widget(Paragraph::new(ipv6_line), chunks[2]);
 
+    // Public checkbox
+    let public_style = if modal.focused_field == 3 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let checkbox = if modal.is_public { "[x]" } else { "[ ]" };
+    let public_line = Line::from(vec![
+        Span::styled(" Public: ", Style::default().fg(Color::Cyan)),
+        Span::styled(checkbox, public_style),
+        Span::styled(
+            " (enables internet access via TUN)",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(public_line), chunks[3]);
+
     // Submit button
-    let submit_style = if modal.focused_field == 3 {
+    let submit_style = if modal.focused_field == 4 {
         Style::default().fg(Color::Black).bg(Color::Cyan)
     } else {
         Style::default().fg(Color::Cyan)
     };
     frame.render_widget(
         Paragraph::new(Span::styled(" [ Create ] ", submit_style)).alignment(Alignment::Center),
-        chunks[4],
+        chunks[5],
     );
 }
 

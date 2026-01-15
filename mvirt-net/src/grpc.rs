@@ -10,6 +10,62 @@ use crate::proto::net_service_server::NetService;
 use crate::proto::*;
 use crate::store::Store;
 
+/// Reconcile routes for public networks
+///
+/// Ensures all routes for public networks exist in the kernel routing table,
+/// and removes stale routes that no longer correspond to any public network.
+pub async fn reconcile_routes(store: &Store) {
+    let networks = match store.list_networks().await {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(error = %e, "Failed to list networks for route reconciliation");
+            return;
+        }
+    };
+
+    // Collect expected routes from public networks
+    let mut expected_routes: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for network in &networks {
+        if network.is_public {
+            if let Some(ref subnet) = network.ipv4_subnet {
+                expected_routes.insert(subnet.clone());
+            }
+            if let Some(ref prefix) = network.ipv6_prefix {
+                expected_routes.insert(prefix.clone());
+            }
+        }
+    }
+
+    // Get current routes from kernel
+    let current_routes = match crate::dataplane::get_routes() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "Failed to get current routes");
+            return;
+        }
+    };
+    let current_set: std::collections::HashSet<String> = current_routes.into_iter().collect();
+
+    // Add missing routes
+    for route in expected_routes.difference(&current_set) {
+        if let Err(e) = crate::dataplane::add_route(route) {
+            warn!(route = %route, error = %e, "Failed to add missing route");
+        } else {
+            info!(route = %route, "Added missing route to TUN");
+        }
+    }
+
+    // Remove stale routes
+    for route in current_set.difference(&expected_routes) {
+        if let Err(e) = crate::dataplane::remove_route(route) {
+            warn!(route = %route, error = %e, "Failed to remove stale route");
+        } else {
+            info!(route = %route, "Removed stale route from TUN");
+        }
+    }
+}
+
 pub struct NetServiceImpl {
     socket_dir: String,
     store: Arc<Store>,
@@ -18,14 +74,19 @@ pub struct NetServiceImpl {
 }
 
 impl NetServiceImpl {
-    pub fn new(socket_dir: String, store: Arc<Store>, audit: Arc<NetAuditLogger>) -> Self {
-        Self {
+    pub fn new(
+        socket_dir: String,
+        store: Arc<Store>,
+        audit: Arc<NetAuditLogger>,
+    ) -> Result<Self, String> {
+        Ok(Self {
             socket_dir,
             store,
             audit,
-            workers: Mutex::new(WorkerManager::new()),
-        }
+            workers: Mutex::new(WorkerManager::new()?),
+        })
     }
+
 
     /// Recover workers for existing NICs after service restart
     pub async fn recover_nics(&self) {
@@ -101,6 +162,51 @@ impl NetServiceImpl {
         }
 
         Err(Status::resource_exhausted("No IPv4 addresses available"))
+    }
+
+    /// Check if the given IPv4/IPv6 ranges overlap with any existing public networks
+    ///
+    /// Public networks must have disjoint IP address ranges to avoid routing conflicts.
+    async fn check_public_network_overlap(
+        &self,
+        ipv4_subnet: Option<&str>,
+        ipv6_prefix: Option<&str>,
+        exclude_id: Option<&str>,
+    ) -> Result<(), Status> {
+        let networks = self
+            .store
+            .list_networks()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        for net in networks.iter().filter(|n| n.is_public) {
+            // Skip the network we're updating (if any)
+            if exclude_id == Some(&net.id) {
+                continue;
+            }
+
+            // Check IPv4 overlap
+            if let (Some(new_subnet), Some(existing_subnet)) = (ipv4_subnet, &net.ipv4_subnet)
+                && subnets_overlap_v4(new_subnet, existing_subnet)?
+            {
+                return Err(Status::invalid_argument(format!(
+                    "IPv4 subnet {} overlaps with public network '{}' ({})",
+                    new_subnet, net.name, existing_subnet
+                )));
+            }
+
+            // Check IPv6 overlap
+            if let (Some(new_prefix), Some(existing_prefix)) = (ipv6_prefix, &net.ipv6_prefix)
+                && prefixes_overlap_v6(new_prefix, existing_prefix)?
+            {
+                return Err(Status::invalid_argument(format!(
+                    "IPv6 prefix {} overlaps with public network '{}' ({})",
+                    new_prefix, net.name, existing_prefix
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Allocate next available IPv6 address from prefix
@@ -201,6 +307,24 @@ impl NetService for NetServiceImpl {
             )));
         }
 
+        // For public networks, check for IP overlap with other public networks
+        if req.is_public {
+            self.check_public_network_overlap(
+                if req.ipv4_enabled {
+                    Some(&req.ipv4_subnet)
+                } else {
+                    None
+                },
+                if req.ipv6_enabled {
+                    Some(&req.ipv6_prefix)
+                } else {
+                    None
+                },
+                None, // No network to exclude (creating new)
+            )
+            .await?;
+        }
+
         // Create entry
         let entry = NetworkEntry::new(
             req.name.clone(),
@@ -218,6 +342,7 @@ impl NetService for NetServiceImpl {
             },
             req.dns_servers,
             req.ntp_servers,
+            req.is_public,
         );
 
         // Store
@@ -225,6 +350,24 @@ impl NetService for NetServiceImpl {
             .create_network(&entry)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // For public networks, add routes to the TUN device
+        if entry.is_public {
+            if let Some(ref subnet) = entry.ipv4_subnet {
+                if let Err(e) = crate::dataplane::add_route(subnet) {
+                    warn!(subnet = %subnet, error = %e, "Failed to add IPv4 route to TUN");
+                } else {
+                    info!(subnet = %subnet, "Added IPv4 route to TUN");
+                }
+            }
+            if let Some(ref prefix) = entry.ipv6_prefix {
+                if let Err(e) = crate::dataplane::add_route(prefix) {
+                    warn!(prefix = %prefix, error = %e, "Failed to add IPv6 route to TUN");
+                } else {
+                    info!(prefix = %prefix, "Added IPv6 route to TUN");
+                }
+            }
+        }
 
         info!(network_id = %entry.id, name = %entry.name, "Network created");
         self.audit.network_created(&entry.id, &entry.name).await;
@@ -370,6 +513,24 @@ impl NetService for NetServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         if deleted {
+            // For public networks, remove routes from the TUN device
+            if network.is_public {
+                if let Some(ref subnet) = network.ipv4_subnet {
+                    if let Err(e) = crate::dataplane::remove_route(subnet) {
+                        warn!(subnet = %subnet, error = %e, "Failed to remove IPv4 route from TUN");
+                    } else {
+                        info!(subnet = %subnet, "Removed IPv4 route from TUN");
+                    }
+                }
+                if let Some(ref prefix) = network.ipv6_prefix {
+                    if let Err(e) = crate::dataplane::remove_route(prefix) {
+                        warn!(prefix = %prefix, error = %e, "Failed to remove IPv6 route from TUN");
+                    } else {
+                        info!(prefix = %prefix, "Removed IPv6 route from TUN");
+                    }
+                }
+            }
+
             info!(network_id = %req.id, nics_deleted = nic_count, "Network deleted");
             self.audit.network_deleted(&req.id, &network.name).await;
 
@@ -731,6 +892,7 @@ fn network_to_proto(entry: &NetworkEntry, nic_count: u32) -> Network {
         nic_count,
         created_at: entry.created_at.clone(),
         updated_at: entry.updated_at.clone(),
+        is_public: entry.is_public,
     }
 }
 
@@ -757,4 +919,30 @@ fn nic_state_to_proto(state: NicState) -> i32 {
         NicState::Active => crate::proto::NicState::Active as i32,
         NicState::Error => crate::proto::NicState::Error as i32,
     }
+}
+
+/// Check if two IPv4 subnets overlap
+fn subnets_overlap_v4(a: &str, b: &str) -> Result<bool, Status> {
+    let net_a: ipnet::Ipv4Net = a
+        .parse()
+        .map_err(|e| Status::internal(format!("invalid IPv4 subnet '{}': {}", a, e)))?;
+    let net_b: ipnet::Ipv4Net = b
+        .parse()
+        .map_err(|e| Status::internal(format!("invalid IPv4 subnet '{}': {}", b, e)))?;
+
+    // Two subnets overlap if one contains the other or they share addresses
+    Ok(net_a.contains(&net_b) || net_b.contains(&net_a))
+}
+
+/// Check if two IPv6 prefixes overlap
+fn prefixes_overlap_v6(a: &str, b: &str) -> Result<bool, Status> {
+    let net_a: ipnet::Ipv6Net = a
+        .parse()
+        .map_err(|e| Status::internal(format!("invalid IPv6 prefix '{}': {}", a, e)))?;
+    let net_b: ipnet::Ipv6Net = b
+        .parse()
+        .map_err(|e| Status::internal(format!("invalid IPv6 prefix '{}': {}", b, e)))?;
+
+    // Two prefixes overlap if one contains the other or they share addresses
+    Ok(net_a.contains(&net_b) || net_b.contains(&net_a))
 }

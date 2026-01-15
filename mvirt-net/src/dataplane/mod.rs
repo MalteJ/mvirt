@@ -16,6 +16,7 @@ pub mod icmpv6;
 pub mod ndp;
 pub mod packet;
 pub mod router;
+pub mod tun;
 pub mod vhost;
 pub mod worker;
 
@@ -26,6 +27,7 @@ pub use icmp::IcmpResponder;
 pub use icmpv6::Icmpv6Responder;
 pub use ndp::NdpResponder;
 pub use packet::{GATEWAY_IPV4, GATEWAY_MAC};
-pub use router::{NetworkRouter, NicChannel};
+pub use router::{NetworkRouter, NicChannel, RouteResult};
+pub use tun::{TunDevice, add_route, get_routes, remove_route};
 pub use vhost::VhostNetBackend;
 pub use worker::{RoutedPacket, WorkerConfig, WorkerHandle, WorkerManager};

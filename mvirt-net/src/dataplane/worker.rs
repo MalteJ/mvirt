@@ -32,7 +32,8 @@ use super::dhcpv6::Dhcpv6Server;
 use super::icmp::IcmpResponder;
 use super::icmpv6::Icmpv6Responder;
 use super::ndp::NdpResponder;
-use super::router::{NetworkRouter, NicChannel};
+use super::router::{NetworkRouter, NicChannel, RouteResult};
+use super::tun::TunDevice;
 use super::vhost::VhostNetBackend;
 
 /// Message for inter-worker routing
@@ -40,6 +41,12 @@ pub struct RoutedPacket {
     /// Target NIC ID
     pub target_nic_id: String,
     /// Raw Ethernet frame
+    pub data: Vec<u8>,
+}
+
+/// Packet to send to internet via TUN device
+pub struct TunPacket {
+    /// Raw IP packet (no Ethernet header)
     pub data: Vec<u8>,
 }
 
@@ -53,6 +60,8 @@ pub struct WorkerConfig {
     pub router_rx: Receiver<RoutedPacket>,
     /// Shared router for inter-vNIC routing (per-network)
     pub router: NetworkRouter,
+    /// Optional sender for packets destined to internet (public networks only)
+    pub tun_tx: Option<crossbeam_channel::Sender<TunPacket>>,
 }
 
 /// Handle to a running worker
@@ -163,10 +172,17 @@ struct PacketProcessor {
     dhcpv4: Option<Dhcpv4Server>,
     dhcpv6: Option<Dhcpv6Server>,
     router: NetworkRouter,
+    /// Sender for packets destined to internet via TUN (public networks only)
+    tun_tx: Option<crossbeam_channel::Sender<TunPacket>>,
 }
 
 impl PacketProcessor {
-    fn new(nic: &NicEntry, network: &NetworkEntry, router: NetworkRouter) -> Self {
+    fn new(
+        nic: &NicEntry,
+        network: &NetworkEntry,
+        router: NetworkRouter,
+        tun_tx: Option<crossbeam_channel::Sender<TunPacket>>,
+    ) -> Self {
         // Parse MAC address
         let mac = parse_mac(&nic.mac_address).unwrap_or([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
 
@@ -181,13 +197,15 @@ impl PacketProcessor {
 
         // Set up NDP responder (no prefix - all addresses via DHCPv6 only)
         // This ensures VMs route all IPv6 traffic through the gateway
-        let ndp = NdpResponder::new(mac);
+        // Public networks announce themselves as default router, non-public don't
+        let ndp = NdpResponder::new(mac, network.is_public);
 
         // Set up DHCPv4 server if IPv4 is enabled and address is assigned
         let dhcpv4 = if network.ipv4_enabled {
             nic.ipv4_address.as_ref().and_then(|addr_str| {
                 addr_str.parse::<Ipv4Addr>().ok().map(|addr| {
-                    let mut server = Dhcpv4Server::new(addr);
+                    // Public networks announce default route, non-public don't (isolation)
+                    let mut server = Dhcpv4Server::new(addr, network.is_public);
                     // Set DNS servers from network config
                     let dns_servers: Vec<Ipv4Addr> = network
                         .dns_servers
@@ -235,6 +253,7 @@ impl PacketProcessor {
             dhcpv4,
             dhcpv6,
             router,
+            tun_tx,
         }
     }
 
@@ -278,9 +297,25 @@ impl PacketProcessor {
             return Some(reply);
         }
 
-        // Try routing to another vNIC
-        if self.router.route_packet(&self.nic_id, packet) {
-            debug!(nic_id = %self.nic_id, len = packet.len(), "Routed packet");
+        // Try routing to another vNIC or internet (public networks)
+        match self.router.route_packet(&self.nic_id, packet) {
+            RouteResult::Routed => {
+                debug!(nic_id = %self.nic_id, len = packet.len(), "Routed packet to local vNIC");
+            }
+            RouteResult::ToInternet(ip_packet) => {
+                if let Some(ref tx) = self.tun_tx {
+                    if let Err(e) = tx.send(TunPacket { data: ip_packet }) {
+                        debug!(nic_id = %self.nic_id, error = %e, "Failed to send packet to TUN");
+                    } else {
+                        debug!(nic_id = %self.nic_id, "Sent packet to TUN for internet routing");
+                    }
+                } else {
+                    debug!(nic_id = %self.nic_id, "ToInternet packet but no TUN available");
+                }
+            }
+            RouteResult::Dropped => {
+                // Packet was dropped (no route, TTL expired, etc.)
+            }
         }
 
         None
@@ -441,7 +476,12 @@ fn run_worker(
         };
 
         // Set up packet processor for this connection
-        let processor = PacketProcessor::new(&config.nic, &config.network, config.router.clone());
+        let processor = PacketProcessor::new(
+            &config.nic,
+            &config.network,
+            config.router.clone(),
+            config.tun_tx.clone(),
+        );
         backend.set_packet_handler(Box::new(move |packet| processor.process(packet)));
 
         // Spawn RX injection thread to handle routed packets from other vNICs
@@ -590,21 +630,70 @@ fn register_nic_routes(router: &NetworkRouter, nic: &NicEntry, network: &Network
     }
 }
 
+/// Handle to the TUN reader thread
+struct TunReaderHandle {
+    thread: JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl TunReaderHandle {
+    fn stop(self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        // Thread will exit on next poll timeout
+        let _ = self.thread.join();
+    }
+}
+
+/// Shared routers accessible from TUN IO thread
+type SharedRouters = Arc<std::sync::RwLock<HashMap<String, NetworkRouter>>>;
+
 /// Worker manager that tracks all active workers with per-network routing
 pub struct WorkerManager {
     /// Active workers by NIC ID
     workers: HashMap<String, WorkerHandle>,
-    /// Per-network routers
-    routers: HashMap<String, NetworkRouter>,
+    /// Per-network routers (shared with TUN thread)
+    routers: SharedRouters,
+    /// Global TUN device sender
+    tun_tx: crossbeam_channel::Sender<TunPacket>,
+    /// TUN reader thread handle
+    tun_reader: Option<TunReaderHandle>,
 }
 
 impl WorkerManager {
-    /// Create a new worker manager
-    pub fn new() -> Self {
-        Self {
+    /// Create a new worker manager with TUN device
+    pub fn new() -> Result<Self, String> {
+        info!("Creating global TUN device 'mvirt-net'");
+
+        // Create TUN device
+        let tun = TunDevice::new().map_err(|e| format!("Failed to create TUN device: {e}"))?;
+        tun.bring_up().map_err(|e| format!("Failed to bring up TUN device: {e}"))?;
+
+        info!(name = %tun.name(), "TUN device created and brought up");
+
+        // Create channel for outgoing packets (workers -> TUN)
+        let (tun_tx, tun_rx) = crossbeam_channel::unbounded::<TunPacket>();
+
+        // Shared routers accessible from TUN thread
+        let routers: SharedRouters = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let routers_for_tun = routers.clone();
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+
+        // Spawn TUN IO thread
+        let thread = thread::Builder::new()
+            .name("tun-io".to_string())
+            .spawn(move || {
+                run_tun_io(tun, tun_rx, routers_for_tun, shutdown_clone);
+            })
+            .map_err(|e| format!("Failed to spawn TUN IO thread: {e}"))?;
+
+        Ok(Self {
             workers: HashMap::new(),
-            routers: HashMap::new(),
-        }
+            routers,
+            tun_tx,
+            tun_reader: Some(TunReaderHandle { thread, shutdown }),
+        })
     }
 
     /// Start a worker for a NIC
@@ -614,11 +703,20 @@ impl WorkerManager {
         }
 
         // Get or create router for this network
-        let router = self
-            .routers
-            .entry(network.id.clone())
-            .or_insert_with(|| NetworkRouter::new(network.id.clone()))
-            .clone();
+        let router = {
+            let mut routers = self.routers.write().unwrap();
+            routers
+                .entry(network.id.clone())
+                .or_insert_with(|| NetworkRouter::new(network.id.clone(), network.is_public))
+                .clone()
+        };
+
+        // For public networks, pass TUN sender
+        let tun_tx = if network.is_public {
+            Some(self.tun_tx.clone())
+        } else {
+            None
+        };
 
         // Create dedicated channel for this worker
         let (worker_tx, worker_rx) = crossbeam_channel::unbounded();
@@ -646,6 +744,7 @@ impl WorkerManager {
             network,
             router_rx: worker_rx,
             router,
+            tun_tx,
         };
 
         let handle = spawn_worker(config)?;
@@ -658,7 +757,8 @@ impl WorkerManager {
         if let Some(handle) = self.workers.remove(nic_id) {
             handle.stop();
             // Unregister from the network's router
-            if let Some(router) = self.routers.get(&handle.network_id) {
+            let routers = self.routers.read().unwrap();
+            if let Some(router) = routers.get(&handle.network_id) {
                 router.unregister_nic(nic_id);
             }
             Ok(())
@@ -669,17 +769,25 @@ impl WorkerManager {
 
     /// Stop all workers
     pub fn stop_all(&mut self) {
+        let routers = self.routers.read().unwrap();
         for (nic_id, handle) in self.workers.drain() {
             handle.stop();
-            if let Some(router) = self.routers.get(&handle.network_id) {
+            if let Some(router) = routers.get(&handle.network_id) {
                 router.unregister_nic(&nic_id);
             }
+        }
+        drop(routers);
+
+        // Stop TUN reader thread if running
+        if let Some(tun_reader) = self.tun_reader.take() {
+            info!("Stopping TUN IO thread");
+            tun_reader.stop();
         }
     }
 
     /// Remove a network's router (call when network is deleted)
     pub fn remove_network(&mut self, network_id: &str) {
-        self.routers.remove(network_id);
+        self.routers.write().unwrap().remove(network_id);
     }
 
     /// Check if a worker is running
@@ -693,15 +801,159 @@ impl WorkerManager {
     }
 
     /// Get router for a network (if it exists)
-    pub fn router(&self, network_id: &str) -> Option<&NetworkRouter> {
-        self.routers.get(network_id)
+    pub fn router(&self, network_id: &str) -> Option<NetworkRouter> {
+        self.routers.read().unwrap().get(network_id).cloned()
     }
 }
 
-impl Default for WorkerManager {
-    fn default() -> Self {
-        Self::new()
+/// Run TUN I/O loop - handles both reading from TUN and writing to TUN
+///
+/// This function:
+/// - Reads packets from channel (VM -> Internet) and writes them to TUN
+/// - Reads packets from TUN (Internet -> VM) and routes them to correct vNIC
+fn run_tun_io(
+    mut tun: TunDevice,
+    tun_rx: crossbeam_channel::Receiver<TunPacket>,
+    routers: SharedRouters,
+    shutdown: Arc<AtomicBool>,
+) {
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    use std::os::fd::BorrowedFd;
+
+    info!("TUN IO thread started");
+
+    let mut buf = vec![0u8; 65535];
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+
+        // Check for outgoing packets (VM -> TUN) with a short timeout
+        match tun_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(packet) => {
+                // Write to TUN device
+                if let Err(e) = tun.write_packet(&packet.data) {
+                    warn!(error = %e, "Failed to write packet to TUN");
+                } else {
+                    debug!(len = packet.data.len(), "Wrote packet to TUN");
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                info!("TUN channel disconnected, exiting");
+                break;
+            }
+        }
+
+        // Poll TUN fd for incoming packets (Internet -> VM)
+        let tun_fd = tun.as_raw_fd();
+        let poll_fd = PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
+
+        match poll(&mut [poll_fd], PollTimeout::ZERO) {
+            Ok(n) if n > 0 => {
+                // Read from TUN
+                match tun.read_packet(&mut buf) {
+                    Ok(len) => {
+                        let ip_packet = &buf[..len];
+                        route_tun_packet_to_nic(ip_packet, &routers);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => {
+                        warn!(error = %e, "Failed to read from TUN");
+                    }
+                }
+            }
+            Ok(_) => {} // No data available
+            Err(e) => {
+                warn!(error = %e, "Poll on TUN fd failed");
+            }
+        }
     }
+
+    info!("TUN IO thread stopped");
+}
+
+/// Route a packet from TUN to the correct vNIC
+fn route_tun_packet_to_nic(ip_packet: &[u8], routers: &SharedRouters) {
+    use super::packet::GATEWAY_MAC;
+    use smoltcp::wire::{EthernetProtocol, Ipv4Packet, Ipv6Packet};
+
+    if ip_packet.is_empty() {
+        return;
+    }
+
+    // Determine IP version from first nibble
+    let version = ip_packet[0] >> 4;
+
+    let (dst_addr_str, ethertype) = match version {
+        4 => {
+            // IPv4
+            if ip_packet.len() < 20 {
+                return;
+            }
+            match Ipv4Packet::new_checked(ip_packet) {
+                Ok(ipv4) => (ipv4.dst_addr().to_string(), EthernetProtocol::Ipv4),
+                Err(_) => return,
+            }
+        }
+        6 => {
+            // IPv6
+            if ip_packet.len() < 40 {
+                return;
+            }
+            match Ipv6Packet::new_checked(ip_packet) {
+                Ok(ipv6) => (ipv6.dst_addr().to_string(), EthernetProtocol::Ipv6),
+                Err(_) => return,
+            }
+        }
+        _ => return,
+    };
+
+    debug!(dst = %dst_addr_str, version = version, "Routing TUN packet to vNIC");
+
+    // Search all public routers for a matching destination
+    let routers_guard = routers.read().unwrap();
+    for router in routers_guard.values() {
+        if !router.is_public() {
+            continue;
+        }
+
+        // Try to route the packet - if it finds a destination, it will send it
+        // We need to build an Ethernet frame around the IP packet
+        let mut eth_frame = Vec::with_capacity(14 + ip_packet.len());
+
+        // We'll use placeholder dst MAC - the router will overwrite it
+        eth_frame.extend_from_slice(&[0u8; 6]); // dst MAC (placeholder)
+        eth_frame.extend_from_slice(&GATEWAY_MAC); // src MAC (gateway)
+
+        // EtherType
+        let ethertype_bytes = match ethertype {
+            EthernetProtocol::Ipv4 => [0x08, 0x00],
+            EthernetProtocol::Ipv6 => [0x86, 0xDD],
+            _ => return,
+        };
+        eth_frame.extend_from_slice(&ethertype_bytes);
+
+        // IP payload
+        eth_frame.extend_from_slice(ip_packet);
+
+        // Try routing - the router will find the destination NIC and rewrite the dst MAC
+        match router.route_packet("tun", &eth_frame) {
+            RouteResult::Routed => {
+                debug!(dst = %dst_addr_str, "Routed TUN packet to local vNIC");
+                return;
+            }
+            RouteResult::ToInternet(_) => {
+                // Shouldn't happen for incoming TUN packets, but ignore
+            }
+            RouteResult::Dropped => {
+                // No route in this router, try next
+            }
+        }
+    }
+
+    debug!(dst = %dst_addr_str, "No route found for TUN packet");
 }
 
 impl Drop for WorkerManager {

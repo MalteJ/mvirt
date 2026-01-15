@@ -34,11 +34,18 @@ pub struct Dhcpv4Server {
     lease_time: u32,
     /// Server identifier (gateway IP)
     server_id: Ipv4Addr,
+    /// Whether to announce default route (only for public networks)
+    announce_default_route: bool,
 }
 
 impl Dhcpv4Server {
     /// Create a new DHCPv4 server
-    pub fn new(assigned_ip: Ipv4Addr) -> Self {
+    ///
+    /// # Arguments
+    /// * `assigned_ip` - IPv4 address to assign to the VM
+    /// * `is_public` - If true, announces a default route via the gateway.
+    ///   If false, no Router option is sent (network isolation).
+    pub fn new(assigned_ip: Ipv4Addr, is_public: bool) -> Self {
         Self {
             assigned_ip,
             subnet_mask: Ipv4Addr::new(255, 255, 255, 255), // /32
@@ -46,6 +53,7 @@ impl Dhcpv4Server {
             dns_servers: Vec::new(),
             lease_time: 86400, // 24 hours
             server_id: Ipv4Addr::new(169, 254, 0, 1),
+            announce_default_route: is_public,
         }
     }
 
@@ -179,9 +187,14 @@ impl Dhcpv4Server {
         response
             .opts_mut()
             .insert(DhcpOption::SubnetMask(self.subnet_mask));
-        response
-            .opts_mut()
-            .insert(DhcpOption::Router(vec![self.gateway]));
+
+        // Only announce default route for public networks
+        // Non-public networks are isolated - no gateway/default route
+        if self.announce_default_route {
+            response
+                .opts_mut()
+                .insert(DhcpOption::Router(vec![self.gateway]));
+        }
 
         if !self.dns_servers.is_empty() {
             response
@@ -258,15 +271,22 @@ mod tests {
 
     #[test]
     fn test_dhcpv4_server_new() {
-        let server = Dhcpv4Server::new(Ipv4Addr::new(10, 0, 0, 5));
+        let server = Dhcpv4Server::new(Ipv4Addr::new(10, 0, 0, 5), true);
         assert_eq!(server.assigned_ip, Ipv4Addr::new(10, 0, 0, 5));
         assert_eq!(server.subnet_mask, Ipv4Addr::new(255, 255, 255, 255));
         assert_eq!(server.gateway, Ipv4Addr::new(169, 254, 0, 1));
+        assert!(server.announce_default_route);
+    }
+
+    #[test]
+    fn test_dhcpv4_server_non_public() {
+        let server = Dhcpv4Server::new(Ipv4Addr::new(10, 0, 0, 5), false);
+        assert!(!server.announce_default_route);
     }
 
     #[test]
     fn test_build_response() {
-        let server = Dhcpv4Server::new(Ipv4Addr::new(10, 0, 0, 5));
+        let server = Dhcpv4Server::new(Ipv4Addr::new(10, 0, 0, 5), true);
 
         // Build a minimal DHCP discover
         let mut request = Message::default();
@@ -292,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_set_dns_servers() {
-        let mut server = Dhcpv4Server::new(Ipv4Addr::new(10, 0, 0, 5));
+        let mut server = Dhcpv4Server::new(Ipv4Addr::new(10, 0, 0, 5), true);
         server.set_dns_servers(vec![Ipv4Addr::new(9, 9, 9, 9)]);
         assert_eq!(server.dns_servers, vec![Ipv4Addr::new(9, 9, 9, 9)]);
     }

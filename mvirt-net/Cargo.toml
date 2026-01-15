@@ -63,8 +63,8 @@ prefix-trie = "0.8"
 # Inter-thread communication (data plane)
 crossbeam-channel = "0.5"
 
-# Low-level (hugepages, eventfd)
-nix = { version = "0.30", features = ["mman", "event"] }
+# Low-level (hugepages, eventfd, TUN device)
+nix = { version = "0.30", features = ["mman", "event", "ioctl", "net"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

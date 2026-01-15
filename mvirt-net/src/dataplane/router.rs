@@ -2,6 +2,9 @@
 //!
 //! Maintains per-network routing tables with efficient LPM (Longest Prefix Match)
 //! using prefix tries. Handles packet forwarding between vNICs in the same network.
+//!
+//! For public networks, packets without a local destination are returned to the caller
+//! for forwarding to the TUN device (internet access).
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -16,6 +19,18 @@ use tracing::debug;
 
 use super::packet::{GATEWAY_MAC, parse_ethernet};
 use super::worker::RoutedPacket;
+
+/// Result of routing a packet
+#[derive(Debug)]
+pub enum RouteResult {
+    /// Packet was dropped (TTL expired, parse error, no route in non-public network)
+    Dropped,
+    /// Packet was successfully routed to a local NIC
+    Routed,
+    /// Packet should be sent to internet via TUN (public network, no local route)
+    /// Contains the IP packet without Ethernet header
+    ToInternet(Vec<u8>),
+}
 
 /// Route entry in the routing table
 #[derive(Clone, Debug)]
@@ -51,19 +66,32 @@ struct NetworkRouterInner {
     ipv6_routes: PrefixMap<Ipv6Net, RouteEntry>,
     /// Channel senders per NIC for packet forwarding
     nic_channels: HashMap<String, NicChannel>,
+    /// Whether this is a public network (allows internet access via TUN)
+    is_public: bool,
 }
 
 impl NetworkRouter {
     /// Create a new router for a specific network
-    pub fn new(network_id: String) -> Self {
+    ///
+    /// # Arguments
+    /// * `network_id` - Unique network identifier
+    /// * `is_public` - If true, packets without local destination go to TUN (internet).
+    ///   If false, such packets are dropped (network isolation).
+    pub fn new(network_id: String, is_public: bool) -> Self {
         Self {
             inner: Arc::new(RwLock::new(NetworkRouterInner {
                 ipv4_routes: PrefixMap::new(),
                 ipv6_routes: PrefixMap::new(),
                 nic_channels: HashMap::new(),
+                is_public,
             })),
             network_id,
         }
+    }
+
+    /// Check if this router is for a public network
+    pub fn is_public(&self) -> bool {
+        self.inner.read().unwrap().is_public
     }
 
     /// Register a NIC's channel for receiving routed packets
@@ -132,11 +160,15 @@ impl NetworkRouter {
     }
 
     /// Route a packet to its destination
-    /// Returns true if the packet was routed, false if no route found
-    pub fn route_packet(&self, source_nic_id: &str, packet: &[u8]) -> bool {
+    ///
+    /// Returns:
+    /// - `RouteResult::Routed` if packet was sent to a local NIC
+    /// - `RouteResult::ToInternet(ip_packet)` if packet should go to TUN (public networks only)
+    /// - `RouteResult::Dropped` if packet was dropped (TTL expired, parse error, or no route in non-public network)
+    pub fn route_packet(&self, source_nic_id: &str, packet: &[u8]) -> RouteResult {
         // Parse the packet to determine destination
         let Some(frame) = parse_ethernet(packet) else {
-            return false;
+            return RouteResult::Dropped;
         };
 
         // Ethernet header is 14 bytes
@@ -145,14 +177,14 @@ impl NetworkRouter {
         let (target_nic_id, modified_packet) = match frame.ethertype() {
             EthernetProtocol::Ipv4 => {
                 let Ok(ipv4) = Ipv4Packet::new_checked(frame.payload()) else {
-                    return false;
+                    return RouteResult::Dropped;
                 };
 
                 // Check TTL - drop if expired
                 let ttl = ipv4.hop_limit();
                 if ttl <= 1 {
                     debug!(ttl, "Dropping packet: TTL expired");
-                    return false;
+                    return RouteResult::Dropped;
                 }
 
                 let dst = ipv4.dst_addr();
@@ -166,21 +198,21 @@ impl NetworkRouter {
             }
             EthernetProtocol::Ipv6 => {
                 let Ok(ipv6) = Ipv6Packet::new_checked(frame.payload()) else {
-                    return false;
+                    return RouteResult::Dropped;
                 };
 
                 // Check Hop Limit - drop if expired
                 let hop_limit = ipv6.hop_limit();
                 if hop_limit <= 1 {
                     debug!(hop_limit, "Dropping packet: Hop Limit expired");
-                    return false;
+                    return RouteResult::Dropped;
                 }
 
                 let dst = ipv6.dst_addr();
 
                 // Skip link-local addresses (handled locally)
                 if dst.segments()[0] == 0xfe80 {
-                    return false;
+                    return RouteResult::Dropped;
                 }
 
                 let target = self.lookup_ipv6(dst).map(|e| e.nic_id);
@@ -191,16 +223,34 @@ impl NetworkRouter {
 
                 (target, modified)
             }
-            _ => return false,
+            _ => return RouteResult::Dropped,
         };
 
+        // No local target found
         let Some(target) = target_nic_id else {
-            return false;
+            // Check if this is a public network - if so, forward to internet via TUN
+            let inner = self.inner.read().unwrap();
+            if inner.is_public {
+                // Extract IP packet (strip Ethernet header) for TUN
+                let ip_packet = modified_packet[ETH_HEADER_LEN..].to_vec();
+                debug!(
+                    source = %source_nic_id,
+                    len = ip_packet.len(),
+                    "Forwarding to internet (TUN)"
+                );
+                return RouteResult::ToInternet(ip_packet);
+            }
+            // Non-public network: DROP - complete network isolation
+            debug!(
+                source = %source_nic_id,
+                "Dropping packet: no local route (non-public network)"
+            );
+            return RouteResult::Dropped;
         };
 
         // Don't route back to same NIC
         if target == source_nic_id {
-            return false;
+            return RouteResult::Dropped;
         }
 
         // Send to target NIC
@@ -227,11 +277,11 @@ impl NetworkRouter {
                     len = packet.len(),
                     "Routed packet"
                 );
-                return true;
+                return RouteResult::Routed;
             }
         }
 
-        false
+        RouteResult::Dropped
     }
 }
 
@@ -286,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_lpm() {
-        let router = NetworkRouter::new("test-net".to_string());
+        let router = NetworkRouter::new("test-net".to_string(), false);
 
         // Add a /24 network route
         router.add_ipv4_route("10.0.0.0/24".parse().unwrap(), "nic-1".to_string(), false);
@@ -309,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_lpm() {
-        let router = NetworkRouter::new("test-net".to_string());
+        let router = NetworkRouter::new("test-net".to_string(), false);
 
         // Add a /64 network route
         router.add_ipv6_route("fd00::/64".parse().unwrap(), "nic-1".to_string(), false);
@@ -332,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_unregister_removes_routes() {
-        let router = NetworkRouter::new("test-net".to_string());
+        let router = NetworkRouter::new("test-net".to_string(), false);
 
         router.add_ipv4_route("10.0.0.0/24".parse().unwrap(), "nic-1".to_string(), false);
         router.add_ipv4_route("10.0.1.0/24".parse().unwrap(), "nic-2".to_string(), false);
@@ -350,8 +400,8 @@ mod tests {
     #[test]
     fn test_network_isolation() {
         // Two separate routers for different networks
-        let router_a = NetworkRouter::new("net-a".to_string());
-        let router_b = NetworkRouter::new("net-b".to_string());
+        let router_a = NetworkRouter::new("net-a".to_string(), false);
+        let router_b = NetworkRouter::new("net-b".to_string(), false);
 
         // Same prefix in both networks
         router_a.add_ipv4_route("10.0.0.0/24".parse().unwrap(), "nic-a".to_string(), false);

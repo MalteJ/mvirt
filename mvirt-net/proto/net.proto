@@ -40,6 +40,9 @@ message Network {
 
   string created_at = 10;            // ISO 8601
   string updated_at = 11;
+
+  // Public network flag - enables internet access via TUN device
+  bool is_public = 12;
 }
 
 message Nic {
@@ -89,6 +92,9 @@ message CreateNetworkRequest {
   // Services
   repeated string dns_servers = 6;
   repeated string ntp_servers = 7;
+
+  // Public network flag - enables internet access via TUN device
+  bool is_public = 8;
 }
 
 message GetNetworkRequest {

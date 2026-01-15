@@ -29,15 +29,24 @@ pub struct NdpResponder {
     /// DNS servers to advertise in RA
     #[allow(dead_code)]
     dns_servers: Vec<Ipv6Address>,
+    /// Whether this is a default router (only for public networks)
+    /// If true, Router Lifetime = 1800s. If false, Router Lifetime = 0s.
+    is_default_router: bool,
 }
 
 impl NdpResponder {
     /// Create a new NDP responder
-    pub fn new(nic_mac: [u8; 6]) -> Self {
+    ///
+    /// # Arguments
+    /// * `nic_mac` - MAC address of the vNIC
+    /// * `is_public` - If true, announces itself as default router (Router Lifetime = 1800s).
+    ///   If false, Router Lifetime = 0 (VMs won't use us as default gateway).
+    pub fn new(nic_mac: [u8; 6], is_public: bool) -> Self {
         Self {
             nic_mac: EthernetAddress::from_bytes(&nic_mac),
             prefix: None,
             dns_servers: Vec::new(),
+            is_default_router: is_public,
         }
     }
 
@@ -191,11 +200,21 @@ impl NdpResponder {
         let gateway_mac = EthernetAddress::from_bytes(&GATEWAY_MAC);
         let lladdr = RawHardwareAddress::from_bytes(&GATEWAY_MAC);
 
+        // Router Lifetime:
+        // - Public networks (is_default_router=true): 1800s - we are the default router
+        // - Non-public networks (is_default_router=false): 0s - VMs won't use us as default gateway
+        //   A Router Lifetime of 0 means "not a default router" per RFC 4861
+        let router_lifetime = if self.is_default_router {
+            smoltcp::time::Duration::from_secs(1800)
+        } else {
+            smoltcp::time::Duration::from_secs(0)
+        };
+
         // Build RA with M=1, O=1 (managed config via DHCPv6)
         let icmp_repr = Icmpv6Repr::Ndisc(NdiscRepr::RouterAdvert {
             hop_limit: 64,
             flags: NdiscRouterFlags::MANAGED | NdiscRouterFlags::OTHER,
-            router_lifetime: smoltcp::time::Duration::from_secs(1800),
+            router_lifetime,
             reachable_time: smoltcp::time::Duration::from_secs(0),
             retrans_time: smoltcp::time::Duration::from_secs(0),
             lladdr: Some(lladdr),
@@ -277,9 +296,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_unsolicited_ra() {
-        // No prefix - all addresses via DHCPv6, forces routing through gateway
-        let responder = NdpResponder::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+    fn test_build_unsolicited_ra_public() {
+        // Public network - is_default_router = true
+        let responder = NdpResponder::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56], true);
+        assert!(responder.is_default_router);
 
         let ra = responder.build_unsolicited_ra();
         assert!(!ra.is_empty());
@@ -287,5 +307,15 @@ mod tests {
         // Parse and verify
         let frame = parse_ethernet(&ra).unwrap();
         assert_eq!(frame.ethertype(), EthernetProtocol::Ipv6);
+    }
+
+    #[test]
+    fn test_build_unsolicited_ra_non_public() {
+        // Non-public network - is_default_router = false
+        let responder = NdpResponder::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56], false);
+        assert!(!responder.is_default_router);
+
+        let ra = responder.build_unsolicited_ra();
+        assert!(!ra.is_empty());
     }
 }

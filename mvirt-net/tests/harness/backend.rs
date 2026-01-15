@@ -161,13 +161,13 @@ fn run_test_backend(
     let arp_responder = ArpResponder::new(mac_bytes);
     let icmp_responder = IcmpResponder::new();
     let dhcpv4_server = ipv4_addr.map(|ip| {
-        let mut server = Dhcpv4Server::new(ip);
+        let mut server = Dhcpv4Server::new(ip, true);
         server.set_dns_servers(vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)]);
         server
     });
 
     // IPv6 handlers
-    let ndp_responder = NdpResponder::new(mac_bytes);
+    let ndp_responder = NdpResponder::new(mac_bytes, true);
     let icmpv6_responder = Icmpv6Responder::new();
     let dhcpv6_server = ipv6_addr.map(|ip| {
         let mut server = Dhcpv6Server::new(ip);
@@ -302,8 +302,8 @@ impl RoutingTestBackend {
         let socket_path_b = tmp_dir.path().join("nic_b.sock");
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        // Create shared router for this network
-        let router = NetworkRouter::new("test-network".to_string());
+        // Create shared router for this network (non-public for tests)
+        let router = NetworkRouter::new("test-network".to_string(), false);
 
         // Create channels for each NIC
         let (tx_a, rx_a) = crossbeam_channel::unbounded();

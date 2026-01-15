@@ -179,6 +179,7 @@ fn draw_networks_table(
         Cell::from("NAME").style(Style::default().fg(Color::Cyan)),
         Cell::from("IPv4 SUBNET").style(Style::default().fg(Color::Cyan)),
         Cell::from("IPv6 PREFIX").style(Style::default().fg(Color::Cyan)),
+        Cell::from("PUB").style(Style::default().fg(Color::Cyan)),
         Cell::from("NICs").style(Style::default().fg(Color::Cyan)),
     ])
     .style(Style::default().bold())
@@ -211,6 +212,12 @@ fn draw_networks_table(
                 "-".to_string()
             };
 
+            let public_indicator = if net.is_public {
+                Span::styled("\u{25cf}", Style::default().fg(Color::Green).bg(bg)) // filled circle
+            } else {
+                Span::styled("\u{25cb}", Style::default().fg(Color::DarkGray).bg(bg)) // empty circle
+            };
+
             Row::new(vec![
                 Cell::from(Span::styled(
                     short_id,
@@ -234,6 +241,7 @@ fn draw_networks_table(
                     ipv6,
                     Style::default().fg(Color::DarkGray).bg(bg),
                 )),
+                Cell::from(public_indicator),
                 Cell::from(Span::styled(
                     net.nic_count.to_string(),
                     Style::default().fg(Color::DarkGray).bg(bg),
@@ -249,7 +257,8 @@ fn draw_networks_table(
             Constraint::Min(15),
             Constraint::Length(18),
             Constraint::Length(20),
-            Constraint::Length(6),
+            Constraint::Length(4),
+            Constraint::Length(5),
         ],
     )
     .header(header)

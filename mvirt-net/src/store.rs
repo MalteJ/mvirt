@@ -38,6 +38,7 @@ impl Store {
                 ipv6_prefix TEXT,
                 dns_servers TEXT,
                 ntp_servers TEXT,
+                is_public INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -45,6 +46,16 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
+
+        // Migration: add is_public column if missing
+        sqlx::query(
+            r#"
+            ALTER TABLE networks ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .ok(); // Ignore error if column already exists
 
         // NICs table
         sqlx::query(
@@ -113,8 +124,8 @@ impl Store {
         sqlx::query(
             r#"
             INSERT INTO networks (id, name, ipv4_enabled, ipv4_subnet, ipv6_enabled, ipv6_prefix,
-                                  dns_servers, ntp_servers, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  dns_servers, ntp_servers, is_public, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&entry.id)
@@ -125,6 +136,7 @@ impl Store {
         .bind(&entry.ipv6_prefix)
         .bind(&dns_json)
         .bind(&ntp_json)
+        .bind(entry.is_public)
         .bind(&entry.created_at)
         .bind(&entry.updated_at)
         .execute(&self.pool)
@@ -137,7 +149,7 @@ impl Store {
         let row = sqlx::query(
             r#"
             SELECT id, name, ipv4_enabled, ipv4_subnet, ipv6_enabled, ipv6_prefix,
-                   dns_servers, ntp_servers, created_at, updated_at
+                   dns_servers, ntp_servers, is_public, created_at, updated_at
             FROM networks WHERE id = ?
             "#,
         )
@@ -152,7 +164,7 @@ impl Store {
         let row = sqlx::query(
             r#"
             SELECT id, name, ipv4_enabled, ipv4_subnet, ipv6_enabled, ipv6_prefix,
-                   dns_servers, ntp_servers, created_at, updated_at
+                   dns_servers, ntp_servers, is_public, created_at, updated_at
             FROM networks WHERE name = ?
             "#,
         )
@@ -167,7 +179,7 @@ impl Store {
         let rows = sqlx::query(
             r#"
             SELECT id, name, ipv4_enabled, ipv4_subnet, ipv6_enabled, ipv6_prefix,
-                   dns_servers, ntp_servers, created_at, updated_at
+                   dns_servers, ntp_servers, is_public, created_at, updated_at
             FROM networks ORDER BY created_at DESC
             "#,
         )
@@ -234,6 +246,7 @@ impl Store {
             ipv6_prefix: row.get("ipv6_prefix"),
             dns_servers: serde_json::from_str(&dns_json).unwrap_or_default(),
             ntp_servers: serde_json::from_str(&ntp_json).unwrap_or_default(),
+            is_public: row.get::<i32, _>("is_public") != 0,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         }
@@ -513,6 +526,7 @@ mod tests {
             Some("fd00::/64".to_string()),
             vec!["1.1.1.1".to_string()],
             vec![],
+            false,
         );
         store.create_network(&entry).await.unwrap();
 
@@ -560,6 +574,7 @@ mod tests {
             None,
             vec![],
             vec![],
+            false,
         );
         store.create_network(&network).await.unwrap();
 
@@ -604,6 +619,7 @@ mod tests {
             None,
             vec![],
             vec![],
+            false,
         );
         store.create_network(&network).await.unwrap();
 

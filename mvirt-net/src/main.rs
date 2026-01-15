@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
 use mvirt_net::audit::create_audit_logger;
-use mvirt_net::grpc::NetServiceImpl;
+use mvirt_net::grpc::{NetServiceImpl, reconcile_routes};
 use mvirt_net::proto::net_service_server::NetServiceServer;
 use mvirt_net::store::Store;
 
@@ -56,11 +56,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize audit logger (connects lazily to mvirt-log)
     let audit = create_audit_logger(&args.log_endpoint);
 
-    // Create gRPC service
-    let service = NetServiceImpl::new(args.socket_dir.clone(), store, audit);
+    // Create gRPC service (also creates TUN device)
+    let service = NetServiceImpl::new(args.socket_dir.clone(), store.clone(), audit)
+        .map_err(|e| format!("Failed to create service: {e}"))?;
 
     // Recover workers for existing NICs
     service.recover_nics().await;
+
+    // Initial route reconciliation
+    info!("Reconciling routes for public networks");
+    reconcile_routes(&store).await;
+
+    // Spawn background route reconciliation loop (every 10 seconds)
+    let store_for_reconcile = store.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            reconcile_routes(&store_for_reconcile).await;
+        }
+    });
 
     let addr = args.listen.parse()?;
     info!(

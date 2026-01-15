@@ -12,11 +12,13 @@ pub struct NetworkEntry {
     pub ipv6_prefix: Option<String>,
     pub dns_servers: Vec<String>,
     pub ntp_servers: Vec<String>,
+    pub is_public: bool,
     pub created_at: String,
     pub updated_at: String,
 }
 
 impl NetworkEntry {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         ipv4_enabled: bool,
@@ -25,6 +27,7 @@ impl NetworkEntry {
         ipv6_prefix: Option<String>,
         dns_servers: Vec<String>,
         ntp_servers: Vec<String>,
+        is_public: bool,
     ) -> Self {
         let now = Utc::now().to_rfc3339();
         Self {
@@ -36,6 +39,7 @@ impl NetworkEntry {
             ipv6_prefix,
             dns_servers,
             ntp_servers,
+            is_public,
             created_at: now.clone(),
             updated_at: now,
         }
@@ -188,12 +192,14 @@ mod tests {
             None,
             vec!["1.1.1.1".to_string()],
             vec![],
+            false,
         );
 
         assert_eq!(entry.name, "test-net");
         assert!(entry.ipv4_enabled);
         assert_eq!(entry.ipv4_subnet, Some("10.0.0.0/24".to_string()));
         assert!(!entry.ipv6_enabled);
+        assert!(!entry.is_public);
         assert!(!entry.id.is_empty());
     }
 

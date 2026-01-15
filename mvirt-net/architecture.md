@@ -10,39 +10,48 @@ mvirt-net is a vhost-user backend for virtio-net devices. It provides:
 2. **Data Plane**: Per-vNIC worker threads for packet processing (sync, shared-nothing)
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           mvirt-net                                  │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  Control Plane (tokio async runtime)                                │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐    │
-│  │  gRPC API  │  │   Store    │  │   Audit    │  │  Worker    │    │
-│  │  (tonic)   │  │  (SQLite)  │  │   Logger   │  │  Manager   │    │
-│  └─────┬──────┘  └────────────┘  └────────────┘  └─────┬──────┘    │
-│        │                                               │            │
-│        │                                          spawn│            │
-│        ▼                                               ▼            │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  Data Plane (dedicated threads, no tokio)                           │
-│                                                                      │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐     │
-│  │  vNIC Worker    │  │  vNIC Worker    │  │  vNIC Worker    │     │
-│  │                 │  │                 │  │                 │     │
-│  │ ┌─────────────┐ │  │ ┌─────────────┐ │  │ ┌─────────────┐ │     │
-│  │ │ vhost-user  │ │  │ │ vhost-user  │ │  │ │ vhost-user  │ │     │
-│  │ │   backend   │ │  │ │   backend   │ │  │ │   backend   │ │     │
-│  │ └──────┬──────┘ │  │ └──────┬──────┘ │  │ └──────┬──────┘ │     │
-│  │        │        │  │        │        │  │        │        │     │
-│  │ ┌──────▼──────┐ │  │ ┌──────▼──────┐ │  │ ┌──────▼──────┐ │     │
-│  │ │   Packet    │ │  │ │   Packet    │ │  │ │   Packet    │ │     │
-│  │ │  Processor  │ │  │ │  Processor  │ │  │ │  Processor  │ │     │
-│  │ └─────────────┘ │  │ └─────────────┘ │  │ └─────────────┘ │     │
-│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘     │
-│           │                    │                    │               │
-│           └──────────crossbeam channels─────────────┘               │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              mvirt-net                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  Control Plane (tokio async runtime)                                         │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐             │
+│  │  gRPC API  │  │   Store    │  │   Audit    │  │  Worker    │             │
+│  │  (tonic)   │  │  (SQLite)  │  │   Logger   │  │  Manager   │             │
+│  └─────┬──────┘  └────────────┘  └────────────┘  └─────┬──────┘             │
+│        │                                               │                      │
+│        │                                          spawn│                      │
+│        ▼                                               ▼                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  Data Plane (dedicated threads, no tokio)                                    │
+│                                                                               │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
+│  │  vNIC Worker    │  │  vNIC Worker    │  │  vNIC Worker    │              │
+│  │                 │  │                 │  │                 │              │
+│  │ ┌─────────────┐ │  │ ┌─────────────┐ │  │ ┌─────────────┐ │              │
+│  │ │ vhost-user  │ │  │ │ vhost-user  │ │  │ │ vhost-user  │ │              │
+│  │ │   backend   │ │  │ │   backend   │ │  │ │   backend   │ │              │
+│  │ └──────┬──────┘ │  │ └──────┬──────┘ │  │ └──────┬──────┘ │              │
+│  │        │        │  │        │        │  │        │        │              │
+│  │ ┌──────▼──────┐ │  │ ┌──────▼──────┐ │  │ ┌──────▼──────┐ │              │
+│  │ │   Packet    │ │  │ │   Packet    │ │  │ │   Packet    │ │              │
+│  │ │  Processor  │ │  │ │  Processor  │ │  │ │  Processor  │ │              │
+│  │ └─────────────┘ │  │ └─────────────┘ │  │ └─────────────┘ │              │
+│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘              │
+│           │                    │                    │                        │
+│           └──────────crossbeam channels─────────────┘                        │
+│                                │                                              │
+│                   ┌────────────▼────────────┐                                │
+│                   │   TUN IO Thread         │                                │
+│                   │   (mvirt-net device)    │                                │
+│                   └────────────┬────────────┘                                │
+│                                │                                              │
+└────────────────────────────────┼──────────────────────────────────────────────┘
+                                 │
+                                 ▼
+                        Linux Kernel Routing
+                           (NAT/Internet)
 ```
 
 ## Shared-Nothing Architecture
@@ -360,6 +369,95 @@ Worker2: injects into VM2's RX vring
     │
     ▼
 VM2: Receives packet
+```
+
+## Public Networks and TUN Device
+
+Networks can be configured as "public" (`is_public = true`), which enables internet access via a global TUN device.
+
+### Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                              mvirt-net                                      │
+│                                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                         │
+│  │ Private Net │  │ Public Net  │  │ Public Net  │                         │
+│  │ is_public=0 │  │ is_public=1 │  │ is_public=1 │                         │
+│  │             │  │             │  │             │                         │
+│  │ VMs can     │  │ VMs get     │  │ VMs get     │                         │
+│  │ only talk   │  │ default     │  │ default     │                         │
+│  │ to each     │  │ route via   │  │ route via   │                         │
+│  │ other       │  │ gateway     │  │ gateway     │                         │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                         │
+│         │                │                │                                 │
+│         │ DROP           │ ToInternet     │ ToInternet                      │
+│         │                │                │                                 │
+│         ▼                └───────┬────────┘                                 │
+│      (dropped)                   │                                          │
+│                      ┌───────────▼───────────┐                              │
+│                      │    TUN IO Thread      │                              │
+│                      │    ("mvirt-net")       │                              │
+│                      └───────────┬───────────┘                              │
+│                                  │                                          │
+└──────────────────────────────────┼──────────────────────────────────────────┘
+                                   │
+                                   ▼
+                          ┌────────────────┐
+                          │ Linux Kernel   │
+                          │ - ip route     │
+                          │ - iptables NAT │
+                          │ - ip_forward   │
+                          └────────┬───────┘
+                                   │
+                                   ▼
+                               Internet
+```
+
+### TUN Device Lifecycle
+
+1. **Startup**: TUN device "mvirt-net" is created when mvirt-net starts
+2. **Route Management**: Routes are automatically added/removed when public networks are created/deleted
+3. **Reconciliation**: A background loop (every 10s) ensures routes match the database state
+
+### Route Management (`dataplane/tun.rs`)
+
+```rust
+// Routes are managed via `ip route` commands
+pub fn add_route(subnet: &str) -> io::Result<()>;    // ip route add <subnet> dev mvirt-net
+pub fn remove_route(subnet: &str) -> io::Result<()>; // ip route del <subnet> dev mvirt-net
+pub fn get_routes() -> io::Result<Vec<String>>;      // ip route show dev mvirt-net
+```
+
+### Network Isolation
+
+- **Private networks** (`is_public = false`):
+  - Packets without a local destination are **dropped**
+  - VMs can only communicate with other VMs in the same network
+  - No default route announced via DHCP/RA
+
+- **Public networks** (`is_public = true`):
+  - Packets without a local destination go to TUN → Linux kernel
+  - Default route (0.0.0.0/0, ::/0) announced via DHCP Router option and RA
+  - IP address ranges must not overlap with other public networks
+
+### DHCP/RA Behavior
+
+| Setting | Private Network | Public Network |
+|---------|-----------------|----------------|
+| DHCP Router Option | Not sent | 169.254.0.1 |
+| RA Router Lifetime | 0 (not a router) | 1800s |
+
+### Host Configuration
+
+The host must configure NAT for outbound traffic:
+
+```bash
+# Enable IP forwarding
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# NAT for public network subnets
+iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -o eth0 -j MASQUERADE
 ```
 
 ## Memory Layout
