@@ -97,7 +97,7 @@ mvirt network create --name production \
 
 ```bash
 mvirt nic create --network production --name web-01-eth0
-# Returns: nic-abc123 with socket /run/mvirt-net/nic-abc123.sock
+# Returns: nic-abc123 with socket /run/mvirt/net/nic-abc123.sock
 ```
 
 ### 3. Start VM with vNIC

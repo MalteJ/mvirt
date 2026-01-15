@@ -7,24 +7,27 @@ Each mvirt service stores its state in a dedicated directory.
 | Service   | Default Location          | Contents                         |
 |-----------|---------------------------|----------------------------------|
 | mvirt-vmm | `/var/lib/mvirt/vmm`      | SQLite DB, API sockets           |
-| mvirt-log | `/var/lib/mvirt-log`      | fjall LSM-Tree (logs + indexes)  |
+| mvirt-log | `/var/lib/mvirt/log`      | fjall LSM-Tree (logs + indexes)  |
 | mvirt-zfs | ZFS pool metadata         | `.mvirt-zfs/metadata.db`         |
-| mvirt-net | `/var/lib/mvirt-net`      | Metadata                         |
+| mvirt-net | `/var/lib/mvirt/net`      | Metadata                         |
 
 ## Runtime Directories
 
 | Service   | Location             | Contents                    |
 |-----------|----------------------|-----------------------------|
-| mvirt-vmm | `/run/mvirt-vmm`     | cloud-hypervisor sockets    |
-| mvirt-net | `/run/mvirt-net`     | vhost-user sockets          |
+| mvirt-vmm | `/var/lib/mvirt/vmm` | VM sockets (per-VM subdirs) |
+| mvirt-net | `/run/mvirt/net`     | vhost-user sockets          |
 
 ## mvirt-vmm
 
 ```
 /var/lib/mvirt/vmm/
 ├── mvirt.db                # SQLite database (VMs, runtime)
-└── sockets/                # API sockets for cloud-hypervisor
-    └── <vm-id>.sock
+└── vm/
+    └── <vm-id>/
+        ├── api.sock        # cloud-hypervisor API socket
+        ├── serial.sock     # Serial console socket
+        └── cloudinit.iso   # Cloud-init ISO
 ```
 
 **Customize:** `mvirt-vmm --data-dir /custom/path`
@@ -32,7 +35,7 @@ Each mvirt service stores its state in a dedicated directory.
 ## mvirt-log
 
 ```
-/var/lib/mvirt-log/
+/var/lib/mvirt/log/
 └── fjall/                  # LSM-Tree storage
     ├── logs_data/          # Log entries (timestamp + ID → protobuf)
     └── index_objects/      # Inverted index (object ID → log IDs)
@@ -58,10 +61,10 @@ Data is stored within the ZFS pool itself:
 ## mvirt-net
 
 ```
-/var/lib/mvirt-net/
+/var/lib/mvirt/net/
 └── metadata.db             # NIC definitions, network config
 
-/run/mvirt-net/
+/run/mvirt/net/
 └── <nic-id>.sock           # vhost-user sockets for cloud-hypervisor
 ```
 

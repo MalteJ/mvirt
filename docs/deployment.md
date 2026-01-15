@@ -28,8 +28,12 @@ Guide for running mvirt in production.
 make release
 
 # Copy to system
-sudo cp target/x86_64-unknown-linux-musl/release/mvirt* /usr/local/bin/
-sudo cp target/x86_64-unknown-linux-musl/release/cloud-hypervisor /usr/local/bin/
+sudo cp target/x86_64-unknown-linux-musl/release/mvirt /usr/bin/
+sudo cp target/x86_64-unknown-linux-musl/release/mvirt-vmm /usr/sbin/
+sudo cp target/x86_64-unknown-linux-musl/release/mvirt-log /usr/sbin/
+sudo cp target/x86_64-unknown-linux-musl/release/mvirt-net /usr/sbin/
+sudo cp target/x86_64-unknown-linux-musl/release/mvirt-zfs /usr/sbin/
+sudo cp target/x86_64-unknown-linux-musl/release/cloud-hypervisor /usr/bin/
 ```
 
 ### Directory Setup
@@ -37,10 +41,10 @@ sudo cp target/x86_64-unknown-linux-musl/release/cloud-hypervisor /usr/local/bin
 ```bash
 # Create data directories
 sudo mkdir -p /var/lib/mvirt/vmm
-sudo mkdir -p /var/lib/mvirt-log
-sudo mkdir -p /var/lib/mvirt-net
-sudo mkdir -p /run/mvirt-vmm
-sudo mkdir -p /run/mvirt-net
+sudo mkdir -p /var/lib/mvirt/log
+sudo mkdir -p /var/lib/mvirt/net
+sudo mkdir -p /run/mvirt/vmm
+sudo mkdir -p /run/mvirt/net
 ```
 
 ## Service Configuration
@@ -56,7 +60,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mvirt-vmm --data-dir /var/lib/mvirt/vmm
+ExecStart=/usr/sbin/mvirt-vmm --data-dir /var/lib/mvirt/vmm
 Restart=on-failure
 RestartSec=5
 
@@ -73,7 +77,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mvirt-log --data-dir /var/lib/mvirt-log
+ExecStart=/usr/sbin/mvirt-log --data-dir /var/lib/mvirt/log
 Restart=on-failure
 RestartSec=5
 
@@ -90,7 +94,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mvirt-net --socket-dir /run/mvirt-net --metadata-dir /var/lib/mvirt-net
+ExecStart=/usr/sbin/mvirt-net --socket-dir /run/mvirt/net --metadata-dir /var/lib/mvirt/net
 Restart=on-failure
 RestartSec=5
 
@@ -107,7 +111,7 @@ After=zfs.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mvirt-zfs --pool vmpool
+ExecStart=/usr/sbin/mvirt-zfs --pool vmpool
 Restart=on-failure
 RestartSec=5
 

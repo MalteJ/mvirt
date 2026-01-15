@@ -2,130 +2,118 @@
 
 This document describes the storage model used by mvirt-zfs for managing VM disk images.
 
+## UX Philosophy
+
+### Simplicity over ZFS complexity
+
+Users should not need to understand ZFS internals. The UI exposes three simple concepts:
+
+- **Templates**: Base images you import once and clone many times
+- **Volumes**: Actual disks attached to VMs
+- **Snapshots**: Point-in-time backups of volumes
+
+### Independence of entities
+
+Each entity can be managed independently:
+
+- **Delete a template** → Volumes cloned from it continue to work
+- **Delete a snapshot** → Other snapshots and the volume are unaffected
+- **Promote a snapshot to template** → Original snapshot remains usable
+
+This is achieved through reference counting: the underlying ZFS resources are only cleaned up when nothing references them anymore.
+
+### No artificial constraints
+
+- Volume names don't need to be unique (multiple VMs can have a "root" volume)
+- Templates can be deleted even when volumes depend on them
+- Snapshots can be deleted even when templates reference them
+
+### Efficient by default
+
+All operations use ZFS copy-on-write:
+
+- Cloning a 3GB template to create a volume: instant, ~0 bytes
+- Creating a snapshot: instant, ~0 bytes
+- Promoting a snapshot to template: instant, just a database entry
+
 ## Concepts
 
 ### Template
 
-A **Template** is an immutable base image used for creating VM volumes. Templates are typically imported from cloud images (e.g., Debian cloud images) and can be cloned multiple times to create independent volumes.
+A **Template** is a base image used for creating VM volumes. Templates are typically imported from cloud images (e.g., Debian cloud images).
 
 - Imported from raw or qcow2 images (local files or URLs)
-- Immutable after creation
-- Can be cloned to create multiple volumes
-- Deletion only removes metadata; underlying ZFS data persists until all dependent volumes are deleted
+- Can be cloned to create volumes (copy-on-write)
+- Can be deleted anytime; underlying ZFS data persists until all clones are gone
 
 ### Volume
 
-A **Volume** is a block device that can be attached to a VM. Volumes can be:
+A **Volume** is a block device attached to a VM. Volumes can be:
 
+- **Cloned**: Created from a template (efficient, copy-on-write)
 - **Empty**: Created directly with a specified size
-- **Cloned**: Created from a template (copy-on-write, efficient)
-
-Volumes are mutable and represent the actual disk state of a VM.
 
 ### Snapshot
 
-A **Snapshot** is a point-in-time capture of a volume's state. Snapshots belong to their parent volume and are deleted when the volume is deleted.
+A **Snapshot** is a point-in-time capture of a volume's state.
 
 - Used for backup/restore (rollback)
-- Can be promoted to a new template
-- Automatically deleted with parent volume
+- Can be promoted to a new template (no data copy, just a reference)
+- Deleted with parent volume
 
-## Hierarchy
+## Reference Counting
+
+Under the hood, a single ZFS snapshot can be referenced by multiple mvirt entities:
 
 ```
-Template
-    └── Volume (cloned)
-            ├── Snapshot A
-            └── Snapshot B
+ZFS Snapshot (vmpool/vol-123@snap-456)
+    ├── mvirt Snapshot "before-update"
+    └── mvirt Template "my-golden-image" (promoted from snapshot)
 ```
+
+When you promote a snapshot to a template:
+- No ZFS operation happens
+- A new template entry is created pointing to the same ZFS snapshot
+- Both the original snapshot and the new template remain usable
+
+When you delete a snapshot or template:
+- Only the database entry is removed
+- The ZFS snapshot is deleted only when ref count reaches 0
 
 ## Operations
 
-### Import (creates Template)
+| Action | TUI | CLI |
+|--------|-----|-----|
+| Import template | Storage → `i` | `mvirt import <name> <url>` |
+| Clone template | Templates → `c` | - |
+| Create snapshot | Volumes → `s` | - |
+| Rollback snapshot | Snapshot → `r` | - |
+| Promote to template | Snapshot → `t` | - |
+| Delete | Any → `d` | - |
+
+## ZFS Layout
 
 ```
-TUI: Storage → [i] Import
-CLI: mvirt-zfs import <name> <url>
+vmpool/
+├── .templates/                          # Imported base images
+│   └── <template-uuid>                  # Base ZVOL
+│       └── @img                         # Snapshot for cloning
+├── .tmp/                                # Temporary files during import
+└── <volume-uuid>                        # Volume (clone or standalone)
+    └── @<snapshot-uuid>                 # Volume snapshots
 ```
 
-Downloads/converts an image and creates a template from it.
+Dataset names use UUIDs so entities can be renamed without ZFS operations.
 
-### Create Empty Volume
+## Garbage Collection
 
-```
-TUI: Storage → [n] New
-CLI: mvirt-zfs volume create <name> <size>
-```
+ZFS resources are cleaned up lazily:
 
-Creates a new empty volume (not from template).
-
-### Clone Template → Volume
-
-```
-TUI: Templates → [c] Clone
-CLI: mvirt-zfs clone <template-name> <volume-name>
-```
-
-Creates a new volume from a template using ZFS clone (copy-on-write).
-
-### Create Snapshot
-
-```
-TUI: Volumes → [s] Snapshot
-CLI: mvirt-zfs snapshot create <volume-name> <snapshot-name>
-```
-
-Creates a point-in-time snapshot of a volume.
-
-### Rollback to Snapshot
-
-```
-TUI: Volume → Snapshots → [r] Rollback
-CLI: mvirt-zfs snapshot rollback <volume-name> <snapshot-name>
-```
-
-Reverts a volume to a previous snapshot state.
-
-### Promote Snapshot → Template
-
-```
-TUI: Volume → Snapshots → [t] Promote to Template
-CLI: mvirt-zfs snapshot promote <volume-name> <snapshot-name> <template-name>
-```
-
-Creates a new template from an existing snapshot.
-
-### Delete Volume
-
-Deletes the volume and all its snapshots. If the volume was cloned from a template and no other volumes depend on that template's base data, the underlying ZFS resources are garbage collected.
-
-### Delete Template
-
-Only removes the template metadata. The underlying ZFS base ZVOL remains until all cloned volumes are deleted (garbage collection).
-
-## ZFS Implementation
-
-Under the hood, mvirt-zfs uses UUIDs for ZFS dataset names to allow renaming without ZFS operations.
-
-```
-vmpool/.base/<template-uuid>           # Base ZVOL (hidden)
-vmpool/.base/<template-uuid>@img       # Template snapshot (cloneable)
-vmpool/<volume-uuid>                   # Volume (may be clone or standalone)
-vmpool/<volume-uuid>@<snapshot-uuid>   # Volume snapshot
-```
-
-### Garbage Collection
-
-When a template is deleted, only the database entry is removed. The base ZVOL persists because dependent volumes (clones) still reference its snapshot.
-
-When a volume is deleted:
-1. The volume and its snapshots are destroyed (`zfs destroy -r`)
-2. If the volume had an origin template:
-   - Check if template entry still exists in DB → if yes, do nothing
-   - Check if other volumes depend on same base → if yes, do nothing
-   - If orphaned (no template entry, no other volumes): destroy base ZVOL
+1. **Template deleted**: Only DB entry removed. Base ZVOL persists (clones depend on it).
+2. **Volume deleted**: Volume and snapshots destroyed. If no other volumes share the origin template's base ZVOL, it's garbage collected.
+3. **Snapshot deleted**: DB entry removed. ZFS snapshot deleted only if ref count = 0.
 
 This ensures:
-- Deleting a template doesn't break existing volumes
-- Storage is reclaimed only when truly unused
-- Copy-on-write benefits are preserved across all clones
+- Deleting entities never breaks other entities
+- Storage is reclaimed when truly unused
+- Copy-on-write benefits preserved across all clones

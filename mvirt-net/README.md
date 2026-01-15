@@ -30,7 +30,7 @@ mvirt-net is a standalone gRPC daemon that manages virtual networking independen
       │  1. CreateNic     │                   │
       │──────────────────▶│                   │
       │                   │                   │
-      │  Nic { socket: "/run/mvirt-net/..." } │
+      │  Nic { socket: "/run/mvirt/net/..." } │
       │◀──────────────────│                   │
       │                                       │
       │  2. StartVm { net_socket: ... }       │
@@ -46,10 +46,10 @@ This loose coupling means:
 
 ```bash
 # Start the daemon
-mvirt-net --listen [::1]:50054 --socket-dir /run/mvirt-net
+mvirt-net --listen [::1]:50054 --socket-dir /run/mvirt/net
 
 # With custom metadata directory
-mvirt-net --listen [::1]:50054 --socket-dir /run/mvirt-net --metadata-dir /var/lib/mvirt-net
+mvirt-net --listen [::1]:50054 --socket-dir /run/mvirt/net --metadata-dir /var/lib/mvirt/net
 ```
 
 ## gRPC API

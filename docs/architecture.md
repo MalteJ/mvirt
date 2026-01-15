@@ -120,7 +120,7 @@ Creating a VM with storage and networking:
 |-----------|-----------------------------|-----------------------  |
 | mvirt-vmm | `/var/lib/mvirt/vmm`        | SQLite DB, sockets      |
 | mvirt-zfs | ZFS pool (e.g., `vmpool`)   | Volumes, metadata DB    |
-| mvirt-net | `/var/lib/mvirt-net`        | Metadata                |
-| mvirt-log | `/var/lib/mvirt-log`        | Log database            |
+| mvirt-net | `/var/lib/mvirt/net`        | Metadata                |
+| mvirt-log | `/var/lib/mvirt/log`        | Log database            |
 
 See [reference/ports.md](reference/ports.md) for service ports.

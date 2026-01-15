@@ -19,11 +19,11 @@ struct Args {
     listen: String,
 
     /// Directory for vhost-user sockets
-    #[arg(long, default_value = "/run/mvirt-net")]
+    #[arg(long, default_value = "/run/mvirt/net")]
     socket_dir: String,
 
     /// Directory for metadata storage (SQLite)
-    #[arg(long, default_value = "/var/lib/mvirt-net")]
+    #[arg(long, default_value = "/var/lib/mvirt/net")]
     metadata_dir: String,
 
     /// mvirt-log endpoint for audit logging

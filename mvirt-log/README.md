@@ -103,7 +103,7 @@ message LogResponse { bytes id = 1; }
 
 ```bash
 # Start the logging service
-mvirt-log --listen [::1]:50052 --data-dir /var/lib/mvirt-log
+mvirt-log --listen [::1]:50052 --data-dir /var/lib/mvirt/log
 
 # Custom data directory
 mvirt-log --data-dir ./log-data
@@ -114,7 +114,7 @@ mvirt-log --data-dir ./log-data
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--listen` | `[::1]:50052` | gRPC listen address |
-| `--data-dir` | `/var/lib/mvirt-log` | Data directory for log storage |
+| `--data-dir` | `/var/lib/mvirt/log` | Data directory for log storage |
 
 ## Data Directory
 

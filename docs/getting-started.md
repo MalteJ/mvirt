@@ -44,7 +44,7 @@ mvirt-vmm --data-dir ./vmm-data
 mvirt-zfs --pool vmpool
 
 # Terminal 4: Networking (requires root)
-sudo mvirt-net --socket-dir /run/mvirt-net
+sudo mvirt-net --socket-dir /run/mvirt/net
 
 # Terminal 5: TUI
 mvirt
