@@ -218,13 +218,13 @@ pub fn draw(frame: &mut Frame, modal: &SshKeysModal) {
     ]);
     frame.render_widget(Paragraph::new(value_line), field_chunks[3]);
 
-    // Root password field
+    // Password field (for the user, not root)
     let password_focused = modal.focused_field == 3;
     let cursor = if password_focused { "\u{258c}" } else { "" };
     let password_line = if modal.config.root_password.is_empty() {
         Line::from(vec![
             Span::styled(
-                " Root Pass:  ",
+                " Password:   ",
                 if password_focused {
                     label_focused
                 } else {
@@ -241,7 +241,7 @@ pub fn draw(frame: &mut Frame, modal: &SshKeysModal) {
         let password_display = "*".repeat(modal.config.root_password.len());
         Line::from(vec![
             Span::styled(
-                " Root Pass:  ",
+                " Password:   ",
                 if password_focused {
                     label_focused
                 } else {
