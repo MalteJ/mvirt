@@ -124,21 +124,51 @@ impl VirtioQueue {
         mem.write(&zeros, self.desc_table)
             .map_err(|e| std::io::Error::other(format!("desc table init: {e}")))?;
 
-        // Zero out avail ring
-        let avail_size =
-            std::mem::size_of::<VringAvail>() + std::mem::size_of::<u16>() * QUEUE_SIZE as usize;
+        // Zero out avail ring (includes used_event field for EVENT_IDX)
+        // Layout: flags(2) + idx(2) + ring[queue_size](2*queue_size) + used_event(2)
+        let avail_size = std::mem::size_of::<VringAvail>()
+            + std::mem::size_of::<u16>() * QUEUE_SIZE as usize
+            + 2; // used_event for EVENT_IDX
         let zeros = vec![0u8; avail_size];
         mem.write(&zeros, self.avail_ring)
             .map_err(|e| std::io::Error::other(format!("avail ring init: {e}")))?;
 
-        // Zero out used ring
+        // Zero out used ring (includes avail_event field for EVENT_IDX)
+        // Layout: flags(2) + idx(2) + ring[queue_size](8*queue_size) + avail_event(2)
         let used_size = std::mem::size_of::<VringUsed>()
-            + std::mem::size_of::<VringUsedElem>() * QUEUE_SIZE as usize;
+            + std::mem::size_of::<VringUsedElem>() * QUEUE_SIZE as usize
+            + 2; // avail_event for EVENT_IDX
         let zeros = vec![0u8; used_size];
         mem.write(&zeros, self.used_ring)
             .map_err(|e| std::io::Error::other(format!("used ring init: {e}")))?;
 
         Ok(())
+    }
+
+    /// Set the used_event field (driver tells device when to interrupt)
+    /// With EVENT_IDX, device should only interrupt when used_idx reaches this value
+    pub fn set_used_event(&self, mem: &GuestMemoryMmap, event: u16) -> std::io::Result<()> {
+        // used_event is at the end of avail ring
+        let offset = self.avail_ring.raw_value()
+            + std::mem::size_of::<VringAvail>() as u64
+            + (QUEUE_SIZE as u64 * 2); // after ring array
+        mem.write(&event.to_le_bytes(), GuestAddress(offset))
+            .map_err(|e| std::io::Error::other(format!("write used_event: {e}")))?;
+        Ok(())
+    }
+
+    /// Get the avail_event field (device tells driver when to kick)
+    /// With EVENT_IDX, driver should only kick when avail_idx reaches this value
+    #[allow(dead_code)]
+    pub fn get_avail_event(&self, mem: &GuestMemoryMmap) -> std::io::Result<u16> {
+        // avail_event is at the end of used ring
+        let offset = self.used_ring.raw_value()
+            + std::mem::size_of::<VringUsed>() as u64
+            + (QUEUE_SIZE as u64 * std::mem::size_of::<VringUsedElem>() as u64);
+        let mut bytes = [0u8; 2];
+        mem.read(&mut bytes, GuestAddress(offset))
+            .map_err(|e| std::io::Error::other(format!("read avail_event: {e}")))?;
+        Ok(u16::from_le_bytes(bytes))
     }
 
     /// Add a TX buffer (readable by device) with ethernet frame data

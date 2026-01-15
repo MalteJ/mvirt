@@ -7,6 +7,7 @@ use std::io;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
+use tracing::debug;
 use vhost::vhost_user::message::VhostUserProtocolFeatures;
 use vhost_user_backend::{VhostUserBackend, VringRwLock, VringT};
 use virtio_queue::QueueT;
@@ -77,10 +78,7 @@ pub struct VhostNetBackend {
 impl VhostNetBackend {
     /// Create a new vhost-user net backend
     pub fn new(nic_config: NicEntry, shutdown: Arc<AtomicBool>) -> io::Result<Self> {
-        eprintln!(
-            "[VHOST] VhostNetBackend::new() called for NIC {}",
-            nic_config.id
-        );
+        debug!(nic_id = %nic_config.id, "Creating VhostNetBackend");
         Ok(Self {
             nic_config,
             mem: RwLock::new(GuestMemoryAtomic::new(GuestMemoryMmap::new())),
@@ -109,21 +107,21 @@ impl VhostNetBackend {
     }
 
     /// Process TX queue (packets from guest)
+    /// Returns whether the guest needs to be notified (for EVENT_IDX)
     fn process_tx(&self, vring: &VringRwLock) -> io::Result<bool> {
-        let mut used_descs = false;
         let mem_guard = self.mem.read().unwrap();
         let mem = mem_guard.memory();
+        let mut processed_count = 0u32;
 
         loop {
             let mut vring_state = vring.get_mut();
+            let queue = vring_state.get_queue_mut();
 
-            let avail_desc = match vring_state
-                .get_queue_mut()
-                .pop_descriptor_chain(mem.clone())
-            {
+            let avail_desc = match queue.pop_descriptor_chain(mem.clone()) {
                 Some(desc) => desc,
                 None => break,
             };
+            processed_count += 1;
 
             // Collect packet data from descriptor chain
             let mut packet = Vec::new();
@@ -150,35 +148,53 @@ impl VhostNetBackend {
 
             // Mark descriptor as used
             let desc_idx = avail_desc.head_index();
-            vring_state
-                .get_queue_mut()
+            queue
                 .add_used(&*mem, desc_idx, 0)
                 .map_err(|e| io::Error::other(format!("Failed to add used: {e}")))?;
 
-            used_descs = true;
+            // With EVENT_IDX: check if we should continue processing
+            // enable_notification updates avail_event and returns true if more work is available
+            let more_work = queue
+                .enable_notification(&*mem)
+                .map_err(|e| io::Error::other(format!("Failed to enable notification: {e}")))?;
+
+            if !more_work {
+                break;
+            }
         }
 
-        Ok(used_descs)
+        // Determine if we need to notify the guest
+        // With EVENT_IDX this checks the used_event value set by the driver
+        if processed_count == 0 {
+            return Ok(false);
+        }
+
+        let mut vring_state = vring.get_mut();
+        let needs_notification = vring_state
+            .get_queue_mut()
+            .needs_notification(&*mem)
+            .map_err(|e| io::Error::other(format!("Failed to check needs_notification: {e}")))?;
+
+        Ok(needs_notification)
     }
 
     /// Process RX queue (inject packets to guest)
+    /// Returns whether the guest needs to be notified (for EVENT_IDX)
     fn process_rx(&self, vring: &VringRwLock) -> io::Result<bool> {
         let mut rx_queue = self.rx_queue.lock().unwrap();
         if rx_queue.is_empty() {
             return Ok(false);
         }
 
-        let mut used_descs = false;
         let mem_guard = self.mem.read().unwrap();
         let mem = mem_guard.memory();
+        let mut processed_count = 0u32;
 
         while !rx_queue.is_empty() {
             let mut vring_state = vring.get_mut();
+            let queue = vring_state.get_queue_mut();
 
-            let avail_desc = match vring_state
-                .get_queue_mut()
-                .pop_descriptor_chain(mem.clone())
-            {
+            let avail_desc = match queue.pop_descriptor_chain(mem.clone()) {
                 Some(desc) => desc,
                 None => break, // No available descriptors
             };
@@ -224,15 +240,34 @@ impl VhostNetBackend {
             }
 
             let desc_idx = avail_desc.head_index();
-            vring_state
-                .get_queue_mut()
+            queue
                 .add_used(&*mem, desc_idx, written as u32)
                 .map_err(|e| io::Error::other(format!("Failed to add used: {e}")))?;
 
-            used_descs = true;
+            processed_count += 1;
+
+            // With EVENT_IDX: check if we should continue processing
+            let more_work = queue
+                .enable_notification(&*mem)
+                .map_err(|e| io::Error::other(format!("Failed to enable notification: {e}")))?;
+
+            if !more_work {
+                break;
+            }
         }
 
-        Ok(used_descs)
+        // Determine if we need to notify the guest
+        if processed_count == 0 {
+            return Ok(false);
+        }
+
+        let mut vring_state = vring.get_mut();
+        let needs_notification = vring_state
+            .get_queue_mut()
+            .needs_notification(&*mem)
+            .map_err(|e| io::Error::other(format!("Failed to check needs_notification: {e}")))?;
+
+        Ok(needs_notification)
     }
 }
 
@@ -257,8 +292,7 @@ impl VhostUserBackend for VhostNetBackend {
             | VIRTIO_RING_F_EVENT_IDX
             | VIRTIO_F_RING_INDIRECT_DESC
             | VHOST_USER_F_PROTOCOL_FEATURES;
-        eprintln!("[VHOST] features() called, returning {:#x}", f);
-        tracing::debug!(features = f, "features() called");
+        debug!(features = format!("{:#x}", f), "Returning virtio features");
         f
     }
 
@@ -266,19 +300,17 @@ impl VhostUserBackend for VhostNetBackend {
         let pf = VhostUserProtocolFeatures::CONFIG
             | VhostUserProtocolFeatures::MQ
             | VhostUserProtocolFeatures::REPLY_ACK;
-        eprintln!("[VHOST] protocol_features() called, returning {:?}", pf);
-        tracing::debug!(?pf, "protocol_features() called");
+        debug!(?pf, "Returning protocol features");
         pf
     }
 
     fn set_event_idx(&self, enabled: bool) {
-        eprintln!("[VHOST] set_event_idx({})", enabled);
+        debug!(enabled, "Setting event_idx");
         *self.event_idx.write().unwrap() = enabled;
     }
 
     fn update_memory(&self, mem: GuestMemoryAtomic<GuestMemoryMmap>) -> io::Result<()> {
-        eprintln!("[VHOST] update_memory() called");
-        tracing::debug!("update_memory called");
+        debug!("Updating guest memory mapping");
         *self.mem.write().unwrap() = mem;
         Ok(())
     }
@@ -290,11 +322,7 @@ impl VhostUserBackend for VhostNetBackend {
         vrings: &[Self::Vring],
         _thread_id: usize,
     ) -> io::Result<()> {
-        eprintln!(
-            "[VHOST] handle_event called: device_event={}, evset={:?}",
-            device_event, evset
-        );
-        tracing::debug!(device_event, ?evset, "handle_event called");
+        debug!(device_event, ?evset, "Handling vring event");
         if evset != EventSet::IN {
             return Ok(());
         }
@@ -314,13 +342,14 @@ impl VhostUserBackend for VhostNetBackend {
                     vrings[TX_QUEUE as usize]
                         .signal_used_queue()
                         .map_err(|e| io::Error::other(format!("Failed to signal: {e}")))?;
+                }
 
-                    // Also try to process any generated RX packets
-                    if self.process_rx(&vrings[RX_QUEUE as usize])? {
-                        vrings[RX_QUEUE as usize]
-                            .signal_used_queue()
-                            .map_err(|e| io::Error::other(format!("Failed to signal: {e}")))?;
-                    }
+                // Always try to process any generated RX packets (e.g., ARP/DHCP responses)
+                // This must happen even if TX doesn't need notification
+                if self.process_rx(&vrings[RX_QUEUE as usize])? {
+                    vrings[RX_QUEUE as usize]
+                        .signal_used_queue()
+                        .map_err(|e| io::Error::other(format!("Failed to signal: {e}")))?;
                 }
             }
             _ => {}
@@ -332,9 +361,14 @@ impl VhostUserBackend for VhostNetBackend {
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
         // Virtio net config: 6 bytes MAC + 2 bytes status
         let mac = self.mac_bytes();
-        eprintln!(
-            "[VHOST] get_config(offset={}, size={}) mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            offset, size, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        debug!(
+            offset,
+            size,
+            mac = format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            ),
+            "Returning device config"
         );
         let mut config = [0u8; 8];
         config[..6].copy_from_slice(&mac);

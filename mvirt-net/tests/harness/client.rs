@@ -394,6 +394,119 @@ impl VhostTestClient {
 
         Ok(ret > 0 && pollfd.revents & libc::POLLIN != 0)
     }
+
+    /// Send a packet and return the descriptor index (no wait)
+    pub fn send_packet_nowait(&mut self, frame: &[u8]) -> std::io::Result<u16> {
+        let guest_mem = self.memory.to_guest_memory()?;
+        let data_addr = self.alloc_buffer(frame.len() + 12);
+        let desc_idx = self.tx_queue.add_tx_buffer(&guest_mem, data_addr, frame)?;
+        self.tx_kick
+            .write(1)
+            .map_err(|e| std::io::Error::other(format!("tx kick: {e}")))?;
+        Ok(desc_idx)
+    }
+
+    /// Wait for TX completion (descriptor marked as used) with timeout
+    pub fn wait_tx_completion(&mut self, timeout_ms: u64) -> std::io::Result<u32> {
+        let guest_mem = self.memory.to_guest_memory()?;
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+        let mut completed = 0u32;
+
+        loop {
+            // Check for used TX descriptors
+            while let Some((_desc_idx, _len)) = self.tx_queue.pop_used(&guest_mem)? {
+                completed += 1;
+            }
+
+            if completed > 0 {
+                return Ok(completed);
+            }
+
+            // Check timeout
+            if start.elapsed() > timeout {
+                return Err(std::io::Error::other("TX completion timeout"));
+            }
+
+            // Poll the TX call eventfd
+            let mut pollfd = libc::pollfd {
+                fd: self.tx_call.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+
+            let remaining = timeout.saturating_sub(start.elapsed());
+            let poll_timeout = remaining.as_millis().min(50) as i32;
+
+            let ret = unsafe { libc::poll(&mut pollfd, 1, poll_timeout) };
+            if ret > 0 && pollfd.revents & libc::POLLIN != 0 {
+                let _ = self.tx_call.read();
+            }
+        }
+    }
+
+    /// Send multiple packets in a burst and wait for all completions
+    pub fn send_burst(&mut self, frames: &[Vec<u8>], timeout_ms: u64) -> std::io::Result<u32> {
+        let guest_mem = self.memory.to_guest_memory()?;
+
+        // Add all packets to the TX queue without kicking
+        for frame in frames {
+            let data_addr = self.alloc_buffer(frame.len() + 12);
+            self.tx_queue.add_tx_buffer(&guest_mem, data_addr, frame)?;
+        }
+
+        // Single kick after all packets are queued
+        self.tx_kick
+            .write(1)
+            .map_err(|e| std::io::Error::other(format!("tx kick: {e}")))?;
+
+        // Wait for all completions
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+        let expected = frames.len() as u32;
+        let mut completed = 0u32;
+
+        while completed < expected {
+            if start.elapsed() > timeout {
+                return Err(std::io::Error::other(format!(
+                    "TX burst timeout: completed {}/{} packets",
+                    completed, expected
+                )));
+            }
+
+            // Poll for completions
+            let mut pollfd = libc::pollfd {
+                fd: self.tx_call.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+
+            let remaining = timeout.saturating_sub(start.elapsed());
+            let poll_timeout = remaining.as_millis().min(50) as i32;
+
+            let ret = unsafe { libc::poll(&mut pollfd, 1, poll_timeout) };
+            if ret > 0 && pollfd.revents & libc::POLLIN != 0 {
+                let _ = self.tx_call.read();
+            }
+
+            // Check used ring
+            while let Some((_desc_idx, _len)) = self.tx_queue.pop_used(&guest_mem)? {
+                completed += 1;
+            }
+        }
+
+        Ok(completed)
+    }
+
+    /// Get count of pending TX descriptors (not yet completed)
+    pub fn pending_tx_count(&self) -> std::io::Result<u32> {
+        let guest_mem = self.memory.to_guest_memory()?;
+        if self.tx_queue.has_used(&guest_mem)? {
+            Ok(0) // Has completions waiting
+        } else {
+            Ok(1) // Assuming something pending if no completions
+        }
+    }
 }
 
 impl Drop for VhostTestClient {

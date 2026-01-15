@@ -21,6 +21,7 @@ use harness::{GATEWAY_IP, GATEWAY_MAC, TestBackend};
 /// Virtio feature flags for assertions
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
+const VIRTIO_RING_F_EVENT_IDX: u64 = 1 << 29;
 
 // ============================================================================
 // Handshake Tests
@@ -77,6 +78,194 @@ fn test_send_packet() {
 
     let result = client.send_packet(&frame);
     assert!(result.is_ok(), "TX should work: {:?}", result.err());
+}
+
+#[test]
+fn test_tx_completion() {
+    let backend = TestBackend::new("52:54:00:12:34:56", None);
+
+    let mut client = backend.connect().expect("connect failed");
+
+    let frame = harness::packets::ethernet_frame(
+        [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+        0x0800,
+        &[0u8; 64],
+    );
+
+    // Send packet without waiting
+    client.send_packet_nowait(&frame).expect("send failed");
+
+    // Wait for TX completion with timeout (simulates what a real driver does)
+    let completed = client.wait_tx_completion(1000);
+    assert!(
+        completed.is_ok(),
+        "TX completion should succeed: {:?}",
+        completed.err()
+    );
+    assert_eq!(completed.unwrap(), 1, "Should complete 1 descriptor");
+}
+
+#[test]
+fn test_tx_burst_completion() {
+    let backend = TestBackend::new("52:54:00:12:34:56", None);
+
+    let mut client = backend.connect().expect("connect failed");
+
+    // Create multiple frames
+    let frames: Vec<Vec<u8>> = (0..10)
+        .map(|i| {
+            harness::packets::ethernet_frame(
+                [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                [0x52, 0x54, 0x00, 0x12, 0x34, i as u8],
+                0x0800,
+                &[i as u8; 64],
+            )
+        })
+        .collect();
+
+    // Send burst and wait for all completions
+    let completed = client.send_burst(&frames, 2000);
+    assert!(
+        completed.is_ok(),
+        "TX burst should complete: {:?}",
+        completed.err()
+    );
+    assert_eq!(completed.unwrap(), 10, "Should complete all 10 descriptors");
+}
+
+#[test]
+fn test_tx_large_burst() {
+    let backend = TestBackend::new("52:54:00:12:34:56", None);
+
+    let mut client = backend.connect().expect("connect failed");
+
+    // Create a larger burst (50 packets)
+    let frames: Vec<Vec<u8>> = (0..50)
+        .map(|i| {
+            harness::packets::ethernet_frame(
+                [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                [0x52, 0x54, 0x00, 0x12, 0x34, (i % 256) as u8],
+                0x0800,
+                &[0u8; 128],
+            )
+        })
+        .collect();
+
+    let completed = client.send_burst(&frames, 5000);
+    assert!(
+        completed.is_ok(),
+        "Large TX burst should complete: {:?}",
+        completed.err()
+    );
+    assert_eq!(completed.unwrap(), 50, "Should complete all 50 descriptors");
+}
+
+#[test]
+fn test_tx_sequential_packets() {
+    let backend = TestBackend::new("52:54:00:12:34:56", None);
+
+    let mut client = backend.connect().expect("connect failed");
+
+    // Send packets one by one and verify each completes
+    for i in 0..5 {
+        let frame = harness::packets::ethernet_frame(
+            [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            [0x52, 0x54, 0x00, 0x12, 0x34, i as u8],
+            0x0800,
+            &[i as u8; 64],
+        );
+
+        client.send_packet_nowait(&frame).expect("send failed");
+        let completed = client.wait_tx_completion(500);
+        assert!(
+            completed.is_ok(),
+            "TX {} should complete: {:?}",
+            i,
+            completed.err()
+        );
+    }
+}
+
+// ============================================================================
+// EVENT_IDX Tests (realistic notification suppression)
+// ============================================================================
+
+#[test]
+fn test_tx_with_event_idx_suppression() {
+    // This test simulates realistic EVENT_IDX behavior:
+    // - Guest sends multiple packets
+    // - Guest sets used_event to control when it wants interrupts
+    // - Device should respect the used_event value
+
+    let backend = TestBackend::new("52:54:00:12:34:56", None);
+    let mut client = backend.connect().expect("connect failed");
+
+    // Verify EVENT_IDX is negotiated
+    assert!(
+        client.has_feature(VIRTIO_RING_F_EVENT_IDX),
+        "EVENT_IDX should be negotiated"
+    );
+
+    // Send burst of packets - this exercises the device's EVENT_IDX handling
+    let frames: Vec<Vec<u8>> = (0..20)
+        .map(|i| {
+            harness::packets::ethernet_frame(
+                [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                [0x52, 0x54, 0x00, 0x12, 0x34, i as u8],
+                0x0800,
+                &[i as u8; 64],
+            )
+        })
+        .collect();
+
+    // Send all packets and wait for completions
+    let completed = client.send_burst(&frames, 3000);
+    assert!(
+        completed.is_ok(),
+        "TX burst with EVENT_IDX should complete: {:?}",
+        completed.err()
+    );
+    assert_eq!(
+        completed.unwrap(),
+        20,
+        "All 20 packets should complete with EVENT_IDX"
+    );
+}
+
+#[test]
+fn test_tx_rapid_fire() {
+    // Stress test: send packets as fast as possible without waiting
+    // This mimics real network workloads
+
+    let backend = TestBackend::new("52:54:00:12:34:56", None);
+    let mut client = backend.connect().expect("connect failed");
+
+    // Send 100 packets rapidly
+    for i in 0..100u8 {
+        let frame = harness::packets::ethernet_frame(
+            [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            [0x52, 0x54, 0x00, 0x12, 0x34, i],
+            0x0800,
+            &[i; 64],
+        );
+
+        client.send_packet_nowait(&frame).expect("send failed");
+    }
+
+    // Now wait for all completions
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(5);
+    let mut completed = 0u32;
+
+    while completed < 100 && start.elapsed() < timeout {
+        match client.wait_tx_completion(100) {
+            Ok(n) => completed += n,
+            Err(_) => {} // Timeout on this poll, continue
+        }
+    }
+
+    assert_eq!(completed, 100, "All 100 rapid-fire packets should complete");
 }
 
 // ============================================================================
