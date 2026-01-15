@@ -6,6 +6,7 @@ Virtual network daemon for mvirt. Provides L3 networking for VMs using vhost-use
 
 - **[Networking Concepts](../docs/network.md)** - User-facing documentation on networks, vNICs, and IP addressing
 - **[Architecture](architecture.md)** - Technical deep-dive into the implementation
+- **[Development](development.md)** - Test harness and how to write integration tests
 
 ## Features
 
@@ -122,6 +123,33 @@ cargo build -p mvirt-net
 
 # Release build
 cargo build -p mvirt-net --release
+```
+
+## Testing
+
+### Integration Tests
+
+The vhost-user integration tests simulate the VM side using rust-vmm's `vhost` crate to test the backend without requiring actual VMs.
+
+```bash
+# Run all integration tests
+cargo test -p mvirt-net --test vhost_integration
+
+# Run with output
+cargo test -p mvirt-net --test vhost_integration -- --nocapture
+
+# Run specific tests by keyword
+cargo test -p mvirt-net --test vhost_integration handshake  # vhost-user handshake
+cargo test -p mvirt-net --test vhost_integration config     # config space access
+cargo test -p mvirt-net --test vhost_integration send       # TX queue
+cargo test -p mvirt-net --test vhost_integration arp        # ARP request/reply
+cargo test -p mvirt-net --test vhost_integration dhcp       # DHCP flow
+```
+
+### Unit Tests
+
+```bash
+cargo test -p mvirt-net --lib
 ```
 
 ## Development Status
