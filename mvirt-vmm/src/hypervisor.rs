@@ -580,6 +580,7 @@ ethernets:
         let mut processes = self.processes.write().await;
         let mut exited = Vec::new();
 
+        // Check VMs with Child handles
         for (vm_id, child) in processes.iter_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -593,7 +594,36 @@ ethernets:
             }
         }
 
+        // Get list of tracked VM IDs to exclude from orphan check
+        let tracked_ids: std::collections::HashSet<_> =
+            processes.keys().cloned().collect();
+
         drop(processes);
+
+        // Check adopted VMs (running but no Child handle) by PID
+        if let Ok(vms) = self.store.list().await {
+            for vm in vms {
+                if vm.state != crate::proto::VmState::Running {
+                    continue;
+                }
+                if tracked_ids.contains(&vm.id) {
+                    continue;
+                }
+
+                // This VM is marked as running but we don't have a Child handle
+                // Check if the process is still alive by PID
+                if let Ok(Some(runtime)) = self.store.get_runtime(&vm.id).await {
+                    if !is_process_alive(runtime.pid) {
+                        info!(vm_id = %vm.id, pid = runtime.pid, "Adopted VM process exited");
+                        exited.push(vm.id.clone());
+                    }
+                } else {
+                    // No runtime info but marked as running - inconsistent state
+                    warn!(vm_id = %vm.id, "VM marked as running but no runtime info");
+                    exited.push(vm.id.clone());
+                }
+            }
+        }
 
         // Update state for exited VMs
         for vm_id in exited {
