@@ -7,7 +7,7 @@ use crate::audit::ZfsAuditLogger;
 use crate::import::{ImportManager, ImportSource};
 use crate::proto::zfs_service_server::ZfsService;
 use crate::proto::*;
-use crate::store::{Store, TemplateEntry, VolumeEntry};
+use crate::store::{SnapshotEntry, Store, TemplateEntry, VolumeEntry};
 use crate::zfs::ZfsManager;
 
 pub struct ZfsServiceImpl {
@@ -32,41 +32,37 @@ impl ZfsServiceImpl {
         }
     }
 
-    /// Garbage collect base ZVOL if it's orphaned (no template entry, no other volumes)
-    async fn maybe_gc_base_zvol(&self, template_id: &str) {
-        use tracing::warn;
+    /// Sync DB snapshot entries with actual ZFS snapshots after rollback.
+    /// Removes any DB entries for snapshots that no longer exist in ZFS.
+    async fn sync_snapshots_after_rollback(&self, volume_id: &str) {
+        // Get remaining ZFS snapshots
+        let zfs_snapshots = match self.zfs.list_snapshots(volume_id).await {
+            Ok(snaps) => snaps,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list ZFS snapshots for sync");
+                return;
+            }
+        };
+        let zfs_snap_names: std::collections::HashSet<_> =
+            zfs_snapshots.iter().map(|s| s.name.as_str()).collect();
 
-        // Check if template still exists in DB
-        let template_exists = self
+        // Get DB entries
+        let db_snaps = self
             .store
-            .template_exists(template_id)
+            .list_snapshots(volume_id)
             .await
-            .unwrap_or(true); // Assume exists on error, don't GC
+            .unwrap_or_default();
 
-        if template_exists {
-            return; // Template still exists, don't GC
-        }
-
-        // Check if any other volumes depend on this template
-        let dependent_count = self
-            .store
-            .count_volumes_by_origin(template_id)
-            .await
-            .unwrap_or(1); // Assume exists on error, don't GC
-
-        if dependent_count > 0 {
-            return; // Other volumes still depend on this base
-        }
-
-        // Safe to garbage collect
-        info!(template_id = %template_id, "Garbage collecting orphaned base ZVOL");
-
-        if let Err(e) = self.zfs.delete_base_zvol(template_id).await {
-            warn!(
-                template_id = %template_id,
-                error = %e,
-                "Failed to garbage collect base ZVOL"
-            );
+        // Find and delete orphaned entries
+        for db_snap in db_snaps {
+            if !zfs_snap_names.contains(db_snap.zfs_name.as_str()) {
+                // ZFS snapshot no longer exists - delete DB entry
+                if let Err(e) = self.store.delete_snapshot_by_id(&db_snap.id).await {
+                    tracing::warn!(error = %e, snapshot_id = %db_snap.id, "Failed to delete orphaned snapshot");
+                } else {
+                    tracing::info!(snapshot_name = %db_snap.name, "Deleted snapshot destroyed by rollback");
+                }
+            }
         }
     }
 }
@@ -180,11 +176,6 @@ impl ZfsService for ZfsServiceImpl {
                     // Load snapshots for this volume
                     let zfs_snapshots =
                         self.zfs.list_snapshots(&entry.id).await.unwrap_or_default();
-                    let zfs_snap_entries = self
-                        .store
-                        .list_zfs_snapshots(&entry.id)
-                        .await
-                        .unwrap_or_default();
                     let db_snapshots = self
                         .store
                         .list_snapshots(&entry.id)
@@ -194,14 +185,9 @@ impl ZfsService for ZfsServiceImpl {
                     volume.snapshots = zfs_snapshots
                         .iter()
                         .filter_map(|zfs_snap| {
-                            // Find the ZFS snapshot entry by zfs_name
-                            let zfs_entry = zfs_snap_entries
-                                .iter()
-                                .find(|e| e.zfs_name == zfs_snap.name)?;
-                            // Find the mvirt snapshot that references this ZFS snapshot
-                            let db_snap = db_snapshots
-                                .iter()
-                                .find(|s| s.zfs_snapshot_id == zfs_entry.id)?;
+                            // Find the DB snapshot entry by zfs_name
+                            let db_snap =
+                                db_snapshots.iter().find(|s| s.zfs_name == zfs_snap.name)?;
                             Some(snapshot_to_proto(db_snap, zfs_snap))
                         })
                         .collect();
@@ -241,11 +227,6 @@ impl ZfsService for ZfsServiceImpl {
 
         // Get snapshots
         let zfs_snapshots = self.zfs.list_snapshots(&entry.id).await.unwrap_or_default();
-        let zfs_snap_entries = self
-            .store
-            .list_zfs_snapshots(&entry.id)
-            .await
-            .unwrap_or_default();
         let db_snapshots = self
             .store
             .list_snapshots(&entry.id)
@@ -255,14 +236,8 @@ impl ZfsService for ZfsServiceImpl {
         let snapshots: Vec<Snapshot> = zfs_snapshots
             .iter()
             .filter_map(|zfs_snap| {
-                // Find the ZFS snapshot entry by zfs_name
-                let zfs_entry = zfs_snap_entries
-                    .iter()
-                    .find(|e| e.zfs_name == zfs_snap.name)?;
-                // Find the mvirt snapshot that references this ZFS snapshot
-                let db_snap = db_snapshots
-                    .iter()
-                    .find(|s| s.zfs_snapshot_id == zfs_entry.id)?;
+                // Find the DB snapshot entry by zfs_name
+                let db_snap = db_snapshots.iter().find(|s| s.zfs_name == zfs_snap.name)?;
                 Some(snapshot_to_proto(db_snap, zfs_snap))
             })
             .collect();
@@ -279,7 +254,7 @@ impl ZfsService for ZfsServiceImpl {
     ) -> Result<Response<DeleteVolumeResponse>, Status> {
         let req = request.into_inner();
 
-        // Get from database to get ID and origin template
+        // Get from database to get ID
         let entry = self
             .store
             .get_volume_by_name(&req.name)
@@ -287,29 +262,25 @@ impl ZfsService for ZfsServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.name)))?;
 
-        let origin_template_id = entry.origin_template_id.clone();
+        let zfs_path = self.zfs.volume_zfs_path(&entry.id);
 
-        // Delete from ZFS (using UUID, includes snapshots)
+        // Delete volume and all its snapshots (recursive)
+        // Note: Templates are now independent copies, so we don't need clone checks for volumes
         self.zfs
-            .delete_volume_recursive(&entry.id)
+            .destroy_recursive(&zfs_path)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Delete from database (cascades to snapshots)
+        // Delete from database
         self.store
-            .delete_volume(&entry.id)
+            .delete_volume_with_snapshots(&entry.id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!(name = %req.name, id = %entry.id, "Volume deleted from database");
+        info!(name = %req.name, id = %entry.id, "Volume deleted");
 
         // Audit log
         self.audit.volume_deleted(&entry.id, &entry.name).await;
-
-        // Garbage collection: check if origin template's base ZVOL is orphaned
-        if let Some(template_id) = origin_template_id {
-            self.maybe_gc_base_zvol(&template_id).await;
-        }
 
         Ok(Response::new(DeleteVolumeResponse { deleted: true }))
     }
@@ -466,34 +437,22 @@ impl ZfsService for ZfsServiceImpl {
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.volume_name)))?;
 
         // Generate UUIDs
-        let zfs_snapshot_id = uuid::Uuid::new_v4().to_string();
+        let zfs_name = uuid::Uuid::new_v4().to_string();
         let snapshot_id = uuid::Uuid::new_v4().to_string();
 
         // Create ZFS snapshot using volume's UUID and ZFS snapshot UUID
         let snap = self
             .zfs
-            .create_snapshot(&vol_entry.id, &zfs_snapshot_id)
+            .create_snapshot(&vol_entry.id, &zfs_name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Store ZFS snapshot in database
-        let zfs_snap_entry = crate::store::ZfsSnapshotEntry::new(
-            zfs_snapshot_id.clone(),
-            vol_entry.id.clone(),
-            snap.name.clone(), // ZFS snapshot name (UUID)
-        );
-
-        self.store
-            .create_zfs_snapshot(&zfs_snap_entry)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        // Store mvirt snapshot referencing the ZFS snapshot
-        let snap_entry = crate::store::SnapshotEntry::new(
+        // Store snapshot in database
+        let snap_entry = SnapshotEntry::new(
             snapshot_id,
             vol_entry.id.clone(),
             req.snapshot_name.clone(),
-            zfs_snapshot_id, // Reference to zfs_snapshots
+            zfs_name,
         );
 
         self.store
@@ -530,14 +489,7 @@ impl ZfsService for ZfsServiceImpl {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Get ZFS snapshot entries from database (to map IDs to names)
-        let zfs_snap_entries = self
-            .store
-            .list_zfs_snapshots(&entry.id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        // Get mvirt snapshots from database
+        // Get snapshot entries from database
         let db_snapshots = self
             .store
             .list_snapshots(&entry.id)
@@ -548,14 +500,8 @@ impl ZfsService for ZfsServiceImpl {
         let snapshots: Vec<Snapshot> = zfs_snapshots
             .iter()
             .filter_map(|zfs_snap| {
-                // Find the ZFS snapshot entry by zfs_name
-                let zfs_entry = zfs_snap_entries
-                    .iter()
-                    .find(|e| e.zfs_name == zfs_snap.name)?;
-                // Find the mvirt snapshot that references this ZFS snapshot
-                let db_snap = db_snapshots
-                    .iter()
-                    .find(|s| s.zfs_snapshot_id == zfs_entry.id)?;
+                // Find the DB snapshot entry by zfs_name
+                let db_snap = db_snapshots.iter().find(|s| s.zfs_name == zfs_snap.name)?;
                 Some(snapshot_to_proto(db_snap, zfs_snap))
             })
             .collect();
@@ -577,7 +523,7 @@ impl ZfsService for ZfsServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Volume '{}' not found", req.volume_name)))?;
 
-        // Get snapshot from database to get ZFS snapshot reference
+        // Get snapshot from database
         let snap_entry = self
             .store
             .get_snapshot(&vol_entry.id, &req.snapshot_name)
@@ -587,43 +533,17 @@ impl ZfsService for ZfsServiceImpl {
                 Status::not_found(format!("Snapshot '{}' not found", req.snapshot_name))
             })?;
 
-        let zfs_snapshot_id = snap_entry.zfs_snapshot_id.clone();
+        // Delete from ZFS
+        self.zfs
+            .delete_snapshot(&vol_entry.id, &snap_entry.zfs_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Delete mvirt snapshot entry from database FIRST
+        // Delete from database
         self.store
             .delete_snapshot(&vol_entry.id, &req.snapshot_name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-
-        // Check if there are still references to the ZFS snapshot
-        let ref_count = self
-            .store
-            .count_zfs_snapshot_refs(&zfs_snapshot_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        // Only delete ZFS snapshot if no more references exist
-        if ref_count == 0 {
-            // Get ZFS snapshot info for deletion
-            if let Some(zfs_snap) = self
-                .store
-                .get_zfs_snapshot(&zfs_snapshot_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-            {
-                // Delete from ZFS
-                self.zfs
-                    .delete_snapshot(&vol_entry.id, &zfs_snap.zfs_name)
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
-
-                // Delete ZFS snapshot entry from database
-                self.store
-                    .delete_zfs_snapshot(&zfs_snapshot_id)
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
-            }
-        }
 
         // Audit log
         self.audit
@@ -657,19 +577,15 @@ impl ZfsService for ZfsServiceImpl {
                 Status::not_found(format!("Snapshot '{}' not found", req.snapshot_name))
             })?;
 
-        // Get ZFS snapshot info
-        let zfs_snap = self
-            .store
-            .get_zfs_snapshot(&snap_entry.zfs_snapshot_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .ok_or_else(|| Status::internal("ZFS snapshot entry not found"))?;
-
+        // Perform ZFS rollback (uses -r to destroy newer snapshots)
         let vol = self
             .zfs
-            .rollback_snapshot(&vol_entry.id, &zfs_snap.zfs_name)
+            .rollback_snapshot(&vol_entry.id, &snap_entry.zfs_name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Clean up DB entries for snapshots destroyed by rollback
+        self.sync_snapshots_after_rollback(&vol_entry.id).await;
 
         // Audit log
         self.audit
@@ -686,6 +602,20 @@ impl ZfsService for ZfsServiceImpl {
         request: Request<PromoteSnapshotRequest>,
     ) -> Result<Response<Template>, Status> {
         let req = request.into_inner();
+
+        // Check if template name already exists
+        if self
+            .store
+            .get_template(&req.template_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .is_some()
+        {
+            return Err(Status::already_exists(format!(
+                "Template '{}' already exists",
+                req.template_name
+            )));
+        }
 
         // Get volume from database
         let vol_entry = self
@@ -715,12 +645,40 @@ impl ZfsService for ZfsServiceImpl {
         // Generate template UUID
         let template_id = uuid::Uuid::new_v4().to_string();
 
-        // NO ZFS operations - just create a DB entry referencing the same ZFS snapshot
-        // The template and mvirt snapshot now share the same underlying ZFS snapshot
-        let template_entry = TemplateEntry::new_from_snapshot(
+        // Build ZFS paths
+        let snapshot_path = format!(
+            "{}@{}",
+            self.zfs.volume_zfs_path(&vol_entry.id),
+            snap_entry.zfs_name
+        );
+        let template_zfs_path = self.zfs.template_zfs_path(&template_id);
+
+        // Copy the snapshot to create an independent template ZVOL
+        info!(
+            template_name = %req.template_name,
+            template_id = %template_id,
+            source_snapshot = %snapshot_path,
+            "Creating template by copying snapshot (independent copy)"
+        );
+
+        self.zfs
+            .copy_snapshot_to_dataset(&snapshot_path, &template_zfs_path)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to copy snapshot: {}", e)))?;
+
+        // Create @img snapshot on the new template for future cloning
+        let template_snapshot_path = self
+            .zfs
+            .create_template_snapshot(&template_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to create template snapshot: {}", e)))?;
+
+        // Create template entry in database
+        let template_entry = TemplateEntry::new(
             template_id.clone(),
             req.template_name.clone(),
-            snap_entry.zfs_snapshot_id.clone(),
+            template_zfs_path,
+            template_snapshot_path,
             vol.volsize_bytes,
         );
 
@@ -734,8 +692,7 @@ impl ZfsService for ZfsServiceImpl {
             template_id = %template_id,
             source_volume = %req.volume_name,
             source_snapshot = %req.snapshot_name,
-            zfs_snapshot_id = %snap_entry.zfs_snapshot_id,
-            "Template created from snapshot (shared ZFS snapshot)"
+            "Template created from snapshot"
         );
 
         // Audit log
@@ -777,53 +734,52 @@ impl ZfsService for ZfsServiceImpl {
             .ok_or_else(|| Status::not_found(format!("Template '{}' not found", req.name)))?;
 
         let template_id = template.id.clone();
-        let zfs_snapshot_id = template.zfs_snapshot_id.clone();
 
-        // Delete template from database FIRST
+        // Get ZFS path for template
+        let zfs_path = if let Some(ref base_zvol_path) = template.base_zvol_path {
+            base_zvol_path.clone()
+        } else {
+            self.zfs.template_zfs_path(&template_id)
+        };
+
+        // Check if template's @img snapshot has clones (volumes created from it)
+        let clones = self
+            .zfs
+            .get_snapshot_clones(&zfs_path)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // If clones exist, promote one to transfer ownership of shared data
+        if !clones.is_empty() {
+            let clone_to_promote = &clones[0];
+            info!(
+                template = %req.name,
+                clone = %clone_to_promote,
+                "Template has clones, promoting first clone to preserve data"
+            );
+
+            self.zfs
+                .promote(clone_to_promote)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to promote clone: {}", e)))?;
+        }
+
+        // Now safe to delete template ZVOL
+        self.zfs
+            .destroy(&zfs_path)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Delete template from database
         self.store
             .delete_template(&req.name)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!(name = %req.name, template_id = %template_id, "Template deleted from database");
+        info!(name = %req.name, template_id = %template_id, "Template deleted");
 
         // Audit log
         self.audit.template_deleted(&template_id, &req.name).await;
-
-        // Handle ZFS cleanup based on template type
-        if let Some(zfs_snap_id) = zfs_snapshot_id {
-            // Promoted template: check if ZFS snapshot can be deleted
-            let ref_count = self
-                .store
-                .count_zfs_snapshot_refs(&zfs_snap_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            if ref_count == 0 {
-                // No more references - delete ZFS snapshot
-                if let Some(zfs_snap) = self
-                    .store
-                    .get_zfs_snapshot(&zfs_snap_id)
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?
-                {
-                    self.zfs
-                        .delete_snapshot(&zfs_snap.volume_id, &zfs_snap.zfs_name)
-                        .await
-                        .map_err(|e| Status::internal(e.to_string()))?;
-
-                    self.store
-                        .delete_zfs_snapshot(&zfs_snap_id)
-                        .await
-                        .map_err(|e| Status::internal(e.to_string()))?;
-
-                    info!(zfs_snapshot_id = %zfs_snap_id, "ZFS snapshot deleted (no more references)");
-                }
-            }
-        } else {
-            // Imported template: try to GC base ZVOL (old behavior)
-            self.maybe_gc_base_zvol(&template_id).await;
-        }
 
         Ok(Response::new(DeleteTemplateResponse { deleted: true }))
     }
@@ -856,39 +812,12 @@ impl ZfsService for ZfsServiceImpl {
         // Generate volume UUID
         let volume_id = uuid::Uuid::new_v4().to_string();
 
-        // Clone based on template type
-        let mut vol = if let Some(zfs_snap_id) = &template.zfs_snapshot_id {
-            // Promoted template: clone from ZFS snapshot of source volume
-            let zfs_snap = self
-                .store
-                .get_zfs_snapshot(zfs_snap_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-                .ok_or_else(|| Status::internal("ZFS snapshot not found for template"))?;
-
-            let snapshot_path = format!(
-                "{}@{}",
-                self.zfs.volume_zfs_path(&zfs_snap.volume_id),
-                zfs_snap.zfs_name
-            );
-            let volume_path = self.zfs.volume_zfs_path(&volume_id);
-
-            self.zfs
-                .clone_snapshot(&snapshot_path, &volume_path)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            self.zfs
-                .get_volume(&volume_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-        } else {
-            // Imported template: clone from template's base ZVOL (old behavior)
-            self.zfs
-                .clone_to_volume(&template.id, &volume_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-        };
+        // Clone from template's @img snapshot
+        let mut vol = self
+            .zfs
+            .clone_template_to_volume(&template.id, &volume_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         // Expand volume if requested size is larger than template
         if volume_size > template.size_bytes {

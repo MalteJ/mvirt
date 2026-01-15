@@ -19,121 +19,10 @@ impl Store {
             .connect(&db_url)
             .await?;
 
-        let store = Self { pool };
-        store.migrate().await?;
-        Ok(store)
-    }
+        // Run migrations
+        sqlx::migrate!("./migrations").run(&pool).await?;
 
-    async fn migrate(&self) -> Result<()> {
-        // Volumes table: tracks all managed volumes
-        // origin_template_id: NULL for empty volumes, template UUID for cloned volumes
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS volumes (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                zfs_path TEXT NOT NULL,
-                device_path TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                origin_template_id TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Migration: add origin_template_id column if it doesn't exist (for pre-existing databases)
-        let columns = sqlx::query("PRAGMA table_info(volumes)")
-            .fetch_all(&self.pool)
-            .await?;
-        let has_origin = columns
-            .iter()
-            .any(|row| row.get::<String, _>("name") == "origin_template_id");
-        if !has_origin {
-            sqlx::query("ALTER TABLE volumes ADD COLUMN origin_template_id TEXT")
-                .execute(&self.pool)
-                .await?;
-        }
-
-        // ZFS snapshots table: tracks actual ZFS snapshots with reference counting
-        // Multiple mvirt snapshots/templates can reference the same ZFS snapshot
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS zfs_snapshots (
-                id TEXT PRIMARY KEY,
-                volume_id TEXT NOT NULL,
-                zfs_name TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (volume_id) REFERENCES volumes(id)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Templates table: base images for cloning volumes
-        // Two types:
-        // 1. Promoted from snapshot: has zfs_snapshot_id (references zfs_snapshots)
-        // 2. Imported: has base_zvol_path and snapshot_path (own ZVOL)
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS templates (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                zfs_snapshot_id TEXT,
-                base_zvol_path TEXT,
-                snapshot_path TEXT,
-                size_bytes INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (zfs_snapshot_id) REFERENCES zfs_snapshots(id)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Import jobs table: tracks async import operations (creates templates)
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS import_jobs (
-                id TEXT PRIMARY KEY,
-                template_name TEXT NOT NULL,
-                source TEXT NOT NULL,
-                format TEXT NOT NULL,
-                state TEXT NOT NULL,
-                bytes_written INTEGER DEFAULT 0,
-                total_bytes INTEGER,
-                error TEXT,
-                created_at TEXT NOT NULL,
-                completed_at TEXT
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Snapshots table: point-in-time captures of volumes
-        // References zfs_snapshots table for the actual ZFS snapshot
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS snapshots (
-                id TEXT PRIMARY KEY,
-                volume_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                zfs_snapshot_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (volume_id) REFERENCES volumes(id) ON DELETE CASCADE,
-                FOREIGN KEY (zfs_snapshot_id) REFERENCES zfs_snapshots(id),
-                UNIQUE(volume_id, name)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Ok(Self { pool })
     }
 
     // === Volume operations ===
@@ -256,13 +145,12 @@ impl Store {
     pub async fn create_template(&self, entry: &TemplateEntry) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO templates (id, name, zfs_snapshot_id, base_zvol_path, snapshot_path, size_bytes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO templates (id, name, base_zvol_path, snapshot_path, size_bytes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&entry.id)
         .bind(&entry.name)
-        .bind(&entry.zfs_snapshot_id)
         .bind(&entry.base_zvol_path)
         .bind(&entry.snapshot_path)
         .bind(entry.size_bytes as i64)
@@ -276,7 +164,7 @@ impl Store {
     pub async fn get_template(&self, name: &str) -> Result<Option<TemplateEntry>> {
         let row = sqlx::query(
             r#"
-            SELECT id, name, zfs_snapshot_id, base_zvol_path, snapshot_path, size_bytes, created_at
+            SELECT id, name, base_zvol_path, snapshot_path, size_bytes, created_at
             FROM templates WHERE name = ?
             "#,
         )
@@ -287,7 +175,6 @@ impl Store {
         Ok(row.map(|r| TemplateEntry {
             id: r.get("id"),
             name: r.get("name"),
-            zfs_snapshot_id: r.get("zfs_snapshot_id"),
             base_zvol_path: r.get("base_zvol_path"),
             snapshot_path: r.get("snapshot_path"),
             size_bytes: r.get::<i64, _>("size_bytes") as u64,
@@ -298,7 +185,7 @@ impl Store {
     pub async fn get_template_by_id(&self, id: &str) -> Result<Option<TemplateEntry>> {
         let row = sqlx::query(
             r#"
-            SELECT id, name, zfs_snapshot_id, base_zvol_path, snapshot_path, size_bytes, created_at
+            SELECT id, name, base_zvol_path, snapshot_path, size_bytes, created_at
             FROM templates WHERE id = ?
             "#,
         )
@@ -309,7 +196,6 @@ impl Store {
         Ok(row.map(|r| TemplateEntry {
             id: r.get("id"),
             name: r.get("name"),
-            zfs_snapshot_id: r.get("zfs_snapshot_id"),
             base_zvol_path: r.get("base_zvol_path"),
             snapshot_path: r.get("snapshot_path"),
             size_bytes: r.get::<i64, _>("size_bytes") as u64,
@@ -320,7 +206,7 @@ impl Store {
     pub async fn list_templates(&self) -> Result<Vec<TemplateEntry>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, name, zfs_snapshot_id, base_zvol_path, snapshot_path, size_bytes, created_at
+            SELECT id, name, base_zvol_path, snapshot_path, size_bytes, created_at
             FROM templates ORDER BY created_at DESC
             "#,
         )
@@ -332,7 +218,6 @@ impl Store {
             .map(|r| TemplateEntry {
                 id: r.get("id"),
                 name: r.get("name"),
-                zfs_snapshot_id: r.get("zfs_snapshot_id"),
                 base_zvol_path: r.get("base_zvol_path"),
                 snapshot_path: r.get("snapshot_path"),
                 size_bytes: r.get::<i64, _>("size_bytes") as u64,
@@ -458,105 +343,19 @@ impl Store {
         Ok(())
     }
 
-    // === ZFS Snapshot operations (actual ZFS snapshots with ref counting) ===
-
-    pub async fn create_zfs_snapshot(&self, entry: &ZfsSnapshotEntry) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO zfs_snapshots (id, volume_id, zfs_name, created_at)
-            VALUES (?, ?, ?, ?)
-            "#,
-        )
-        .bind(&entry.id)
-        .bind(&entry.volume_id)
-        .bind(&entry.zfs_name)
-        .bind(&entry.created_at)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
-    pub async fn get_zfs_snapshot(&self, id: &str) -> Result<Option<ZfsSnapshotEntry>> {
-        let row = sqlx::query(
-            r#"
-            SELECT id, volume_id, zfs_name, created_at
-            FROM zfs_snapshots WHERE id = ?
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.map(|r| ZfsSnapshotEntry {
-            id: r.get("id"),
-            volume_id: r.get("volume_id"),
-            zfs_name: r.get("zfs_name"),
-            created_at: r.get("created_at"),
-        }))
-    }
-
-    pub async fn list_zfs_snapshots(&self, volume_id: &str) -> Result<Vec<ZfsSnapshotEntry>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, volume_id, zfs_name, created_at
-            FROM zfs_snapshots WHERE volume_id = ? ORDER BY created_at DESC
-            "#,
-        )
-        .bind(volume_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| ZfsSnapshotEntry {
-                id: r.get("id"),
-                volume_id: r.get("volume_id"),
-                zfs_name: r.get("zfs_name"),
-                created_at: r.get("created_at"),
-            })
-            .collect())
-    }
-
-    pub async fn delete_zfs_snapshot(&self, id: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM zfs_snapshots WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(result.rows_affected() > 0)
-    }
-
-    /// Count references to a ZFS snapshot (from snapshots + templates tables)
-    pub async fn count_zfs_snapshot_refs(&self, zfs_snapshot_id: &str) -> Result<u64> {
-        let snap_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM snapshots WHERE zfs_snapshot_id = ?")
-                .bind(zfs_snapshot_id)
-                .fetch_one(&self.pool)
-                .await?;
-
-        let tpl_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM templates WHERE zfs_snapshot_id = ?")
-                .bind(zfs_snapshot_id)
-                .fetch_one(&self.pool)
-                .await?;
-
-        Ok((snap_count + tpl_count) as u64)
-    }
-
-    // === Snapshot operations (mvirt snapshots referencing zfs_snapshots) ===
+    // === Snapshot operations ===
 
     pub async fn create_snapshot(&self, entry: &SnapshotEntry) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO snapshots (id, volume_id, name, zfs_snapshot_id, created_at)
+            INSERT INTO snapshots (id, volume_id, name, zfs_name, created_at)
             VALUES (?, ?, ?, ?, ?)
             "#,
         )
         .bind(&entry.id)
         .bind(&entry.volume_id)
         .bind(&entry.name)
-        .bind(&entry.zfs_snapshot_id)
+        .bind(&entry.zfs_name)
         .bind(&entry.created_at)
         .execute(&self.pool)
         .await?;
@@ -567,7 +366,7 @@ impl Store {
     pub async fn get_snapshot(&self, volume_id: &str, name: &str) -> Result<Option<SnapshotEntry>> {
         let row = sqlx::query(
             r#"
-            SELECT id, volume_id, name, zfs_snapshot_id, created_at
+            SELECT id, volume_id, name, zfs_name, created_at
             FROM snapshots WHERE volume_id = ? AND name = ?
             "#,
         )
@@ -580,7 +379,7 @@ impl Store {
             id: r.get("id"),
             volume_id: r.get("volume_id"),
             name: r.get("name"),
-            zfs_snapshot_id: r.get("zfs_snapshot_id"),
+            zfs_name: r.get("zfs_name"),
             created_at: r.get("created_at"),
         }))
     }
@@ -588,7 +387,7 @@ impl Store {
     pub async fn list_snapshots(&self, volume_id: &str) -> Result<Vec<SnapshotEntry>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, volume_id, name, zfs_snapshot_id, created_at
+            SELECT id, volume_id, name, zfs_name, created_at
             FROM snapshots WHERE volume_id = ? ORDER BY created_at DESC
             "#,
         )
@@ -602,7 +401,7 @@ impl Store {
                 id: r.get("id"),
                 volume_id: r.get("volume_id"),
                 name: r.get("name"),
-                zfs_snapshot_id: r.get("zfs_snapshot_id"),
+                zfs_name: r.get("zfs_name"),
                 created_at: r.get("created_at"),
             })
             .collect())
@@ -616,6 +415,35 @@ impl Store {
             .await?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn delete_snapshot_by_id(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM snapshots WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Delete a volume and all its snapshots in a single transaction.
+    pub async fn delete_volume_with_snapshots(&self, volume_id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        // 1. Delete snapshots
+        sqlx::query("DELETE FROM snapshots WHERE volume_id = ?")
+            .bind(volume_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // 2. Delete volume
+        sqlx::query("DELETE FROM volumes WHERE id = ?")
+            .bind(volume_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 
     // === Garbage Collection helpers ===
@@ -682,36 +510,17 @@ impl VolumeEntry {
 pub struct TemplateEntry {
     pub id: String,
     pub name: String,
-    /// For promoted snapshots: references zfs_snapshots table
-    pub zfs_snapshot_id: Option<String>,
-    /// For imported templates: direct ZFS path (legacy/import)
+    /// ZFS path to the template ZVOL (e.g., mvirt/templates/<uuid>)
     pub base_zvol_path: Option<String>,
+    /// ZFS snapshot path for cloning (e.g., mvirt/templates/<uuid>@img)
     pub snapshot_path: Option<String>,
     pub size_bytes: u64,
     pub created_at: String,
 }
 
 impl TemplateEntry {
-    /// Create a template from a promoted snapshot (references zfs_snapshots)
-    pub fn new_from_snapshot(
-        id: String,
-        name: String,
-        zfs_snapshot_id: String,
-        size_bytes: u64,
-    ) -> Self {
-        Self {
-            id,
-            name,
-            zfs_snapshot_id: Some(zfs_snapshot_id),
-            base_zvol_path: None,
-            snapshot_path: None,
-            size_bytes,
-            created_at: Utc::now().to_rfc3339(),
-        }
-    }
-
-    /// Create a template from import (has its own ZVOL)
-    pub fn new_from_import(
+    /// Create a template entry
+    pub fn new(
         id: String,
         name: String,
         base_zvol_path: String,
@@ -721,17 +530,11 @@ impl TemplateEntry {
         Self {
             id,
             name,
-            zfs_snapshot_id: None,
             base_zvol_path: Some(base_zvol_path),
             snapshot_path: Some(snapshot_path),
             size_bytes,
             created_at: Utc::now().to_rfc3339(),
         }
-    }
-
-    /// Returns true if this template is from a promoted snapshot
-    pub fn is_promoted(&self) -> bool {
-        self.zfs_snapshot_id.is_some()
     }
 }
 
@@ -773,43 +576,24 @@ impl ImportJobEntry {
     }
 }
 
-/// Actual ZFS snapshot entry (can be referenced by multiple snapshots/templates)
-#[derive(Debug, Clone)]
-pub struct ZfsSnapshotEntry {
-    pub id: String,
-    pub volume_id: String,
-    pub zfs_name: String, // The UUID used in ZFS path: vmpool/<vol-uuid>@<zfs_name>
-    pub created_at: String,
-}
-
-impl ZfsSnapshotEntry {
-    pub fn new(id: String, volume_id: String, zfs_name: String) -> Self {
-        Self {
-            id,
-            volume_id,
-            zfs_name,
-            created_at: Utc::now().to_rfc3339(),
-        }
-    }
-}
-
-/// mvirt snapshot entry (references a ZfsSnapshotEntry)
+/// Snapshot entry (directly contains ZFS snapshot name)
 #[derive(Debug, Clone)]
 pub struct SnapshotEntry {
     pub id: String,
     pub volume_id: String,
     pub name: String,
-    pub zfs_snapshot_id: String, // References zfs_snapshots.id
+    /// The UUID used in ZFS path: mvirt/volumes/<vol-uuid>@<zfs_name>
+    pub zfs_name: String,
     pub created_at: String,
 }
 
 impl SnapshotEntry {
-    pub fn new(id: String, volume_id: String, name: String, zfs_snapshot_id: String) -> Self {
+    pub fn new(id: String, volume_id: String, name: String, zfs_name: String) -> Self {
         Self {
             id,
             volume_id,
             name,
-            zfs_snapshot_id,
+            zfs_name,
             created_at: Utc::now().to_rfc3339(),
         }
     }

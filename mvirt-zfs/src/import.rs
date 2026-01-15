@@ -276,14 +276,15 @@ impl ImportManager {
             // Audit log: import failed
             audit.import_failed(job_id, template_name, &error_msg).await;
 
-            // Try to clean up the base ZVOL if it was created
-            if let Err(cleanup_err) = zfs.delete_base_zvol(&template_id).await {
-                // Base ZVOL might not exist yet, that's fine
+            // Try to clean up the template ZVOL if it was created
+            let zfs_path = zfs.template_zfs_path(&template_id);
+            if let Err(cleanup_err) = zfs.destroy_recursive(&zfs_path).await {
+                // Template ZVOL might not exist yet, that's fine
                 warn!(
                     job_id = %job_id,
                     template_id = %template_id,
                     error = %cleanup_err,
-                    "Failed to cleanup base ZVOL after import error (may not exist)"
+                    "Failed to cleanup template ZVOL after import error (may not exist)"
                 );
             }
 
@@ -392,8 +393,8 @@ impl ImportManager {
             .context("Failed to get file metadata")?;
         let file_size = size_bytes.unwrap_or(metadata.len());
 
-        // Create base ZVOL for template
-        let device_path = zfs.create_base_zvol(template_id, file_size).await?;
+        // Create ZVOL for template
+        let device_path = zfs.create_template_zvol(template_id, file_size).await?;
 
         // Open source file
         let mut src_file = File::open(path)
@@ -415,8 +416,10 @@ impl ImportManager {
         loop {
             // Check for cancellation
             if cancel_rx.try_recv().is_ok() {
-                // Clean up: delete the base ZVOL
-                let _ = zfs.delete_base_zvol(template_id).await;
+                // Clean up: delete the template ZVOL
+                let _ = zfs
+                    .destroy_recursive(&zfs.template_zfs_path(template_id))
+                    .await;
                 store
                     .update_import_job(job_id, "cancelled", bytes_written, None, None)
                     .await?;
@@ -447,10 +450,10 @@ impl ImportManager {
         let snapshot_path = zfs.create_template_snapshot(template_id).await?;
 
         // Store template in database
-        let template_entry = TemplateEntry::new_from_import(
+        let template_entry = TemplateEntry::new(
             template_id.to_string(),
             template_name.to_string(),
-            zfs.base_zvol_path(template_id),
+            zfs.template_zfs_path(template_id),
             snapshot_path,
             file_size,
         );
@@ -514,8 +517,8 @@ impl ImportManager {
             "qcow2 virtual size determined, creating base ZVOL"
         );
 
-        // Create base ZVOL for template
-        let device_path = zfs.create_base_zvol(template_id, virtual_size).await?;
+        // Create ZVOL for template
+        let device_path = zfs.create_template_zvol(template_id, virtual_size).await?;
 
         // Update state to writing
         store
@@ -554,10 +557,10 @@ impl ImportManager {
         let snapshot_path = zfs.create_template_snapshot(template_id).await?;
 
         // Store template in database
-        let template_entry = TemplateEntry::new_from_import(
+        let template_entry = TemplateEntry::new(
             template_id.to_string(),
             template_name.to_string(),
-            zfs.base_zvol_path(template_id),
+            zfs.template_zfs_path(template_id),
             snapshot_path,
             virtual_size,
         );
@@ -701,7 +704,7 @@ impl ImportManager {
                     .update_import_job(job_id, "writing", 0, None, None)
                     .await?;
 
-                let device_path = zfs.create_base_zvol(template_id, file_size).await?;
+                let device_path = zfs.create_template_zvol(template_id, file_size).await?;
 
                 let mut src = File::open(&tmp_file)
                     .await
@@ -729,10 +732,10 @@ impl ImportManager {
 
                 let snapshot_path = zfs.create_template_snapshot(template_id).await?;
 
-                let template_entry = TemplateEntry::new_from_import(
+                let template_entry = TemplateEntry::new(
                     template_id.to_string(),
                     template_name.to_string(),
-                    zfs.base_zvol_path(template_id),
+                    zfs.template_zfs_path(template_id),
                     snapshot_path,
                     file_size,
                 );

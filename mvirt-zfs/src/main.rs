@@ -18,7 +18,7 @@ use mvirt_zfs::zfs::ZfsManager;
 #[command(about = "mvirt ZFS volume manager daemon")]
 struct Args {
     /// ZFS pool name
-    #[arg(short, long, default_value = "vmpool")]
+    #[arg(short, long, default_value = "mvirt")]
     pool: String,
 
     /// gRPC listen address
@@ -50,9 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize ZFS manager
     let zfs_manager = Arc::new(ZfsManager::new(args.pool.clone()));
 
-    // Ensure temp dataset exists (for qcow2 downloads during import)
+    // Ensure pool structure exists (templates/, volumes/, .tmp/)
     let tmp_dir = format!("{}/tmp", state_dir);
-    zfs_manager.ensure_tmp_dataset(&tmp_dir).await?;
+    zfs_manager.ensure_pool_structure(&tmp_dir).await?;
 
     // Initialize audit logger (connects lazily to mvirt-log)
     let audit = create_audit_logger(&args.log_endpoint);

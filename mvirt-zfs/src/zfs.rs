@@ -23,38 +23,77 @@ impl ZfsManager {
         &self.pool_name
     }
 
-    /// Get the device path for a volume
-    #[allow(dead_code)]
-    pub fn volume_device_path(&self, name: &str) -> String {
-        format!("/dev/zvol/{}/{}", self.pool_name, name)
+    // === Path Helpers ===
+
+    /// Get the ZFS path for a template (pool/templates/uuid)
+    pub fn template_zfs_path(&self, uuid: &str) -> String {
+        format!("{}/templates/{}", self.pool_name, uuid)
     }
 
-    /// Get the ZFS path for a volume (by UUID)
+    /// Get the device path for a template (by UUID)
+    pub fn template_device_path(&self, uuid: &str) -> String {
+        format!("/dev/zvol/{}/templates/{}", self.pool_name, uuid)
+    }
+
+    /// Get the snapshot path for a template (pool/templates/uuid@img)
+    pub fn template_snapshot_path(&self, uuid: &str) -> String {
+        format!("{}/templates/{}@img", self.pool_name, uuid)
+    }
+
+    /// Get the ZFS path for a volume (pool/volumes/uuid)
     pub fn volume_zfs_path(&self, uuid: &str) -> String {
-        format!("{}/{}", self.pool_name, uuid)
+        format!("{}/volumes/{}", self.pool_name, uuid)
     }
 
     /// Get the device path for a volume (by UUID)
-    pub fn volume_device_path_by_uuid(&self, uuid: &str) -> String {
-        format!("/dev/zvol/{}/{}", self.pool_name, uuid)
-    }
-
-    /// Get the ZFS path for a base ZVOL (template storage)
-    pub fn base_zvol_path(&self, uuid: &str) -> String {
-        format!("{}/.templates/{}", self.pool_name, uuid)
-    }
-
-    /// Get the device path for a base ZVOL
-    pub fn base_device_path(&self, uuid: &str) -> String {
-        format!("/dev/zvol/{}/.templates/{}", self.pool_name, uuid)
-    }
-
-    /// Get the snapshot path for a template (base@img)
-    pub fn template_snapshot_path(&self, uuid: &str) -> String {
-        format!("{}/.templates/{}@img", self.pool_name, uuid)
+    pub fn volume_device_path(&self, uuid: &str) -> String {
+        format!("/dev/zvol/{}/volumes/{}", self.pool_name, uuid)
     }
 
     // === Pool Operations ===
+
+    /// Ensure a dataset exists, creating it if necessary
+    async fn ensure_dataset(&self, dataset: &str) -> Result<()> {
+        let output = Command::new("zfs")
+            .args(["list", "-H", dataset])
+            .output()
+            .await
+            .context("Failed to run zfs list")?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        info!(dataset = %dataset, "Creating dataset");
+        let output = Command::new("zfs")
+            .args(["create", dataset])
+            .output()
+            .await
+            .context("Failed to run zfs create")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("zfs create failed: {}", stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Ensure the pool structure exists (templates/, volumes/, .tmp/)
+    pub async fn ensure_pool_structure(&self, tmp_mountpoint: &str) -> Result<()> {
+        // Create templates/ dataset
+        self.ensure_dataset(&format!("{}/templates", self.pool_name))
+            .await?;
+
+        // Create volumes/ dataset
+        self.ensure_dataset(&format!("{}/volumes", self.pool_name))
+            .await?;
+
+        // Create .tmp dataset with custom mountpoint
+        self.ensure_tmp_dataset(tmp_mountpoint).await?;
+
+        Ok(())
+    }
 
     /// Ensure the .tmp dataset exists for temporary files during import
     pub async fn ensure_tmp_dataset(&self, mountpoint: &str) -> Result<()> {
@@ -398,58 +437,25 @@ impl ZfsManager {
         Ok(())
     }
 
-    // === Template/Base ZVOL Operations ===
+    // === Template Operations ===
 
-    /// Ensure the .templates dataset exists for storing template base ZVOLs
-    pub async fn ensure_base_dataset(&self) -> Result<()> {
-        let base_path = format!("{}/.templates", self.pool_name);
-
-        // Check if it exists
-        let output = Command::new("zfs")
-            .args(["list", "-H", &base_path])
-            .output()
-            .await?;
-
-        if output.status.success() {
-            return Ok(()); // Already exists
-        }
-
-        // Create it
-        info!(path = %base_path, "Creating .templates dataset");
-
-        let output = Command::new("zfs")
-            .args(["create", &base_path])
-            .output()
-            .await
-            .context("Failed to create .templates dataset")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("zfs create .templates failed: {}", stderr));
-        }
-
-        Ok(())
-    }
-
-    /// Create a base ZVOL for a template (at vmpool/.templates/<uuid>)
-    pub async fn create_base_zvol(&self, uuid: &str, size_bytes: u64) -> Result<String> {
-        self.ensure_base_dataset().await?;
-
-        let zfs_path = self.base_zvol_path(uuid);
-        let device_path = self.base_device_path(uuid);
+    /// Create a ZVOL for a template (at mvirt/templates/<uuid>)
+    pub async fn create_template_zvol(&self, uuid: &str, size_bytes: u64) -> Result<String> {
+        let zfs_path = self.template_zfs_path(uuid);
+        let device_path = self.template_device_path(uuid);
         let size_str = size_bytes.to_string();
 
-        info!(uuid = %uuid, size_bytes = %size_bytes, "Creating base ZVOL");
+        info!(uuid = %uuid, size_bytes = %size_bytes, "Creating template ZVOL");
 
         let output = Command::new("zfs")
             .args(["create", "-s", "-V", &size_str, &zfs_path])
             .output()
             .await
-            .context("Failed to run zfs create for base ZVOL")?;
+            .context("Failed to run zfs create for template ZVOL")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("zfs create base ZVOL failed: {}", stderr));
+            return Err(anyhow!("zfs create template ZVOL failed: {}", stderr));
         }
 
         // Wait for device node
@@ -479,7 +485,7 @@ impl ZfsManager {
     }
 
     /// Clone a template snapshot to create a new volume
-    pub async fn clone_to_volume(
+    pub async fn clone_template_to_volume(
         &self,
         template_uuid: &str,
         volume_uuid: &str,
@@ -512,21 +518,47 @@ impl ZfsManager {
         Ok(vol)
     }
 
-    /// Delete a base ZVOL (for garbage collection)
-    pub async fn delete_base_zvol(&self, uuid: &str) -> Result<()> {
-        let zfs_path = self.base_zvol_path(uuid);
+    /// Copy a snapshot to a new independent dataset using zfs send/receive
+    /// This creates a full independent copy, not a clone.
+    pub async fn copy_snapshot_to_dataset(
+        &self,
+        snapshot_path: &str,
+        target_path: &str,
+    ) -> Result<()> {
+        use std::process::Stdio;
 
-        info!(uuid = %uuid, "Deleting base ZVOL (GC)");
+        info!(snapshot = %snapshot_path, target = %target_path, "Copying snapshot to new dataset");
 
-        let output = Command::new("zfs")
-            .args(["destroy", "-r", &zfs_path])
+        // zfs send snapshot_path | zfs receive target_path
+        let mut send = std::process::Command::new("zfs")
+            .args(["send", snapshot_path])
+            .stdout(Stdio::piped())
+            .spawn()
+            .context("Failed to spawn zfs send")?;
+
+        let send_stdout = send
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("Failed to get send stdout"))?;
+
+        let receive_output = std::process::Command::new("zfs")
+            .args(["receive", target_path])
+            .stdin(send_stdout)
             .output()
-            .await
-            .context("Failed to run zfs destroy for base ZVOL")?;
+            .context("Failed to run zfs receive")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("zfs destroy base ZVOL failed: {}", stderr));
+        // Wait for send to finish
+        let send_status = send.wait().context("Failed to wait for zfs send")?;
+        if !send_status.success() {
+            return Err(anyhow!(
+                "zfs send failed with exit code {:?}",
+                send_status.code()
+            ));
+        }
+
+        if !receive_output.status.success() {
+            let stderr = String::from_utf8_lossy(&receive_output.stderr);
+            return Err(anyhow!("zfs receive failed: {}", stderr));
         }
 
         Ok(())
@@ -646,6 +678,7 @@ impl ZfsManager {
     }
 
     /// Rollback to a snapshot (volume must not be in use!)
+    /// Uses -r flag to destroy any snapshots newer than the target.
     pub async fn rollback_snapshot(
         &self,
         volume_name: &str,
@@ -653,10 +686,10 @@ impl ZfsManager {
     ) -> Result<VolumeInfo> {
         let snapshot_path = format!("{}@{}", self.volume_zfs_path(volume_name), snapshot_name);
 
-        info!(volume = %volume_name, snapshot = %snapshot_name, "Rolling back to snapshot");
+        info!(volume = %volume_name, snapshot = %snapshot_name, "Rolling back to snapshot (destroying newer snapshots)");
 
         let output = Command::new("zfs")
-            .args(["rollback", &snapshot_path])
+            .args(["rollback", "-r", &snapshot_path])
             .output()
             .await
             .context("Failed to run zfs rollback")?;
@@ -671,8 +704,7 @@ impl ZfsManager {
 
     // === Clone Operations ===
 
-    /// Clone a snapshot to a new ZFS dataset (for base ZVOLs)
-    /// Use clone_to_volume for cloning templates to regular volumes.
+    /// Clone a snapshot to a new ZFS dataset
     pub async fn clone_snapshot(&self, snapshot_path: &str, target_path: &str) -> Result<()> {
         info!(snapshot = %snapshot_path, target = %target_path, "Cloning snapshot");
 
@@ -690,6 +722,97 @@ impl ZfsManager {
         Ok(())
     }
 
+    /// Promote a clone to become the origin (reverses parent-child relationship)
+    /// After promote, the original dataset becomes a clone of this one.
+    pub async fn promote(&self, clone_path: &str) -> Result<()> {
+        info!(clone = %clone_path, "Promoting clone to origin");
+
+        let output = Command::new("zfs")
+            .args(["promote", clone_path])
+            .output()
+            .await
+            .context("Failed to run zfs promote")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("zfs promote failed: {}", stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Get all clones of all snapshots on a dataset
+    /// Returns a list of clone dataset paths
+    pub async fn get_snapshot_clones(&self, zfs_path: &str) -> Result<Vec<String>> {
+        let output = Command::new("zfs")
+            .args([
+                "list", "-Hp", "-t", "snapshot", "-o", "clones", "-r", zfs_path,
+            ])
+            .output()
+            .await
+            .context("Failed to run zfs list for clones")?;
+
+        if !output.status.success() {
+            // No snapshots = no clones
+            return Ok(vec![]);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut clones = Vec::new();
+
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() || line == "-" {
+                continue;
+            }
+            // Clones are comma-separated
+            for clone in line.split(',') {
+                let clone = clone.trim();
+                if !clone.is_empty() {
+                    clones.push(clone.to_string());
+                }
+            }
+        }
+
+        Ok(clones)
+    }
+
+    /// Delete a ZFS dataset (volume or clone)
+    pub async fn destroy(&self, zfs_path: &str) -> Result<()> {
+        info!(path = %zfs_path, "Destroying ZFS dataset");
+
+        let output = Command::new("zfs")
+            .args(["destroy", zfs_path])
+            .output()
+            .await
+            .context("Failed to run zfs destroy")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("zfs destroy failed: {}", stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Delete a ZFS dataset recursively (including snapshots)
+    pub async fn destroy_recursive(&self, zfs_path: &str) -> Result<()> {
+        info!(path = %zfs_path, "Destroying ZFS dataset recursively");
+
+        let output = Command::new("zfs")
+            .args(["destroy", "-r", zfs_path])
+            .output()
+            .await
+            .context("Failed to run zfs destroy -r")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("zfs destroy -r failed: {}", stderr));
+        }
+
+        Ok(())
+    }
+
     // === Helper Methods ===
 
     fn parse_volume_line(&self, line: &str) -> Option<VolumeInfo> {
@@ -699,12 +822,15 @@ impl ZfsManager {
         }
 
         let full_name = parts[0];
+
+        // Extract UUID from path (mvirt/volumes/{uuid})
+        let volumes_prefix = format!("{}/volumes/", self.pool_name);
         let name = full_name
-            .strip_prefix(&format!("{}/", self.pool_name))
+            .strip_prefix(&volumes_prefix)
             .unwrap_or(full_name)
             .to_string();
 
-        // Skip nested datasets (templates are handled separately)
+        // Skip if this is not a direct volume (could be a nested dataset)
         if name.contains('/') {
             return None;
         }
