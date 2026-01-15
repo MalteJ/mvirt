@@ -328,6 +328,66 @@ fn handle_detail_view_input(app: &mut App, key_code: KeyCode) {
 }
 
 fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
+    // Check if we're in "adding data disk" mode
+    let adding_data_disk = app
+        .create_modal
+        .as_ref()
+        .is_some_and(|m| m.adding_data_disk);
+
+    if adding_data_disk {
+        // Handle keys while adding a new data disk
+        match key_code {
+            KeyCode::Esc => {
+                if let Some(modal) = &mut app.create_modal {
+                    modal.cancel_adding_data_disk();
+                }
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                if let Some(modal) = &mut app.create_modal {
+                    modal.focus_next();
+                }
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                if let Some(modal) = &mut app.create_modal {
+                    modal.focus_prev();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(modal) = &mut app.create_modal
+                    && let Err(e) = modal.confirm_add_data_disk()
+                {
+                    app.status_message = Some(e.to_string());
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(modal) = &mut app.create_modal
+                    && let Some(input) = modal.current_input()
+                {
+                    input.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(modal) = &mut app.create_modal {
+                    if modal.is_numeric_field() {
+                        if c.is_ascii_digit()
+                            && let Some(input) = modal.current_input()
+                        {
+                            input.push(c);
+                        }
+                    } else if modal.is_new_disk_name_field()
+                        && modals::vm_create::CreateModal::is_valid_name_char(c)
+                        && let Some(input) = modal.current_input()
+                    {
+                        input.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Normal create modal handling
     match key_code {
         KeyCode::Esc => app.close_create_modal(),
         KeyCode::Tab => {
@@ -348,6 +408,8 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
                     modal.network_select_next();
                 } else if modal.is_user_data_mode_field() {
                     modal.cycle_user_data_mode_next();
+                } else if modal.is_data_disks_field() {
+                    modal.data_disk_select_next();
                 } else {
                     modal.focus_next();
                 }
@@ -361,6 +423,8 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
                     modal.network_select_prev();
                 } else if modal.is_user_data_mode_field() {
                     modal.cycle_user_data_mode_prev();
+                } else if modal.is_data_disks_field() {
+                    modal.data_disk_select_prev();
                 } else {
                     modal.focus_prev();
                 }
@@ -397,10 +461,8 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
         }
         KeyCode::Char(c) => {
             if let Some(modal) = &mut app.create_modal {
-                // Handle tab switching with number keys 1-4
-                if matches!(c, '1'..='4') {
-                    modal.switch_tab_by_number(c as u8 - b'0');
-                } else if modal.is_numeric_field() {
+                // First priority: text input fields
+                if modal.is_numeric_field() {
                     if c.is_ascii_digit()
                         && let Some(input) = modal.current_input()
                     {
@@ -412,8 +474,21 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
                     {
                         input.push(c);
                     }
-                } else if let Some(input) = modal.current_input() {
-                    input.push(c);
+                } else if modal.current_input().is_some() {
+                    // Generic text field (password, github user, file path, etc.)
+                    if let Some(input) = modal.current_input() {
+                        input.push(c);
+                    }
+                } else if matches!(c, '1'..='4') {
+                    // Tab switching only when not in a text input field
+                    modal.switch_tab_by_number(c as u8 - b'0');
+                } else if modal.is_data_disks_field() {
+                    // Data disks field shortcuts
+                    match c {
+                        'a' | 'A' => modal.start_adding_data_disk(),
+                        'd' | 'D' => modal.delete_selected_data_disk(),
+                        _ => {}
+                    }
                 }
             }
         }

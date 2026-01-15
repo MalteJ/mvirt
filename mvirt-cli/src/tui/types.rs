@@ -54,6 +54,13 @@ pub struct SshKeysConfig {
     pub root_password: String,
 }
 
+/// Additional data disk for a VM
+#[derive(Clone)]
+pub struct DataDisk {
+    pub name: String,
+    pub size_gb: u64,
+}
+
 #[derive(Clone)]
 pub struct CreateVmParams {
     pub name: Option<String>,
@@ -67,6 +74,7 @@ pub struct CreateVmParams {
     pub user_data_file: Option<String>,
     pub ssh_keys_config: Option<SshKeysConfig>,
     pub network_id: Option<String>, // Network to join (creates vNIC automatically)
+    pub data_disks: Vec<DataDisk>,  // Additional data disks (new volumes)
 }
 
 /// Network item for selection in VM create modal

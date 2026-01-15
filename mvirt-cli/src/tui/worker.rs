@@ -326,10 +326,41 @@ pub async fn action_worker(
                         continue;
                     };
 
-                    let disks = vec![DiskConfig {
+                    let mut disks = vec![DiskConfig {
                         path: disk_path,
                         readonly: false,
                     }];
+
+                    // Create data disks (additional volumes)
+                    if let Some(ref mut zfs) = zfs_client {
+                        for data_disk in &params.data_disks {
+                            let size_bytes = data_disk.size_gb * 1024 * 1024 * 1024;
+                            match zfs
+                                .create_volume(CreateVolumeRequest {
+                                    name: data_disk.name.clone(),
+                                    size_bytes,
+                                    volblocksize: None,
+                                })
+                                .await
+                            {
+                                Ok(response) => {
+                                    let vol = response.into_inner();
+                                    disks.push(DiskConfig {
+                                        path: vol.path,
+                                        readonly: false,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = result_tx.send(ActionResult::Created(Err(format!(
+                                        "Failed to create data disk '{}': {}",
+                                        data_disk.name,
+                                        e.message()
+                                    ))));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
 
                     // Create NIC if a network was selected
                     let nic_config = if let Some(network_id) = params.network_id {

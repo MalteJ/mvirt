@@ -2,8 +2,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::types::{
-    CreateVmParams, CreateVmTab, DiskSourceType, NetworkItem, SshKeySource, SshKeysConfig,
-    UserDataMode,
+    CreateVmParams, CreateVmTab, DataDisk, DiskSourceType, NetworkItem, SshKeySource,
+    SshKeysConfig, UserDataMode,
 };
 use crate::zfs_proto::{Template, Volume};
 
@@ -31,6 +31,12 @@ pub struct CreateModal {
     pub disk_items: Vec<DiskItem>, // Combined list of templates and volumes
     pub selected_disk: usize,
     pub volume_size_gb: String, // Size for new volume when cloning from template
+    // Data disks (additional storage)
+    pub data_disks: Vec<DataDisk>,
+    pub selected_data_disk: usize,
+    pub adding_data_disk: bool,
+    pub new_disk_name: String,
+    pub new_disk_size_gb: String,
 
     // Network tab fields
     pub network_items: Vec<NetworkItem>, // Available networks
@@ -70,6 +76,11 @@ impl CreateModal {
             disk_items: Vec::new(),
             selected_disk: 0,
             volume_size_gb: String::new(),
+            data_disks: Vec::new(),
+            selected_data_disk: 0,
+            adding_data_disk: false,
+            new_disk_name: String::new(),
+            new_disk_size_gb: String::new(),
             network_items: Vec::new(),
             selected_network: None,
             user_data_mode: UserDataMode::None,
@@ -120,11 +131,17 @@ impl CreateModal {
         modal
     }
 
-    /// Number of fields in each tab (Cloud-Init is dynamic based on mode)
+    /// Number of fields in each tab (dynamic based on mode)
     fn field_count_for_tab(&self) -> usize {
         match self.current_tab {
             CreateVmTab::General => 4, // name, vcpus, memory, nested_virt
-            CreateVmTab::Storage => 2, // disk, volume_size
+            CreateVmTab::Storage => {
+                if self.adding_data_disk {
+                    4 // disk, volume_size, new_disk_name, new_disk_size
+                } else {
+                    3 // disk, volume_size, data_disks_list
+                }
+            }
             CreateVmTab::Network => 1, // network
             CreateVmTab::CloudInit => match self.user_data_mode {
                 UserDataMode::None => 1,    // just mode selector
@@ -174,10 +191,21 @@ impl CreateModal {
                 2 => Some(&mut self.memory_mb),
                 _ => None,
             },
-            CreateVmTab::Storage => match self.focused_field {
-                1 => Some(&mut self.volume_size_gb),
-                _ => None,
-            },
+            CreateVmTab::Storage => {
+                if self.adding_data_disk {
+                    match self.focused_field {
+                        1 => Some(&mut self.volume_size_gb),
+                        2 => Some(&mut self.new_disk_name),
+                        3 => Some(&mut self.new_disk_size_gb),
+                        _ => None,
+                    }
+                } else {
+                    match self.focused_field {
+                        1 => Some(&mut self.volume_size_gb),
+                        _ => None,
+                    }
+                }
+            }
             CreateVmTab::Network => None,
             CreateVmTab::CloudInit => match self.user_data_mode {
                 UserDataMode::None => None,
@@ -205,7 +233,13 @@ impl CreateModal {
     pub fn is_numeric_field(&self) -> bool {
         match self.current_tab {
             CreateVmTab::General => matches!(self.focused_field, 1 | 2), // vcpus, memory
-            CreateVmTab::Storage => self.focused_field == 1,             // volume_size
+            CreateVmTab::Storage => {
+                if self.adding_data_disk {
+                    matches!(self.focused_field, 1 | 3) // volume_size, new_disk_size
+                } else {
+                    self.focused_field == 1 // volume_size
+                }
+            }
             _ => false,
         }
     }
@@ -326,6 +360,75 @@ impl CreateModal {
         }
     }
 
+    // Data disk methods
+
+    pub fn is_data_disks_field(&self) -> bool {
+        self.current_tab == CreateVmTab::Storage
+            && self.focused_field == 2
+            && !self.adding_data_disk
+    }
+
+    pub fn is_new_disk_name_field(&self) -> bool {
+        self.current_tab == CreateVmTab::Storage && self.focused_field == 2 && self.adding_data_disk
+    }
+
+    pub fn start_adding_data_disk(&mut self) {
+        self.adding_data_disk = true;
+        self.new_disk_name.clear();
+        self.new_disk_size_gb.clear();
+        self.focused_field = 2; // Focus on name field
+    }
+
+    pub fn cancel_adding_data_disk(&mut self) {
+        self.adding_data_disk = false;
+        self.new_disk_name.clear();
+        self.new_disk_size_gb.clear();
+    }
+
+    pub fn confirm_add_data_disk(&mut self) -> Result<(), &'static str> {
+        if self.new_disk_name.is_empty() {
+            return Err("Disk name is required");
+        }
+        let size_gb: u64 = self.new_disk_size_gb.parse().map_err(|_| "Invalid size")?;
+        if size_gb == 0 {
+            return Err("Size must be greater than 0");
+        }
+        self.data_disks.push(DataDisk {
+            name: self.new_disk_name.clone(),
+            size_gb,
+        });
+        self.adding_data_disk = false;
+        self.new_disk_name.clear();
+        self.new_disk_size_gb.clear();
+        self.selected_data_disk = self.data_disks.len().saturating_sub(1);
+        Ok(())
+    }
+
+    pub fn delete_selected_data_disk(&mut self) {
+        if !self.data_disks.is_empty() {
+            self.data_disks.remove(self.selected_data_disk);
+            if self.selected_data_disk >= self.data_disks.len() && !self.data_disks.is_empty() {
+                self.selected_data_disk = self.data_disks.len() - 1;
+            }
+        }
+    }
+
+    pub fn data_disk_select_next(&mut self) {
+        if !self.data_disks.is_empty() {
+            self.selected_data_disk = (self.selected_data_disk + 1) % self.data_disks.len();
+        }
+    }
+
+    pub fn data_disk_select_prev(&mut self) {
+        if !self.data_disks.is_empty() {
+            self.selected_data_disk = if self.selected_data_disk == 0 {
+                self.data_disks.len() - 1
+            } else {
+                self.selected_data_disk - 1
+            };
+        }
+    }
+
     pub fn is_valid_name_char(c: char) -> bool {
         c.is_ascii_alphanumeric() || c == '-' || c == '_'
     }
@@ -430,6 +533,7 @@ impl CreateModal {
             },
             ssh_keys_config,
             network_id,
+            data_disks: self.data_disks.clone(),
         })
     }
 }
@@ -677,13 +781,13 @@ fn draw_storage_tab(frame: &mut Frame, area: Rect, modal: &CreateModal) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Padding
-            Constraint::Length(4), // Disk selector
+            Constraint::Length(4), // Boot disk selector
             Constraint::Length(2), // Volume size
-            Constraint::Min(0),    // Spacer
+            Constraint::Min(4),    // Data disks section
         ])
         .split(area);
 
-    // Disk selector (field 0)
+    // Boot Disk selector (field 0)
     let disk_focused = modal.current_tab == CreateVmTab::Storage && modal.focused_field == 0;
     let type_str = match modal.disk_source_type {
         DiskSourceType::Template => "Template",
@@ -815,6 +919,158 @@ fn draw_storage_tab(frame: &mut Frame, area: Rect, modal: &CreateModal) {
             ),
         ]);
         frame.render_widget(Paragraph::new(size_line), chunks[2]);
+    }
+
+    // Data Disks section (field 2, or fields 2-3 when adding)
+    draw_data_disks_section(
+        frame,
+        chunks[3],
+        modal,
+        label_focused,
+        label_normal,
+        value_focused,
+    );
+}
+
+fn draw_data_disks_section(
+    frame: &mut Frame,
+    area: Rect,
+    modal: &CreateModal,
+    label_focused: Style,
+    label_normal: Style,
+    value_focused: Style,
+) {
+    if modal.adding_data_disk {
+        // Adding new disk mode
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Header
+                Constraint::Length(1), // Name input
+                Constraint::Length(1), // Size input
+                Constraint::Min(0),    // Spacer
+            ])
+            .split(area);
+
+        // Header
+        let header = Line::from(vec![
+            Span::styled(" Data Disks: ", label_focused),
+            Span::styled("Adding new disk...", Style::default().fg(Color::Yellow)),
+        ]);
+        frame.render_widget(Paragraph::new(header), chunks[0]);
+
+        // Name input (field 2)
+        let name_focused = modal.focused_field == 2;
+        let cursor = if name_focused { "\u{258c}" } else { "" };
+        let name_line = Line::from(vec![
+            Span::styled(
+                "   Name:     ",
+                if name_focused {
+                    label_focused
+                } else {
+                    label_normal
+                },
+            ),
+            Span::styled(
+                format!("{}{}", modal.new_disk_name, cursor),
+                if name_focused {
+                    value_focused
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(name_line), chunks[1]);
+
+        // Size input (field 3)
+        let size_focused = modal.focused_field == 3;
+        let cursor = if size_focused { "\u{258c}" } else { "" };
+        let size_line = Line::from(vec![
+            Span::styled(
+                "   Size:     ",
+                if size_focused {
+                    label_focused
+                } else {
+                    label_normal
+                },
+            ),
+            Span::styled(
+                format!("{}{}", modal.new_disk_size_gb, cursor),
+                if size_focused {
+                    value_focused
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+            Span::styled(" GB", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                " [Enter: add, Esc: cancel]",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(size_line), chunks[2]);
+    } else {
+        // Normal mode: show list and add button
+        let data_focused = modal.current_tab == CreateVmTab::Storage && modal.focused_field == 2;
+
+        let header = Line::from(vec![
+            Span::styled(
+                " Data Disks: ",
+                if data_focused {
+                    label_focused
+                } else {
+                    label_normal
+                },
+            ),
+            if modal.data_disks.is_empty() {
+                Span::styled("none", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::styled(
+                    format!("{} disk(s)", modal.data_disks.len()),
+                    Style::default().fg(Color::Gray),
+                )
+            },
+            if data_focused {
+                Span::styled(
+                    " [a: add, d: delete, ↑↓: select]",
+                    Style::default().fg(Color::Yellow),
+                )
+            } else {
+                Span::raw("")
+            },
+        ]);
+        frame.render_widget(Paragraph::new(header), area);
+
+        // Show data disks list below header
+        if !modal.data_disks.is_empty() {
+            let list_area = Rect {
+                x: area.x + 13,
+                y: area.y + 1,
+                width: area.width.saturating_sub(14),
+                height: area.height.saturating_sub(1),
+            };
+
+            let mut lines = Vec::new();
+            for (idx, disk) in modal.data_disks.iter().enumerate() {
+                let is_selected = idx == modal.selected_data_disk;
+                let prefix = if is_selected { "▶ " } else { "  " };
+                let style = if is_selected && data_focused {
+                    Style::default().fg(Color::White).bold()
+                } else if is_selected {
+                    Style::default().fg(Color::Gray)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled(format!("{:<20}", disk.name), style),
+                    Span::styled(format!(" {}G", disk.size_gb), style),
+                ]));
+            }
+
+            frame.render_widget(Paragraph::new(lines), list_area);
+        }
     }
 }
 
