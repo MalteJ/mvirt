@@ -21,22 +21,15 @@ pub struct Hypervisor {
     data_dir: PathBuf,
     processes: Arc<RwLock<HashMap<String, Child>>>,
     store: Arc<VmStore>,
-    bridge: String,
 }
 
 impl Hypervisor {
-    pub async fn new(data_dir: PathBuf, store: Arc<VmStore>, bridge: String) -> Result<Self> {
-        let hypervisor = Self {
+    pub async fn new(data_dir: PathBuf, store: Arc<VmStore>) -> Result<Self> {
+        Ok(Self {
             data_dir,
             processes: Arc::new(RwLock::new(HashMap::new())),
             store,
-            bridge,
-        };
-
-        // Ensure bridge exists
-        hypervisor.ensure_bridge().await?;
-
-        Ok(hypervisor)
+        })
     }
 
     /// Check if enough 2MiB hugepages are available for the given memory size
@@ -52,45 +45,6 @@ impl Hypervisor {
             }
             Err(_) => false,
         }
-    }
-
-    async fn ensure_bridge(&self) -> Result<()> {
-        // Check if bridge exists
-        let output = Command::new("ip")
-            .args(["link", "show", &self.bridge])
-            .output()
-            .await?;
-
-        if output.status.success() {
-            info!(bridge = %self.bridge, "Bridge already exists");
-            return Ok(());
-        }
-
-        // Create bridge
-        info!(bridge = %self.bridge, "Creating bridge");
-        let output = Command::new("ip")
-            .args(["link", "add", &self.bridge, "type", "bridge"])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Failed to create bridge: {}", stderr));
-        }
-
-        // Bring bridge up
-        let output = Command::new("ip")
-            .args(["link", "set", &self.bridge, "up"])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Failed to bring up bridge: {}", stderr));
-        }
-
-        info!(bridge = %self.bridge, "Bridge created and up");
-        Ok(())
     }
 
     fn vm_dir(&self, vm_id: &str) -> PathBuf {
@@ -111,70 +65,6 @@ impl Hypervisor {
 
     fn firmware_path(&self) -> PathBuf {
         PathBuf::from(FIRMWARE_PATH)
-    }
-
-    fn tap_name(&self, vm_id: &str) -> String {
-        // TAP device names are limited to 15 chars
-        format!("vm{}", &vm_id[..8])
-    }
-
-    async fn create_tap(&self, vm_id: &str) -> Result<String> {
-        let tap_name = self.tap_name(vm_id);
-
-        // Create TAP device
-        let output = Command::new("ip")
-            .args(["tuntap", "add", &tap_name, "mode", "tap"])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Failed to create TAP device: {}", stderr));
-        }
-
-        // Attach TAP to bridge
-        let output = Command::new("ip")
-            .args(["link", "set", &tap_name, "master", &self.bridge])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Try to clean up
-            let _ = Command::new("ip")
-                .args(["tuntap", "del", &tap_name, "mode", "tap"])
-                .output()
-                .await;
-            return Err(anyhow!("Failed to attach TAP to bridge: {}", stderr));
-        }
-
-        // Bring TAP device up
-        let output = Command::new("ip")
-            .args(["link", "set", &tap_name, "up"])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Try to clean up
-            let _ = Command::new("ip")
-                .args(["tuntap", "del", &tap_name, "mode", "tap"])
-                .output()
-                .await;
-            return Err(anyhow!("Failed to bring up TAP device: {}", stderr));
-        }
-
-        info!(vm_id = %vm_id, tap = %tap_name, bridge = %self.bridge, "Created TAP device and attached to bridge");
-        Ok(tap_name)
-    }
-
-    async fn delete_tap(&self, vm_id: &str) {
-        let tap_name = self.tap_name(vm_id);
-        let _ = Command::new("ip")
-            .args(["tuntap", "del", &tap_name, "mode", "tap"])
-            .output()
-            .await;
-        debug!(vm_id = %vm_id, tap = %tap_name, "Deleted TAP device");
     }
 
     async fn create_cloudinit_iso(
@@ -341,34 +231,15 @@ ethernets:
             }
         }
 
-        // Add network interfaces
-        if config.nics.is_empty() {
-            // No NICs configured, create default TAP
-            let tap_name = self.create_tap(vm_id).await?;
-            cmd.arg("--net").arg(format!("tap={}", tap_name));
-        } else {
-            let mut created_tap = false;
-            for nic in &config.nics {
-                if let Some(ref socket) = nic.vhost_socket {
-                    // vhost-user networking (mvirt-net)
-                    let mut net_arg = format!("vhost_user=true,socket={},num_queues=2", socket);
-                    if let Some(ref mac) = nic.mac {
-                        net_arg.push_str(&format!(",mac={}", mac));
-                    }
-                    cmd.arg("--net").arg(net_arg);
-                    info!(vm_id = %vm_id, socket = %socket, "Using vhost-user network");
-                } else {
-                    // TAP networking (legacy)
-                    if !created_tap {
-                        let tap_name = self.create_tap(vm_id).await?;
-                        let mut net_arg = format!("tap={}", tap_name);
-                        if let Some(ref mac) = nic.mac {
-                            net_arg.push_str(&format!(",mac={}", mac));
-                        }
-                        cmd.arg("--net").arg(net_arg);
-                        created_tap = true;
-                    }
+        // Add network interfaces (vhost-user via mvirt-net)
+        for nic in &config.nics {
+            if let Some(ref socket) = nic.vhost_socket {
+                let mut net_arg = format!("vhost_user=true,socket={},num_queues=2", socket);
+                if let Some(ref mac) = nic.mac {
+                    net_arg.push_str(&format!(",mac={}", mac));
                 }
+                cmd.arg("--net").arg(net_arg);
+                info!(vm_id = %vm_id, socket = %socket, "Using vhost-user network");
             }
         }
 
@@ -395,8 +266,6 @@ ethernets:
                 .await
                 .unwrap_or_default();
             error!(vm_id = %vm_id, status = ?status, stderr = %stderr_output, "cloud-hypervisor exited immediately");
-            // Clean up TAP device on failure
-            self.delete_tap(vm_id).await;
             return Err(anyhow!(
                 "cloud-hypervisor failed to start: {}",
                 stderr_output
@@ -505,9 +374,6 @@ ethernets:
         // Clear runtime from DB
         self.store.clear_runtime(vm_id).await?;
 
-        // Delete TAP device
-        self.delete_tap(vm_id).await;
-
         // Remove socket files
         let vm_dir = self.vm_dir(vm_id);
         if vm_dir.exists() {
@@ -595,8 +461,7 @@ ethernets:
         }
 
         // Get list of tracked VM IDs to exclude from orphan check
-        let tracked_ids: std::collections::HashSet<_> =
-            processes.keys().cloned().collect();
+        let tracked_ids: std::collections::HashSet<_> = processes.keys().cloned().collect();
 
         drop(processes);
 
@@ -639,9 +504,6 @@ ethernets:
         self.processes.write().await.remove(vm_id);
         self.store.clear_runtime(vm_id).await?;
         self.store.update_state(vm_id, VmState::Stopped).await?;
-
-        // Delete TAP device
-        self.delete_tap(vm_id).await;
 
         // Cleanup socket dir
         let vm_dir = self.vm_dir(vm_id);
@@ -715,7 +577,6 @@ ethernets:
                 // Clean up
                 self.store.update_state(&vm.id, VmState::Stopped).await?;
                 self.store.clear_runtime(&vm.id).await?;
-                self.delete_tap(&vm.id).await;
 
                 let vm_dir = self.vm_dir(&vm.id);
                 if vm_dir.exists() {

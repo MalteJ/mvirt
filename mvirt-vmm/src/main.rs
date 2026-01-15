@@ -31,10 +31,6 @@ struct Args {
     /// gRPC listen address
     #[arg(short, long, default_value = "[::1]:50051")]
     listen: String,
-
-    /// Bridge to attach VM TAP devices to (created if not exists)
-    #[arg(short, long, default_value = "br0")]
-    bridge: String,
 }
 
 #[tokio::main]
@@ -54,8 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(VmStore::new(&args.data_dir).await?);
 
     // Initialize hypervisor
-    let hypervisor =
-        Arc::new(Hypervisor::new(args.data_dir.clone(), store.clone(), args.bridge).await?);
+    let hypervisor = Arc::new(Hypervisor::new(args.data_dir.clone(), store.clone()).await?);
 
     // Recover VMs from previous run
     hypervisor.recover_vms().await?;
