@@ -289,9 +289,18 @@ ethernets:
         };
         cmd.arg("--cpus").arg(cpus_arg);
 
+        // Check if any NIC uses vhost-user (requires shared memory)
+        let uses_vhost_user = config.nics.iter().any(|nic| nic.vhost_socket.is_some());
+
         let memory_arg = if Self::hugepages_available(config.memory_mb) {
             info!("Using hugepages for VM memory ({}MB)", config.memory_mb);
-            format!("size={}M,hugepages=on", config.memory_mb)
+            if uses_vhost_user {
+                format!("size={}M,hugepages=on,shared=on", config.memory_mb)
+            } else {
+                format!("size={}M,hugepages=on", config.memory_mb)
+            }
+        } else if uses_vhost_user {
+            format!("size={}M,shared=on", config.memory_mb)
         } else {
             format!("size={}M", config.memory_mb)
         };
