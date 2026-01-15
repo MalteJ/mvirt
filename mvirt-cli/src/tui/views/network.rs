@@ -62,7 +62,7 @@ pub fn draw(
             Span::styled(":delete ", Style::default().fg(Color::DarkGray)),
             Span::styled("Enter", Style::default().fg(Color::Cyan).bold()),
             Span::styled(":select ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Tab", Style::default().fg(Color::Magenta).bold()),
+            Span::styled("S-Tab", Style::default().fg(Color::Magenta).bold()),
             Span::styled(":NICs ", Style::default().fg(Color::DarkGray)),
             Span::styled("q", Style::default().fg(Color::Magenta).bold()),
             Span::styled(":quit", Style::default().fg(Color::DarkGray)),

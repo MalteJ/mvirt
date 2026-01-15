@@ -450,8 +450,18 @@ impl App {
                 self.last_refresh = Some(Local::now());
                 if self.network.networks.is_empty() {
                     self.networks_table_state.select(None);
-                } else if self.networks_table_state.selected().is_none() {
-                    self.networks_table_state.select(Some(0));
+                    self.network.selected_network_id = None;
+                } else {
+                    if self.networks_table_state.selected().is_none() {
+                        self.networks_table_state.select(Some(0));
+                    }
+                    // Auto-select first network and load its NICs if none selected
+                    if self.network.selected_network_id.is_none()
+                        && let Some(net) = self.network.networks.first()
+                    {
+                        self.network.selected_network_id = Some(net.id.clone());
+                        self.load_nics(net.id.clone());
+                    }
                 }
             }
             ActionResult::NetworksRefreshed(Err(e)) => {
