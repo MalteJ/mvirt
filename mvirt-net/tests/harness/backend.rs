@@ -13,7 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use nix::libc;
 use nix::sys::eventfd::{EfdFlags, EventFd as NixEventFd};
 use tempfile::TempDir;
@@ -271,6 +271,7 @@ pub struct RoutingNicConfig {
     pub id: String,
     pub mac: String,
     pub ipv4: String,
+    pub ipv6: Option<String>,
 }
 
 /// Test backend for inter-vNIC routing tests.
@@ -336,12 +337,22 @@ impl RoutingTestBackend {
             },
         );
 
-        // Add routes for each NIC's IP
+        // Add IPv4 routes for each NIC's IP
         let ip_a: Ipv4Addr = nic_a.ipv4.parse().expect("Invalid IPv4 for NIC A");
         let ip_b: Ipv4Addr = nic_b.ipv4.parse().expect("Invalid IPv4 for NIC B");
 
         router.add_ipv4_route(Ipv4Net::new(ip_a, 32).unwrap(), nic_a.id.clone(), true);
         router.add_ipv4_route(Ipv4Net::new(ip_b, 32).unwrap(), nic_b.id.clone(), true);
+
+        // Add IPv6 routes if configured
+        if let Some(ref ipv6_a) = nic_a.ipv6 {
+            let addr: Ipv6Addr = ipv6_a.parse().expect("Invalid IPv6 for NIC A");
+            router.add_ipv6_route(Ipv6Net::new(addr, 128).unwrap(), nic_a.id.clone(), true);
+        }
+        if let Some(ref ipv6_b) = nic_b.ipv6 {
+            let addr: Ipv6Addr = ipv6_b.parse().expect("Invalid IPv6 for NIC B");
+            router.add_ipv6_route(Ipv6Net::new(addr, 128).unwrap(), nic_b.id.clone(), true);
+        }
 
         // Create backends
         let backend_a = Arc::new(

@@ -1105,3 +1105,67 @@ pub fn parse_icmpv6_echo_reply(frame: &[u8]) -> Option<Icmpv6EchoReply> {
         None
     }
 }
+
+/// Parsed ICMPv6 echo request
+#[derive(Debug, Clone)]
+pub struct Icmpv6EchoRequest {
+    pub src_mac: [u8; 6],
+    pub dst_mac: [u8; 6],
+    pub src_ip: [u8; 16],
+    pub dst_ip: [u8; 16],
+    pub hop_limit: u8,
+    pub ident: u16,
+    pub seq_no: u16,
+    pub data: Vec<u8>,
+}
+
+/// Parse an ICMPv6 echo request from an Ethernet frame
+pub fn parse_icmpv6_echo_request(frame: &[u8]) -> Option<Icmpv6EchoRequest> {
+    let eth = EthernetFrame::new_checked(frame).ok()?;
+    if eth.ethertype() != EthernetProtocol::Ipv6 {
+        return None;
+    }
+
+    let ipv6 = Ipv6Packet::new_checked(eth.payload()).ok()?;
+    if ipv6.next_header() != IpProtocol::Icmpv6 {
+        return None;
+    }
+
+    let icmp = Icmpv6Packet::new_checked(ipv6.payload()).ok()?;
+    if icmp.msg_type() != Icmpv6Message::EchoRequest {
+        return None;
+    }
+
+    let repr = Icmpv6Repr::parse(
+        &IpAddress::Ipv6(ipv6.src_addr()),
+        &IpAddress::Ipv6(ipv6.dst_addr()),
+        &icmp,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    )
+    .ok()?;
+
+    if let Icmpv6Repr::EchoRequest {
+        ident,
+        seq_no,
+        data,
+    } = repr
+    {
+        Some(Icmpv6EchoRequest {
+            src_mac: eth.src_addr().as_bytes().try_into().ok()?,
+            dst_mac: eth.dst_addr().as_bytes().try_into().ok()?,
+            src_ip: ipv6.src_addr().as_bytes().try_into().ok()?,
+            dst_ip: ipv6.dst_addr().as_bytes().try_into().ok()?,
+            hop_limit: ipv6.hop_limit(),
+            ident,
+            seq_no,
+            data: data.to_vec(),
+        })
+    } else {
+        None
+    }
+}
+
+/// Check if frame is an ICMPv6 echo request
+pub fn is_icmpv6_echo_request(frame: &[u8]) -> bool {
+    parse_icmpv6_echo_request(frame).is_some()
+}

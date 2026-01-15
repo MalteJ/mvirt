@@ -769,11 +769,13 @@ fn test_routing_packet_from_a_to_b() {
             id: "nic-a".to_string(),
             mac: "52:54:00:00:00:01".to_string(),
             ipv4: "10.0.0.1".to_string(),
+            ipv6: None,
         },
         RoutingNicConfig {
             id: "nic-b".to_string(),
             mac: "52:54:00:00:00:02".to_string(),
             ipv4: "10.0.0.2".to_string(),
+            ipv6: None,
         },
     );
 
@@ -836,11 +838,13 @@ fn test_routing_bidirectional() {
             id: "nic-a".to_string(),
             mac: "52:54:00:00:00:11".to_string(),
             ipv4: "10.0.0.11".to_string(),
+            ipv6: None,
         },
         RoutingNicConfig {
             id: "nic-b".to_string(),
             mac: "52:54:00:00:00:22".to_string(),
             ipv4: "10.0.0.22".to_string(),
+            ipv6: None,
         },
     );
 
@@ -912,11 +916,13 @@ fn test_routing_ttl_decrement() {
             id: "nic-ttl-a".to_string(),
             mac: "52:54:00:00:00:AA".to_string(),
             ipv4: "10.0.0.100".to_string(),
+            ipv6: None,
         },
         RoutingNicConfig {
             id: "nic-ttl-b".to_string(),
             mac: "52:54:00:00:00:BB".to_string(),
             ipv4: "10.0.0.200".to_string(),
+            ipv6: None,
         },
     );
 
@@ -942,4 +948,163 @@ fn test_routing_ttl_decrement() {
     // Ethernet header is 14 bytes, IPv4 TTL is at offset 8
     let ttl = received[14 + 8];
     assert_eq!(ttl, 63, "TTL should be decremented from 64 to 63");
+}
+
+// ============================================================================
+// IPv6 Routing Tests
+// ============================================================================
+
+use harness::packets::{is_icmpv6_echo_request, parse_icmpv6_echo_request};
+
+#[test]
+fn test_routing_ipv6_packet_from_a_to_b() {
+    // Set up two vNICs with IPv6 addresses
+    let backend = RoutingTestBackend::new(
+        RoutingNicConfig {
+            id: "nic-v6-a".to_string(),
+            mac: "52:54:00:00:00:A1".to_string(),
+            ipv4: "10.0.0.1".to_string(),
+            ipv6: Some("fd00::1".to_string()),
+        },
+        RoutingNicConfig {
+            id: "nic-v6-b".to_string(),
+            mac: "52:54:00:00:00:B2".to_string(),
+            ipv4: "10.0.0.2".to_string(),
+            ipv6: Some("fd00::2".to_string()),
+        },
+    );
+
+    let mut client_a = backend.connect_a().expect("connect A failed");
+    let mut client_b = backend.connect_b().expect("connect B failed");
+
+    // fd00::1 and fd00::2 as byte arrays
+    let src_ip: [u8; 16] = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let dst_ip: [u8; 16] = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+
+    // Client A sends ICMPv6 echo request to client B's IPv6 (fd00::2)
+    let ping = icmpv6_echo_request(
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0xA1], // src MAC (client A)
+        GATEWAY_MAC,                          // dst MAC (gateway - will route)
+        src_ip,                               // src IP (client A)
+        dst_ip,                               // dst IP (client B)
+        0xABCD,                               // ident
+        1,                                    // seq_no
+        b"ipv6 routing test",                 // data
+    );
+
+    client_a.send_packet(&ping).expect("send from A failed");
+
+    // Client B should receive the routed ICMPv6 echo request
+    let received = client_b.recv_packet(3000);
+    assert!(
+        received.is_ok(),
+        "Client B should receive routed IPv6 packet: {:?}",
+        received.err()
+    );
+
+    let received = received.unwrap();
+    assert!(
+        is_icmpv6_echo_request(&received),
+        "Should be ICMPv6 echo request"
+    );
+
+    let icmp = parse_icmpv6_echo_request(&received).expect("parse ICMPv6 failed");
+    assert_eq!(icmp.src_ip, src_ip, "Src IP should be client A");
+    assert_eq!(icmp.dst_ip, dst_ip, "Dst IP should be client B");
+    assert_eq!(icmp.ident, 0xABCD, "Ident should match");
+    assert_eq!(icmp.seq_no, 1, "Seq should match");
+    assert_eq!(icmp.data, b"ipv6 routing test", "Data should match");
+
+    // Verify MAC addresses were rewritten by the router
+    assert_eq!(
+        icmp.dst_mac,
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0xB2],
+        "Dst MAC should be client B's MAC"
+    );
+    assert_eq!(
+        icmp.src_mac, GATEWAY_MAC,
+        "Src MAC should be gateway MAC (router)"
+    );
+
+    // Verify Hop Limit was decremented (default is 64)
+    assert_eq!(
+        icmp.hop_limit, 63,
+        "Hop Limit should be decremented from 64 to 63"
+    );
+}
+
+#[test]
+fn test_routing_ipv6_bidirectional() {
+    let backend = RoutingTestBackend::new(
+        RoutingNicConfig {
+            id: "nic-v6-bidir-a".to_string(),
+            mac: "52:54:00:00:00:AA".to_string(),
+            ipv4: "10.0.0.11".to_string(),
+            ipv6: Some("fd00::11".to_string()),
+        },
+        RoutingNicConfig {
+            id: "nic-v6-bidir-b".to_string(),
+            mac: "52:54:00:00:00:BB".to_string(),
+            ipv4: "10.0.0.22".to_string(),
+            ipv6: Some("fd00::22".to_string()),
+        },
+    );
+
+    let mut client_a = backend.connect_a().expect("connect A failed");
+    let mut client_b = backend.connect_b().expect("connect B failed");
+
+    let ip_a: [u8; 16] = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11];
+    let ip_b: [u8; 16] = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x22];
+
+    // A -> B
+    let ping_a_to_b = icmpv6_echo_request(
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0xAA],
+        GATEWAY_MAC,
+        ip_a,
+        ip_b,
+        0x1111,
+        1,
+        b"a to b v6",
+    );
+
+    client_a
+        .send_packet(&ping_a_to_b)
+        .expect("send A->B failed");
+
+    let received_b = client_b
+        .recv_packet(3000)
+        .expect("B should receive IPv6 packet");
+    let icmp_b = parse_icmpv6_echo_request(&received_b).expect("parse failed");
+    assert_eq!(icmp_b.src_ip, ip_a);
+    assert_eq!(icmp_b.dst_ip, ip_b);
+    assert_eq!(icmp_b.data, b"a to b v6");
+    assert_eq!(icmp_b.dst_mac, [0x52, 0x54, 0x00, 0x00, 0x00, 0xBB]);
+    assert_eq!(icmp_b.src_mac, GATEWAY_MAC);
+    assert_eq!(icmp_b.hop_limit, 63);
+
+    // B -> A
+    let ping_b_to_a = icmpv6_echo_request(
+        [0x52, 0x54, 0x00, 0x00, 0x00, 0xBB],
+        GATEWAY_MAC,
+        ip_b,
+        ip_a,
+        0x2222,
+        2,
+        b"b to a v6",
+    );
+
+    client_b
+        .send_packet(&ping_b_to_a)
+        .expect("send B->A failed");
+
+    let received_a = client_a
+        .recv_packet(3000)
+        .expect("A should receive IPv6 packet");
+    let icmp_a = parse_icmpv6_echo_request(&received_a).expect("parse failed");
+    assert_eq!(icmp_a.src_ip, ip_b);
+    assert_eq!(icmp_a.dst_ip, ip_a);
+    assert_eq!(icmp_a.data, b"b to a v6");
+    assert_eq!(icmp_a.dst_mac, [0x52, 0x54, 0x00, 0x00, 0x00, 0xAA]);
+    assert_eq!(icmp_a.src_mac, GATEWAY_MAC);
+    assert_eq!(icmp_a.hop_limit, 63);
 }
