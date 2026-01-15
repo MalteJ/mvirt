@@ -82,6 +82,19 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 app.last_refresh,
             );
         }
+        View::System => {
+            views::system::draw(
+                frame,
+                app.system_info.as_ref(),
+                &app.service_versions,
+                app.system_focus,
+                app.system_cores_scroll,
+                &mut app.system_disks_table_state,
+                &mut app.system_nics_table_state,
+                app.status_message.as_deref(),
+                app.last_refresh,
+            );
+        }
     }
 
     // Detail View overlay (VM only)
@@ -221,6 +234,11 @@ pub async fn run(
                                 network_id: net_id.clone(),
                             });
                         }
+                    }
+                }
+                View::System => {
+                    if app.vm_available {
+                        app.send_action(Action::RefreshSystemInfo);
                     }
                 }
             }
@@ -539,6 +557,10 @@ fn handle_normal_input(app: &mut App, key_code: KeyCode) {
             app.set_view(View::Logs);
             return;
         }
+        KeyCode::Char('5') => {
+            app.set_view(View::System);
+            return;
+        }
         _ => {}
     }
 
@@ -548,6 +570,7 @@ fn handle_normal_input(app: &mut App, key_code: KeyCode) {
         View::Storage => handle_storage_input(app, key_code),
         View::Logs => handle_logs_input(app, key_code),
         View::Network => handle_network_input(app, key_code),
+        View::System => handle_system_input(app, key_code),
     }
 }
 
@@ -1000,6 +1023,16 @@ fn handle_network_input(app: &mut App, key_code: KeyCode) {
     }
 }
 
+fn handle_system_input(app: &mut App, key_code: KeyCode) {
+    match key_code {
+        KeyCode::Down => app.system_next(),
+        KeyCode::Up => app.system_previous(),
+        KeyCode::Tab | KeyCode::BackTab => app.toggle_system_focus(),
+        KeyCode::Char('r') => app.refresh_system(),
+        _ => {}
+    }
+}
+
 fn handle_network_create_modal_input(app: &mut App, key_code: KeyCode) {
     match key_code {
         KeyCode::Esc => app.close_network_create_modal(),
@@ -1017,6 +1050,11 @@ fn handle_network_create_modal_input(app: &mut App, key_code: KeyCode) {
             if let Some(modal) = &app.network_create_modal {
                 if modal.is_submit_field() {
                     app.submit_network_create();
+                } else if modal.is_checkbox_field() {
+                    // Toggle checkbox on Enter
+                    if let Some(modal) = &mut app.network_create_modal {
+                        modal.toggle_checkbox();
+                    }
                 } else if let Some(modal) = &mut app.network_create_modal {
                     modal.focus_next();
                 }
@@ -1031,7 +1069,10 @@ fn handle_network_create_modal_input(app: &mut App, key_code: KeyCode) {
         }
         KeyCode::Char(c) => {
             if let Some(modal) = &mut app.network_create_modal {
-                if modal.is_name_field()
+                // Toggle checkbox on Space when focused
+                if modal.is_checkbox_field() && c == ' ' {
+                    modal.toggle_checkbox();
+                } else if modal.is_name_field()
                     && (c.is_ascii_alphanumeric() || c == '-' || c == '_')
                     && let Some(input) = modal.current_input()
                 {

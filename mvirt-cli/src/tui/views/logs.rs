@@ -88,6 +88,10 @@ fn draw_title(frame: &mut Frame, area: Rect, log_count: usize) {
         Style::default().fg(Color::White).bold(),
     ));
     tabs.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    tabs.push(Span::styled(
+        " [5:System]",
+        Style::default().fg(Color::DarkGray),
+    ));
     let title = Line::from(tabs);
 
     // Right: Log count

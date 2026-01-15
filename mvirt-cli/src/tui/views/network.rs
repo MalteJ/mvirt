@@ -151,6 +151,10 @@ fn draw_title_bar(frame: &mut Frame, area: Rect) {
         " [4:Logs]",
         Style::default().fg(Color::DarkGray),
     ));
+    tabs.push(Span::styled(
+        " [5:System]",
+        Style::default().fg(Color::DarkGray),
+    ));
     let title = Line::from(tabs);
 
     let block = Block::default()

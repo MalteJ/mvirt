@@ -228,6 +228,18 @@ enum SnapshotCommands {
         /// Snapshot name
         name: String,
     },
+
+    /// Promote snapshot to a new template
+    Promote {
+        /// Volume name
+        volume: String,
+
+        /// Snapshot name
+        snapshot: String,
+
+        /// New template name
+        template: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -637,6 +649,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .await?;
                     let vol = response.into_inner();
                     println!("Rolled back volume {} to snapshot {}", vol.name, name);
+                }
+                SnapshotCommands::Promote {
+                    volume,
+                    snapshot,
+                    template,
+                } => {
+                    let response = zfs_client
+                        .promote_snapshot_to_template(zfs_proto::PromoteSnapshotRequest {
+                            volume_name: volume.clone(),
+                            snapshot_name: snapshot.clone(),
+                            template_name: template.clone(),
+                        })
+                        .await?;
+                    let tpl = response.into_inner();
+                    println!(
+                        "Promoted {}@{} to template '{}' ({})",
+                        volume, snapshot, tpl.name, tpl.id
+                    );
                 }
             },
 

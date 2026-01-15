@@ -44,6 +44,10 @@ pub fn draw(
         " [4:Logs]",
         Style::default().fg(Color::DarkGray),
     ));
+    tabs.push(Span::styled(
+        " [5:System]",
+        Style::default().fg(Color::DarkGray),
+    ));
 
     // Title (left side): mvirt [VMs] Storage
     let mut title_spans = vec![Span::styled(

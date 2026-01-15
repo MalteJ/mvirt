@@ -90,6 +90,8 @@ pub fn draw(
             Span::styled(":new ", Style::default().fg(Color::DarkGray)),
             Span::styled("s", Style::default().fg(Color::Cyan).bold()),
             Span::styled(":snap ", Style::default().fg(Color::DarkGray)),
+            Span::styled("t", Style::default().fg(Color::Green).bold()),
+            Span::styled(":tmpl ", Style::default().fg(Color::DarkGray)),
             Span::styled("d", Style::default().fg(Color::Red).bold()),
             Span::styled(":del ", Style::default().fg(Color::DarkGray)),
             Span::styled("S-Tab", Style::default().fg(Color::Magenta).bold()),
@@ -209,6 +211,10 @@ fn draw_pool_stats(frame: &mut Frame, area: Rect, storage: &StorageState) {
     ));
     tabs.push(Span::styled(
         " [4:Logs]",
+        Style::default().fg(Color::DarkGray),
+    ));
+    tabs.push(Span::styled(
+        " [5:System]",
         Style::default().fg(Color::DarkGray),
     ));
     let title = Line::from(tabs);
@@ -368,9 +374,14 @@ fn draw_volumes_table(
                     selected_row = Some(rows.len());
                 }
 
+                let snap_short_id = format!("{}\u{2026}", &snap.id[..8.min(snap.id.len())]);
+
                 rows.push(Row::new(vec![
                     Cell::from(Span::styled("", Style::default().bg(snap_bg))),
-                    Cell::from(Span::styled("", Style::default().bg(snap_bg))),
+                    Cell::from(Span::styled(
+                        snap_short_id,
+                        Style::default().fg(Color::DarkGray).bg(snap_bg),
+                    )),
                     Cell::from(Span::styled(
                         format!("  └─ @{}", snap.name),
                         Style::default()
