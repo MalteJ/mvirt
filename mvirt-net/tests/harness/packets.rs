@@ -8,7 +8,8 @@ use dhcproto::v4::{DhcpOption, Message, MessageType, Opcode, OptionCode};
 use dhcproto::{Decodable, Encodable};
 use smoltcp::wire::{
     ArpOperation, ArpPacket, ArpRepr, EthernetAddress, EthernetFrame, EthernetProtocol,
-    EthernetRepr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv4Repr, UdpPacket, UdpRepr,
+    EthernetRepr, Icmpv4Message, Icmpv4Packet, Icmpv4Repr, IpProtocol, Ipv4Address, Ipv4Packet,
+    Ipv4Repr, UdpPacket, UdpRepr,
 };
 
 /// DHCP ports
@@ -338,4 +339,107 @@ pub fn parse_dhcp_response(frame: &[u8]) -> Option<DhcpResponse> {
         dns_servers,
         lease_time,
     })
+}
+
+/// Build an ICMP echo request (ping) packet
+pub fn icmp_echo_request(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    ident: u16,
+    seq_no: u16,
+    data: &[u8],
+) -> Vec<u8> {
+    let icmp_repr = Icmpv4Repr::EchoRequest {
+        ident,
+        seq_no,
+        data,
+    };
+
+    let ipv4_repr = Ipv4Repr {
+        src_addr: Ipv4Address::from_bytes(&src_ip),
+        dst_addr: Ipv4Address::from_bytes(&dst_ip),
+        next_header: IpProtocol::Icmp,
+        payload_len: icmp_repr.buffer_len(),
+        hop_limit: 64,
+    };
+
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress::from_bytes(&src_mac),
+        dst_addr: EthernetAddress::from_bytes(&dst_mac),
+        ethertype: EthernetProtocol::Ipv4,
+    };
+
+    let total_len = eth_repr.buffer_len() + ipv4_repr.buffer_len() + icmp_repr.buffer_len();
+    let mut buffer = vec![0u8; total_len];
+
+    let mut frame = EthernetFrame::new_unchecked(&mut buffer);
+    eth_repr.emit(&mut frame);
+
+    let mut ipv4_packet = Ipv4Packet::new_unchecked(frame.payload_mut());
+    ipv4_repr.emit(
+        &mut ipv4_packet,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    let mut icmp_packet = Icmpv4Packet::new_unchecked(ipv4_packet.payload_mut());
+    icmp_repr.emit(
+        &mut icmp_packet,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    buffer
+}
+
+/// Parsed ICMP echo reply
+#[derive(Debug, Clone)]
+pub struct IcmpEchoReply {
+    pub src_ip: [u8; 4],
+    pub dst_ip: [u8; 4],
+    pub ident: u16,
+    pub seq_no: u16,
+    pub data: Vec<u8>,
+}
+
+/// Parse an ICMP echo reply from an Ethernet frame
+pub fn parse_icmp_echo_reply(frame: &[u8]) -> Option<IcmpEchoReply> {
+    let eth = EthernetFrame::new_checked(frame).ok()?;
+    if eth.ethertype() != EthernetProtocol::Ipv4 {
+        return None;
+    }
+
+    let ipv4 = Ipv4Packet::new_checked(eth.payload()).ok()?;
+    if ipv4.next_header() != IpProtocol::Icmp {
+        return None;
+    }
+
+    let icmp = Icmpv4Packet::new_checked(ipv4.payload()).ok()?;
+    if icmp.msg_type() != Icmpv4Message::EchoReply {
+        return None;
+    }
+
+    let repr = Icmpv4Repr::parse(&icmp, &smoltcp::phy::ChecksumCapabilities::default()).ok()?;
+
+    if let Icmpv4Repr::EchoReply {
+        ident,
+        seq_no,
+        data,
+    } = repr
+    {
+        Some(IcmpEchoReply {
+            src_ip: ipv4.src_addr().as_bytes().try_into().ok()?,
+            dst_ip: ipv4.dst_addr().as_bytes().try_into().ok()?,
+            ident,
+            seq_no,
+            data: data.to_vec(),
+        })
+    } else {
+        None
+    }
+}
+
+/// Check if frame is an ICMP echo reply
+pub fn is_icmp_echo_reply(frame: &[u8]) -> bool {
+    parse_icmp_echo_reply(frame).is_some()
 }

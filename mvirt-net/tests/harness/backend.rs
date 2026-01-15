@@ -20,7 +20,7 @@ use vm_memory::GuestMemoryAtomic;
 
 // Import real mvirt-net types
 use mvirt_net::config::NicEntry;
-use mvirt_net::dataplane::{ArpResponder, Dhcpv4Server, VhostNetBackend};
+use mvirt_net::dataplane::{ArpResponder, Dhcpv4Server, IcmpResponder, VhostNetBackend};
 
 use super::VhostTestClient;
 
@@ -126,11 +126,12 @@ fn run_test_backend(socket_path: &str, mac: &str, ipv4: Option<&str>, shutdown: 
             .expect("Failed to create VhostNetBackend"),
     );
 
-    // Set up packet handler using real ArpResponder and Dhcpv4Server
+    // Set up packet handler using real ArpResponder, IcmpResponder, and Dhcpv4Server
     let mac_bytes = parse_mac(mac).expect("Invalid MAC");
     let ipv4_addr: Option<Ipv4Addr> = ipv4.map(|s| s.parse().expect("Invalid IP"));
 
     let arp_responder = ArpResponder::new(mac_bytes);
+    let icmp_responder = IcmpResponder::new();
     let dhcpv4_server = ipv4_addr.map(|ip| {
         let mut server = Dhcpv4Server::new(ip);
         server.set_dns_servers(vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)]);
@@ -140,6 +141,11 @@ fn run_test_backend(socket_path: &str, mac: &str, ipv4: Option<&str>, shutdown: 
     backend.set_packet_handler(Box::new(move |packet| {
         // Try ARP first
         if let Some(reply) = arp_responder.process(packet) {
+            return Some(reply);
+        }
+
+        // Try ICMP (ping to gateway)
+        if let Some(reply) = icmp_responder.process(packet) {
             return Some(reply);
         }
 

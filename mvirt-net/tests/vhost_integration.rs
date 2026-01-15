@@ -13,8 +13,8 @@
 mod harness;
 
 use harness::packets::{
-    DhcpMessageType, arp_request, dhcp_discover, dhcp_request, is_arp_reply, parse_arp_reply,
-    parse_dhcp_response,
+    DhcpMessageType, arp_request, dhcp_discover, dhcp_request, icmp_echo_request, is_arp_reply,
+    is_icmp_echo_reply, parse_arp_reply, parse_dhcp_response, parse_icmp_echo_reply,
 };
 use harness::{GATEWAY_IP, GATEWAY_MAC, TestBackend};
 
@@ -295,6 +295,89 @@ fn test_arp_request_gets_reply() {
     let arp = parse_arp_reply(&reply).expect("parse ARP failed");
     assert_eq!(arp.sender_ip, [169, 254, 0, 1]);
     assert_eq!(arp.sender_mac, GATEWAY_MAC);
+}
+
+// ============================================================================
+// ICMP Tests
+// ============================================================================
+
+#[test]
+fn test_icmp_ping_gateway() {
+    let backend = TestBackend::new("52:54:00:12:34:56", Some("10.0.0.5"));
+
+    let mut client = backend.connect().expect("connect failed");
+
+    // First, get the gateway MAC via ARP (like a real VM would)
+    let arp_req = arp_request(
+        [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+        [10, 0, 0, 5],
+        [169, 254, 0, 1],
+    );
+    client.send_packet(&arp_req).expect("ARP send failed");
+    let arp_reply = client.recv_packet(2000).expect("ARP reply expected");
+    let arp = parse_arp_reply(&arp_reply).expect("parse ARP failed");
+    assert_eq!(arp.sender_mac, GATEWAY_MAC);
+
+    // Now send ICMP echo request to gateway
+    let ping = icmp_echo_request(
+        [0x52, 0x54, 0x00, 0x12, 0x34, 0x56], // src MAC
+        GATEWAY_MAC,                          // dst MAC (gateway)
+        [10, 0, 0, 5],                        // src IP
+        GATEWAY_IP,                           // dst IP (gateway)
+        0x1234,                               // ident
+        1,                                    // seq_no
+        b"ping test",                         // data
+    );
+
+    client.send_packet(&ping).expect("ICMP send failed");
+
+    let reply = client.recv_packet(2000);
+    assert!(
+        reply.is_ok(),
+        "Should receive ICMP echo reply: {:?}",
+        reply.err()
+    );
+
+    let reply = reply.unwrap();
+    assert!(is_icmp_echo_reply(&reply), "Should be ICMP echo reply");
+
+    let icmp = parse_icmp_echo_reply(&reply).expect("parse ICMP failed");
+    assert_eq!(icmp.src_ip, GATEWAY_IP, "Reply should come from gateway");
+    assert_eq!(
+        icmp.dst_ip,
+        [10, 0, 0, 5],
+        "Reply should be addressed to VM"
+    );
+    assert_eq!(icmp.ident, 0x1234, "Ident should match");
+    assert_eq!(icmp.seq_no, 1, "Seq should match");
+    assert_eq!(icmp.data, b"ping test", "Data should match");
+}
+
+#[test]
+fn test_icmp_ping_non_gateway_ignored() {
+    let backend = TestBackend::new("52:54:00:12:34:56", Some("10.0.0.5"));
+
+    let mut client = backend.connect().expect("connect failed");
+
+    // Send ICMP echo request to non-gateway IP (should not get reply)
+    let ping = icmp_echo_request(
+        [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+        [0xff, 0xff, 0xff, 0xff, 0xff, 0xff], // broadcast
+        [10, 0, 0, 5],
+        [8, 8, 8, 8], // Not gateway
+        0x5678,
+        1,
+        b"test",
+    );
+
+    client.send_packet(&ping).expect("send failed");
+
+    // Should not receive a reply (use short timeout)
+    let reply = client.recv_packet(500);
+    assert!(
+        reply.is_err(),
+        "Should NOT receive ICMP reply for non-gateway IP"
+    );
 }
 
 // ============================================================================

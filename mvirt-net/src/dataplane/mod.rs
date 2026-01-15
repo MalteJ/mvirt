@@ -11,6 +11,7 @@
 pub mod arp;
 pub mod dhcpv4;
 pub mod dhcpv6;
+pub mod icmp;
 pub mod ndp;
 pub mod packet;
 pub mod router;
@@ -20,6 +21,7 @@ pub mod worker;
 pub use arp::ArpResponder;
 pub use dhcpv4::Dhcpv4Server;
 pub use dhcpv6::Dhcpv6Server;
+pub use icmp::IcmpResponder;
 pub use ndp::NdpResponder;
 pub use packet::{GATEWAY_IPV4, GATEWAY_MAC};
 pub use router::Router;

@@ -26,6 +26,7 @@ use crate::config::{NetworkEntry, NicEntry};
 use super::arp::ArpResponder;
 use super::dhcpv4::Dhcpv4Server;
 use super::dhcpv6::Dhcpv6Server;
+use super::icmp::IcmpResponder;
 use super::ndp::NdpResponder;
 use super::router::Router;
 use super::vhost::VhostNetBackend;
@@ -150,6 +151,7 @@ struct PacketProcessor {
     nic_id: String,
     mac: [u8; 6],
     arp: ArpResponder,
+    icmp: IcmpResponder,
     ndp: NdpResponder,
     dhcpv4: Option<Dhcpv4Server>,
     dhcpv6: Option<Dhcpv6Server>,
@@ -163,6 +165,9 @@ impl PacketProcessor {
 
         // Set up ARP responder
         let arp = ArpResponder::new(mac);
+
+        // Set up ICMP responder for gateway
+        let icmp = IcmpResponder::new();
 
         // Set up NDP responder with prefix if IPv6 is enabled
         let mut ndp = NdpResponder::new(mac);
@@ -221,6 +226,7 @@ impl PacketProcessor {
             nic_id: nic.id.clone(),
             mac,
             arp,
+            icmp,
             ndp,
             dhcpv4,
             dhcpv6,
@@ -237,6 +243,12 @@ impl PacketProcessor {
         // Try ARP
         if let Some(reply) = self.arp.process(packet) {
             debug!(nic_id = %self.nic_id, "Sent ARP reply");
+            return Some(reply);
+        }
+
+        // Try ICMP (ping to gateway)
+        if let Some(reply) = self.icmp.process(packet) {
+            debug!(nic_id = %self.nic_id, "Sent ICMP echo reply");
             return Some(reply);
         }
 
