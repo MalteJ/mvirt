@@ -145,6 +145,114 @@ enum Commands {
         /// Source URL or file path
         source: String,
     },
+
+    /// Storage pool operations
+    Pool,
+
+    /// Volume operations
+    #[command(subcommand)]
+    Volume(VolumeCommands),
+
+    /// Snapshot operations
+    #[command(subcommand)]
+    Snapshot(SnapshotCommands),
+
+    /// Template operations
+    #[command(subcommand)]
+    Template(TemplateCommands),
+}
+
+#[derive(Subcommand)]
+enum VolumeCommands {
+    /// List all volumes
+    List,
+
+    /// Create an empty volume
+    Create {
+        /// Volume name
+        name: String,
+
+        /// Size in GB
+        #[arg(short, long)]
+        size: u64,
+    },
+
+    /// Delete a volume
+    Delete {
+        /// Volume name
+        name: String,
+    },
+
+    /// Resize a volume
+    Resize {
+        /// Volume name
+        name: String,
+
+        /// New size in GB
+        #[arg(short, long)]
+        size: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotCommands {
+    /// List snapshots of a volume
+    List {
+        /// Volume name
+        volume: String,
+    },
+
+    /// Create a snapshot
+    Create {
+        /// Volume name
+        volume: String,
+
+        /// Snapshot name
+        name: String,
+    },
+
+    /// Delete a snapshot
+    Delete {
+        /// Volume name
+        volume: String,
+
+        /// Snapshot name
+        name: String,
+    },
+
+    /// Rollback volume to snapshot
+    Rollback {
+        /// Volume name
+        volume: String,
+
+        /// Snapshot name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TemplateCommands {
+    /// List all templates
+    List,
+
+    /// Delete a template
+    Delete {
+        /// Template name
+        name: String,
+    },
+
+    /// Clone a template to create a new volume
+    Clone {
+        /// Template name
+        template: String,
+
+        /// New volume name
+        name: String,
+
+        /// Size in GB (optional, defaults to template size)
+        #[arg(short, long)]
+        size: Option<u64>,
+    },
 }
 
 #[derive(Tabled)]
@@ -182,6 +290,25 @@ fn format_state(state: VmState) -> String {
         VmState::Starting => "starting".to_string(),
         VmState::Running => "running".to_string(),
         VmState::Stopping => "stopping".to_string(),
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
+
+    if bytes >= TB {
+        format!("{:.1} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
     }
 }
 
@@ -312,67 +439,258 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Handle storage commands (require zfs_client, not vm_client)
-    if let Commands::Import { name, source } = &command {
+    let is_storage_command = matches!(
+        &command,
+        Commands::Import { .. }
+            | Commands::Pool
+            | Commands::Volume(_)
+            | Commands::Snapshot(_)
+            | Commands::Template(_)
+    );
+
+    if is_storage_command {
         let Some(mut zfs_client) = zfs_client else {
             eprintln!("Error: Cannot connect to mvirt-zfs at {}", cli.zfs_server);
             std::process::exit(1);
         };
 
-        // Start import
-        let response = zfs_client
-            .import_template(zfs_proto::ImportTemplateRequest {
-                name: name.clone(),
-                source: source.clone(),
-                size_bytes: None,
-            })
-            .await?;
+        match &command {
+            Commands::Import { name, source } => {
+                // Start import
+                let response = zfs_client
+                    .import_template(zfs_proto::ImportTemplateRequest {
+                        name: name.clone(),
+                        source: source.clone(),
+                        size_bytes: None,
+                    })
+                    .await?;
 
-        let job = response.into_inner();
-        println!("Import started: {} (job {})", name, job.id);
+                let job = response.into_inner();
+                println!("Import started: {} (job {})", name, job.id);
 
-        // Poll for completion
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                // Poll for completion
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-            let status = zfs_client
-                .get_import_job(zfs_proto::GetImportJobRequest { id: job.id.clone() })
-                .await?
-                .into_inner();
+                    let status = zfs_client
+                        .get_import_job(zfs_proto::GetImportJobRequest { id: job.id.clone() })
+                        .await?
+                        .into_inner();
 
-            let state = zfs_proto::ImportJobState::try_from(status.state)
-                .unwrap_or(zfs_proto::ImportJobState::Unspecified);
+                    let state = zfs_proto::ImportJobState::try_from(status.state)
+                        .unwrap_or(zfs_proto::ImportJobState::Unspecified);
 
-            let progress = if status.total_bytes > 0 {
-                format!(
-                    "{:.1}%",
-                    status.bytes_written as f64 / status.total_bytes as f64 * 100.0
-                )
-            } else {
-                format!("{} bytes", status.bytes_written)
-            };
-
-            println!("  {:?}: {}", state, progress);
-
-            match state {
-                zfs_proto::ImportJobState::Completed => {
-                    if let Some(template) = status.template {
-                        println!("Import completed: {} ({})", template.name, template.id);
+                    let progress = if status.total_bytes > 0 {
+                        format!(
+                            "{:.1}%",
+                            status.bytes_written as f64 / status.total_bytes as f64 * 100.0
+                        )
                     } else {
-                        println!("Import completed!");
+                        format!("{} bytes", status.bytes_written)
+                    };
+
+                    println!("  {:?}: {}", state, progress);
+
+                    match state {
+                        zfs_proto::ImportJobState::Completed => {
+                            if let Some(template) = status.template {
+                                println!("Import completed: {} ({})", template.name, template.id);
+                            } else {
+                                println!("Import completed!");
+                            }
+                            return Ok(());
+                        }
+                        zfs_proto::ImportJobState::Failed => {
+                            eprintln!("Import failed: {}", status.error.unwrap_or_default());
+                            std::process::exit(1);
+                        }
+                        zfs_proto::ImportJobState::Cancelled => {
+                            eprintln!("Import cancelled");
+                            std::process::exit(1);
+                        }
+                        _ => continue,
                     }
-                    return Ok(());
                 }
-                zfs_proto::ImportJobState::Failed => {
-                    eprintln!("Import failed: {}", status.error.unwrap_or_default());
-                    std::process::exit(1);
-                }
-                zfs_proto::ImportJobState::Cancelled => {
-                    eprintln!("Import cancelled");
-                    std::process::exit(1);
-                }
-                _ => continue,
             }
+
+            Commands::Pool => {
+                let stats = zfs_client
+                    .get_pool_stats(zfs_proto::GetPoolStatsRequest {})
+                    .await?
+                    .into_inner();
+                println!("Pool: {}", stats.name);
+                println!("  Total:       {:>10}", format_bytes(stats.total_bytes));
+                println!("  Used:        {:>10}", format_bytes(stats.used_bytes));
+                println!("  Available:   {:>10}", format_bytes(stats.available_bytes));
+                println!(
+                    "  Provisioned: {:>10}",
+                    format_bytes(stats.provisioned_bytes)
+                );
+                if stats.compression_ratio > 1.0 {
+                    println!("  Compression: {:.2}x", stats.compression_ratio);
+                }
+            }
+
+            Commands::Volume(cmd) => match cmd {
+                VolumeCommands::List => {
+                    let response = zfs_client
+                        .list_volumes(zfs_proto::ListVolumesRequest {})
+                        .await?;
+                    let volumes = response.into_inner().volumes;
+                    if volumes.is_empty() {
+                        println!("No volumes found");
+                    } else {
+                        println!("{:<36} {:<20} {:>10} {:>10}", "ID", "NAME", "SIZE", "USED");
+                        for vol in volumes {
+                            println!(
+                                "{:<36} {:<20} {:>10} {:>10}",
+                                vol.id,
+                                vol.name,
+                                format_bytes(vol.volsize_bytes),
+                                format_bytes(vol.used_bytes)
+                            );
+                        }
+                    }
+                }
+                VolumeCommands::Create { name, size } => {
+                    let size_bytes = size * 1024 * 1024 * 1024;
+                    let response = zfs_client
+                        .create_volume(zfs_proto::CreateVolumeRequest {
+                            name: name.clone(),
+                            size_bytes,
+                            volblocksize: None,
+                        })
+                        .await?;
+                    let vol = response.into_inner();
+                    println!("Created volume: {} ({})", vol.name, vol.id);
+                }
+                VolumeCommands::Delete { name } => {
+                    zfs_client
+                        .delete_volume(zfs_proto::DeleteVolumeRequest { name: name.clone() })
+                        .await?;
+                    println!("Deleted volume: {}", name);
+                }
+                VolumeCommands::Resize { name, size } => {
+                    let new_size_bytes = size * 1024 * 1024 * 1024;
+                    let response = zfs_client
+                        .resize_volume(zfs_proto::ResizeVolumeRequest {
+                            name: name.clone(),
+                            new_size_bytes,
+                        })
+                        .await?;
+                    let vol = response.into_inner();
+                    println!(
+                        "Resized volume: {} to {}",
+                        vol.name,
+                        format_bytes(vol.volsize_bytes)
+                    );
+                }
+            },
+
+            Commands::Snapshot(cmd) => match cmd {
+                SnapshotCommands::List { volume } => {
+                    let response = zfs_client
+                        .list_snapshots(zfs_proto::ListSnapshotsRequest {
+                            volume_name: volume.clone(),
+                        })
+                        .await?;
+                    let snapshots = response.into_inner().snapshots;
+                    if snapshots.is_empty() {
+                        println!("No snapshots found for volume: {}", volume);
+                    } else {
+                        println!("{:<36} {:<20} {:>10}", "ID", "NAME", "USED");
+                        for snap in snapshots {
+                            println!(
+                                "{:<36} {:<20} {:>10}",
+                                snap.id,
+                                snap.name,
+                                format_bytes(snap.used_bytes)
+                            );
+                        }
+                    }
+                }
+                SnapshotCommands::Create { volume, name } => {
+                    let response = zfs_client
+                        .create_snapshot(zfs_proto::CreateSnapshotRequest {
+                            volume_name: volume.clone(),
+                            snapshot_name: name.clone(),
+                        })
+                        .await?;
+                    let snap = response.into_inner();
+                    println!("Created snapshot: {}@{} ({})", volume, snap.name, snap.id);
+                }
+                SnapshotCommands::Delete { volume, name } => {
+                    zfs_client
+                        .delete_snapshot(zfs_proto::DeleteSnapshotRequest {
+                            volume_name: volume.clone(),
+                            snapshot_name: name.clone(),
+                        })
+                        .await?;
+                    println!("Deleted snapshot: {}@{}", volume, name);
+                }
+                SnapshotCommands::Rollback { volume, name } => {
+                    let response = zfs_client
+                        .rollback_snapshot(zfs_proto::RollbackSnapshotRequest {
+                            volume_name: volume.clone(),
+                            snapshot_name: name.clone(),
+                        })
+                        .await?;
+                    let vol = response.into_inner();
+                    println!("Rolled back volume {} to snapshot {}", vol.name, name);
+                }
+            },
+
+            Commands::Template(cmd) => match cmd {
+                TemplateCommands::List => {
+                    let response = zfs_client
+                        .list_templates(zfs_proto::ListTemplatesRequest {})
+                        .await?;
+                    let templates = response.into_inner().templates;
+                    if templates.is_empty() {
+                        println!("No templates found");
+                    } else {
+                        println!("{:<36} {:<20} {:>10}", "ID", "NAME", "SIZE");
+                        for tpl in templates {
+                            println!(
+                                "{:<36} {:<20} {:>10}",
+                                tpl.id,
+                                tpl.name,
+                                format_bytes(tpl.size_bytes)
+                            );
+                        }
+                    }
+                }
+                TemplateCommands::Delete { name } => {
+                    zfs_client
+                        .delete_template(zfs_proto::DeleteTemplateRequest { name: name.clone() })
+                        .await?;
+                    println!("Deleted template: {}", name);
+                }
+                TemplateCommands::Clone {
+                    template,
+                    name,
+                    size,
+                } => {
+                    let size_bytes = size.map(|s| s * 1024 * 1024 * 1024);
+                    let response = zfs_client
+                        .clone_from_template(zfs_proto::CloneFromTemplateRequest {
+                            template_name: template.clone(),
+                            new_volume_name: name.clone(),
+                            size_bytes,
+                        })
+                        .await?;
+                    let vol = response.into_inner();
+                    println!(
+                        "Cloned template {} to volume {} ({})",
+                        template, vol.name, vol.id
+                    );
+                }
+            },
+
+            _ => unreachable!(),
         }
+
+        return Ok(());
     }
 
     // Other subcommands require a connection to the VMM
@@ -540,7 +858,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_console(&mut client, id).await?;
         }
 
-        Commands::Import { .. } => {
+        Commands::Import { .. }
+        | Commands::Pool
+        | Commands::Volume(_)
+        | Commands::Snapshot(_)
+        | Commands::Template(_) => {
             // Handled above
             unreachable!()
         }
