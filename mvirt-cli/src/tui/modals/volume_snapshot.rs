@@ -1,5 +1,6 @@
 //! Modal for creating a snapshot of a volume
 
+use chrono::Local;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
@@ -12,10 +13,12 @@ pub struct VolumeSnapshotModal {
 
 impl VolumeSnapshotModal {
     pub fn new(volume_name: String) -> Self {
+        let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+        let snapshot_name = format!("{}-snap-{}", volume_name, timestamp);
         Self {
             volume_name,
-            snapshot_name: String::new(),
-            focused_field: 0,
+            snapshot_name,
+            focused_field: 1, // Start on submit button
         }
     }
 
