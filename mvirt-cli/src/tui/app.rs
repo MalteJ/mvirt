@@ -9,7 +9,6 @@ use tokio::sync::mpsc;
 use crate::proto::{SystemInfo, Vm, VmState};
 use crate::tui::modals::network_create::NetworkCreateModal;
 use crate::tui::modals::nic_create::NicCreateModal;
-use crate::tui::modals::ssh_keys::SshKeysModal;
 use crate::tui::modals::vm_create::CreateModal;
 use crate::tui::modals::volume_clone::VolumeCloneModal;
 use crate::tui::modals::volume_create::VolumeCreateModal;
@@ -19,7 +18,7 @@ use crate::tui::modals::volume_snapshot::VolumeSnapshotModal;
 use crate::tui::modals::volume_template::VolumeTemplateModal;
 use crate::tui::types::{
     Action, ActionResult, NetworkFocus, NetworkItem, NetworkState, StorageFocus, StorageState,
-    UserDataMode, View, VolumeSelection,
+    View, VolumeSelection,
 };
 use crate::tui::widgets::console::ConsoleSession;
 use crate::tui::widgets::file_picker::FilePicker;
@@ -59,7 +58,6 @@ pub struct App {
     pub create_modal: Option<CreateModal>,
     pub file_picker: Option<FilePicker>,
     pub file_picker_for_user_data: bool,
-    pub ssh_keys_modal: Option<SshKeysModal>,
     pub detail_view: Option<String>,
     pub vm_detail_logs: Vec<LogEntry>,
     pub console_session: Option<ConsoleSession>,
@@ -140,7 +138,6 @@ impl App {
             create_modal: None,
             file_picker: None,
             file_picker_for_user_data: false,
-            ssh_keys_modal: None,
             detail_view: None,
             vm_detail_logs: Vec::new(),
             console_session: None,
@@ -671,41 +668,6 @@ impl App {
         self.file_picker_for_user_data = true;
     }
 
-    pub fn open_ssh_keys_modal(&mut self) {
-        // Use existing config if available, otherwise create new
-        let modal = if let Some(create_modal) = &self.create_modal {
-            if let Some(config) = &create_modal.ssh_keys_config {
-                SshKeysModal::with_config(config.clone())
-            } else {
-                SshKeysModal::new()
-            }
-        } else {
-            SshKeysModal::new()
-        };
-        self.ssh_keys_modal = Some(modal);
-    }
-
-    pub fn close_ssh_keys_modal(&mut self) {
-        self.ssh_keys_modal = None;
-    }
-
-    pub fn confirm_ssh_keys(&mut self) {
-        if let Some(modal) = &self.ssh_keys_modal {
-            match modal.validate() {
-                Ok(()) => {
-                    let config = modal.config.clone();
-                    if let Some(create_modal) = &mut self.create_modal {
-                        create_modal.set_ssh_keys_config(config);
-                    }
-                    self.ssh_keys_modal = None;
-                }
-                Err(e) => {
-                    self.set_status(format!("Error: {}", e));
-                }
-            }
-        }
-    }
-
     pub fn send_refresh(&self) {
         let _ = self.action_tx.send(Action::Refresh);
         let _ = self.action_tx.send(Action::RefreshSystemInfo);
@@ -765,24 +727,6 @@ impl App {
 
     pub fn get_vm_by_id(&self, id: &str) -> Option<&Vm> {
         self.vms.iter().find(|vm| vm.id == id)
-    }
-
-    pub fn handle_user_data_mode_action(&mut self) {
-        if let Some(modal) = &self.create_modal {
-            match modal.user_data_mode {
-                UserDataMode::None => {
-                    if let Some(modal) = &mut self.create_modal {
-                        modal.focus_next();
-                    }
-                }
-                UserDataMode::SshKeys => {
-                    self.open_ssh_keys_modal();
-                }
-                UserDataMode::File => {
-                    self.open_user_data_file_picker();
-                }
-            }
-        }
     }
 
     // === View Navigation ===

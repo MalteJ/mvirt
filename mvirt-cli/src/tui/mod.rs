@@ -101,11 +101,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
         widgets::file_picker::draw(frame, picker);
     }
 
-    // SSH Keys Modal overlay (on top of create modal)
-    if let Some(modal) = &app.ssh_keys_modal {
-        modals::ssh_keys::draw(frame, modal);
-    }
-
     // Storage modals
     if let Some(ref volume) = app.volume_detail_volume {
         modals::volume_detail::draw(frame, volume, &app.volume_detail_logs);
@@ -249,10 +244,8 @@ pub async fn run(
                 continue;
             }
 
-            // Handle SSH keys modal
-            if app.ssh_keys_modal.is_some() {
-                handle_ssh_keys_modal_input(&mut app, key.code);
-            } else if app.file_picker.is_some() {
+            // Handle modals (in priority order)
+            if app.file_picker.is_some() {
                 handle_file_picker_input(&mut app, key.code);
             } else if app.detail_view.is_some() {
                 handle_detail_view_input(&mut app, key.code);
@@ -307,55 +300,6 @@ pub async fn run(
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
-}
-
-fn handle_ssh_keys_modal_input(app: &mut App, key_code: KeyCode) {
-    match key_code {
-        KeyCode::Esc => app.close_ssh_keys_modal(),
-        KeyCode::Tab | KeyCode::Down => {
-            if let Some(modal) = &mut app.ssh_keys_modal {
-                modal.focus_next();
-            }
-        }
-        KeyCode::BackTab | KeyCode::Up => {
-            if let Some(modal) = &mut app.ssh_keys_modal {
-                modal.focus_prev();
-            }
-        }
-        KeyCode::Enter => {
-            if let Some(modal) = &app.ssh_keys_modal {
-                if modal.is_add_button() {
-                    app.confirm_ssh_keys();
-                } else if modal.is_cancel_button() {
-                    app.close_ssh_keys_modal();
-                } else if let Some(modal) = &mut app.ssh_keys_modal {
-                    modal.focus_next();
-                }
-            }
-        }
-        KeyCode::Char(' ') => {
-            if let Some(modal) = &mut app.ssh_keys_modal
-                && modal.is_source_field()
-            {
-                modal.toggle_source();
-            }
-        }
-        KeyCode::Backspace => {
-            if let Some(modal) = &mut app.ssh_keys_modal
-                && let Some(input) = modal.current_input()
-            {
-                input.pop();
-            }
-        }
-        KeyCode::Char(c) => {
-            if let Some(modal) = &mut app.ssh_keys_modal
-                && let Some(input) = modal.current_input()
-            {
-                input.push(c);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn handle_file_picker_input(app: &mut App, key_code: KeyCode) {
@@ -424,12 +368,12 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
         }
         KeyCode::Enter => {
             if let Some(modal) = &app.create_modal {
-                if modal.is_submit_field() {
+                if modal.is_user_data_file_field() {
+                    // On file path field, open file picker
+                    app.open_user_data_file_picker();
+                } else {
+                    // Otherwise submit the form
                     app.submit_create();
-                } else if modal.is_user_data_mode_field() {
-                    app.handle_user_data_mode_action();
-                } else if let Some(modal) = &mut app.create_modal {
-                    modal.focus_next();
                 }
             }
         }
@@ -439,6 +383,8 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
                     modal.toggle_disk_source_type();
                 } else if modal.is_nested_virt_field() {
                     modal.toggle_nested_virt();
+                } else if modal.is_ssh_source_field() {
+                    modal.toggle_ssh_source();
                 }
             }
         }
@@ -451,7 +397,10 @@ fn handle_create_modal_input(app: &mut App, key_code: KeyCode) {
         }
         KeyCode::Char(c) => {
             if let Some(modal) = &mut app.create_modal {
-                if modal.is_numeric_field() {
+                // Handle tab switching with number keys 1-4
+                if matches!(c, '1'..='4') {
+                    modal.switch_tab_by_number(c as u8 - b'0');
+                } else if modal.is_numeric_field() {
                     if c.is_ascii_digit()
                         && let Some(input) = modal.current_input()
                     {

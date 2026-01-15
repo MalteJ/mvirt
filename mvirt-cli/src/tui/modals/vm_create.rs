@@ -2,7 +2,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::types::{
-    CreateVmParams, DiskSourceType, NetworkItem, SshKeySource, SshKeysConfig, UserDataMode,
+    CreateVmParams, CreateVmTab, DiskSourceType, NetworkItem, SshKeySource, SshKeysConfig,
+    UserDataMode,
 };
 use crate::zfs_proto::{Template, Volume};
 
@@ -15,20 +16,35 @@ pub struct DiskItem {
 }
 
 pub struct CreateModal {
+    // Tab navigation
+    pub current_tab: CreateVmTab,
+    pub focused_field: usize, // Field index within current tab
+
+    // General tab fields
     pub name: String,
+    pub vcpus: String,
+    pub memory_mb: String,
+    pub nested_virt: bool,
+
+    // Storage tab fields
     pub disk_source_type: DiskSourceType,
     pub disk_items: Vec<DiskItem>, // Combined list of templates and volumes
     pub selected_disk: usize,
     pub volume_size_gb: String, // Size for new volume when cloning from template
-    pub vcpus: String,
-    pub memory_mb: String,
-    pub nested_virt: bool,
-    pub user_data_mode: UserDataMode,
-    pub user_data_file: String,
-    pub ssh_keys_config: Option<SshKeysConfig>,
+
+    // Network tab fields
     pub network_items: Vec<NetworkItem>, // Available networks
     pub selected_network: Option<usize>, // None = no network, Some(idx) = selected network
-    pub focused_field: usize,
+
+    // Cloud-Init tab fields
+    pub user_data_mode: UserDataMode,
+    pub user_data_file: String,
+    // SSH Keys fields (inline, no separate modal)
+    pub ssh_username: String,
+    pub ssh_source: SshKeySource,
+    pub ssh_github_user: String,
+    pub ssh_local_path: String,
+    pub ssh_password: String,
 }
 
 impl Default for CreateModal {
@@ -39,21 +55,30 @@ impl Default for CreateModal {
 
 impl CreateModal {
     pub fn new() -> Self {
+        let default_ssh_path = dirs::home_dir()
+            .map(|p| p.join(".ssh/id_rsa.pub").to_string_lossy().to_string())
+            .unwrap_or_else(|| "~/.ssh/id_rsa.pub".to_string());
+
         Self {
+            current_tab: CreateVmTab::General,
+            focused_field: 0,
             name: String::new(),
+            vcpus: "1".to_string(),
+            memory_mb: "512".to_string(),
+            nested_virt: false,
             disk_source_type: DiskSourceType::Template,
             disk_items: Vec::new(),
             selected_disk: 0,
             volume_size_gb: String::new(),
-            vcpus: "1".to_string(),
-            memory_mb: "512".to_string(),
-            nested_virt: false,
-            user_data_mode: UserDataMode::None,
-            user_data_file: String::new(),
-            ssh_keys_config: None,
             network_items: Vec::new(),
             selected_network: None,
-            focused_field: 0,
+            user_data_mode: UserDataMode::None,
+            user_data_file: String::new(),
+            ssh_username: String::new(),
+            ssh_source: SshKeySource::GitHub,
+            ssh_github_user: String::new(),
+            ssh_local_path: default_ssh_path,
+            ssh_password: String::new(),
         }
     }
 
@@ -95,54 +120,110 @@ impl CreateModal {
         modal
     }
 
-    pub fn field_count() -> usize {
-        9 // name, disk, volume_size, vcpus, memory, nested_virt, network, user_data, submit
+    /// Number of fields in each tab (Cloud-Init is dynamic based on mode)
+    fn field_count_for_tab(&self) -> usize {
+        match self.current_tab {
+            CreateVmTab::General => 4, // name, vcpus, memory, nested_virt
+            CreateVmTab::Storage => 2, // disk, volume_size
+            CreateVmTab::Network => 1, // network
+            CreateVmTab::CloudInit => match self.user_data_mode {
+                UserDataMode::None => 1,    // just mode selector
+                UserDataMode::SshKeys => 5, // mode, username, source, github/path, password
+                UserDataMode::File => 2,    // mode, file path
+            },
+        }
+    }
+
+    /// Switch to a specific tab
+    pub fn switch_tab(&mut self, tab: CreateVmTab) {
+        self.current_tab = tab;
+        self.focused_field = 0;
+    }
+
+    /// Switch to tab by number (1-4)
+    pub fn switch_tab_by_number(&mut self, num: u8) {
+        let tab = match num {
+            1 => CreateVmTab::General,
+            2 => CreateVmTab::Storage,
+            3 => CreateVmTab::Network,
+            4 => CreateVmTab::CloudInit,
+            _ => return,
+        };
+        self.switch_tab(tab);
     }
 
     pub fn focus_next(&mut self) {
-        self.focused_field = (self.focused_field + 1) % Self::field_count();
+        let count = self.field_count_for_tab();
+        self.focused_field = (self.focused_field + 1) % count;
     }
 
     pub fn focus_prev(&mut self) {
+        let count = self.field_count_for_tab();
         self.focused_field = if self.focused_field == 0 {
-            Self::field_count() - 1
+            count - 1
         } else {
             self.focused_field - 1
         };
     }
 
     pub fn current_input(&mut self) -> Option<&mut String> {
-        match self.focused_field {
-            0 => Some(&mut self.name),
-            2 => Some(&mut self.volume_size_gb),
-            3 => Some(&mut self.vcpus),
-            4 => Some(&mut self.memory_mb),
-            _ => None,
+        match self.current_tab {
+            CreateVmTab::General => match self.focused_field {
+                0 => Some(&mut self.name),
+                1 => Some(&mut self.vcpus),
+                2 => Some(&mut self.memory_mb),
+                _ => None,
+            },
+            CreateVmTab::Storage => match self.focused_field {
+                1 => Some(&mut self.volume_size_gb),
+                _ => None,
+            },
+            CreateVmTab::Network => None,
+            CreateVmTab::CloudInit => match self.user_data_mode {
+                UserDataMode::None => None,
+                UserDataMode::SshKeys => match self.focused_field {
+                    1 => Some(&mut self.ssh_username),
+                    3 => match self.ssh_source {
+                        SshKeySource::GitHub => Some(&mut self.ssh_github_user),
+                        SshKeySource::Local => Some(&mut self.ssh_local_path),
+                    },
+                    4 => Some(&mut self.ssh_password),
+                    _ => None, // 0=mode, 2=source toggle
+                },
+                UserDataMode::File => match self.focused_field {
+                    1 => Some(&mut self.user_data_file),
+                    _ => None,
+                },
+            },
         }
     }
 
     pub fn is_name_field(&self) -> bool {
-        self.focused_field == 0
-    }
-
-    pub fn is_disk_field(&self) -> bool {
-        self.focused_field == 1
+        self.current_tab == CreateVmTab::General && self.focused_field == 0
     }
 
     pub fn is_numeric_field(&self) -> bool {
-        matches!(self.focused_field, 2..=4) // volume_size, vcpus, memory
+        match self.current_tab {
+            CreateVmTab::General => matches!(self.focused_field, 1 | 2), // vcpus, memory
+            CreateVmTab::Storage => self.focused_field == 1,             // volume_size
+            _ => false,
+        }
     }
 
     pub fn is_nested_virt_field(&self) -> bool {
-        self.focused_field == 5
+        self.current_tab == CreateVmTab::General && self.focused_field == 3
     }
 
     pub fn toggle_nested_virt(&mut self) {
         self.nested_virt = !self.nested_virt;
     }
 
+    pub fn is_disk_field(&self) -> bool {
+        self.current_tab == CreateVmTab::Storage && self.focused_field == 0
+    }
+
     pub fn is_network_field(&self) -> bool {
-        self.focused_field == 6
+        self.current_tab == CreateVmTab::Network && self.focused_field == 0
     }
 
     pub fn network_select_next(&mut self) {
@@ -170,7 +251,7 @@ impl CreateModal {
     }
 
     pub fn is_user_data_mode_field(&self) -> bool {
-        self.focused_field == 7
+        self.current_tab == CreateVmTab::CloudInit && self.focused_field == 0
     }
 
     pub fn cycle_user_data_mode_next(&mut self) {
@@ -189,8 +270,23 @@ impl CreateModal {
         };
     }
 
-    pub fn is_submit_field(&self) -> bool {
-        self.focused_field == 8
+    pub fn is_ssh_source_field(&self) -> bool {
+        self.current_tab == CreateVmTab::CloudInit
+            && self.user_data_mode == UserDataMode::SshKeys
+            && self.focused_field == 2
+    }
+
+    pub fn is_user_data_file_field(&self) -> bool {
+        self.current_tab == CreateVmTab::CloudInit
+            && self.user_data_mode == UserDataMode::File
+            && self.focused_field == 1
+    }
+
+    pub fn toggle_ssh_source(&mut self) {
+        self.ssh_source = match self.ssh_source {
+            SshKeySource::GitHub => SshKeySource::Local,
+            SshKeySource::Local => SshKeySource::GitHub,
+        };
     }
 
     pub fn disk_select_next(&mut self) {
@@ -238,10 +334,6 @@ impl CreateModal {
         self.user_data_file = path;
     }
 
-    pub fn set_ssh_keys_config(&mut self, config: SshKeysConfig) {
-        self.ssh_keys_config = Some(config);
-    }
-
     #[allow(dead_code)]
     pub fn selected_disk_item(&self) -> Option<&DiskItem> {
         self.disk_items.get(self.selected_disk)
@@ -256,13 +348,25 @@ impl CreateModal {
         match self.user_data_mode {
             UserDataMode::None => {}
             UserDataMode::SshKeys => {
-                if self.ssh_keys_config.is_none() {
-                    return Err("SSH keys not configured - press Enter to configure");
+                if self.ssh_username.is_empty() {
+                    return Err("SSH username is required");
+                }
+                match self.ssh_source {
+                    SshKeySource::GitHub => {
+                        if self.ssh_github_user.is_empty() {
+                            return Err("GitHub username is required");
+                        }
+                    }
+                    SshKeySource::Local => {
+                        if self.ssh_local_path.is_empty() {
+                            return Err("SSH key file path is required");
+                        }
+                    }
                 }
             }
             UserDataMode::File => {
                 if self.user_data_file.is_empty() {
-                    return Err("User-data file not selected - press Enter to browse");
+                    return Err("User-data file path is required");
                 }
             }
         }
@@ -293,6 +397,19 @@ impl CreateModal {
             .and_then(|idx| self.network_items.get(idx))
             .map(|n| n.id.clone());
 
+        // Build SSH keys config from inline fields if mode is SshKeys
+        let ssh_keys_config = if self.user_data_mode == UserDataMode::SshKeys {
+            Some(SshKeysConfig {
+                username: self.ssh_username.clone(),
+                source: self.ssh_source,
+                github_user: self.ssh_github_user.clone(),
+                local_path: self.ssh_local_path.clone(),
+                root_password: self.ssh_password.clone(),
+            })
+        } else {
+            None
+        };
+
         Ok(CreateVmParams {
             name: if self.name.is_empty() {
                 None
@@ -311,7 +428,7 @@ impl CreateModal {
             } else {
                 Some(self.user_data_file.clone())
             },
-            ssh_keys_config: self.ssh_keys_config.clone(),
+            ssh_keys_config,
             network_id,
         })
     }
@@ -332,7 +449,7 @@ fn format_size(bytes: u64) -> String {
 pub fn draw(frame: &mut Frame, modal: &CreateModal) {
     let area = frame.area();
     let modal_width = 70.min(area.width.saturating_sub(4));
-    let modal_height = 22.min(area.height.saturating_sub(4));
+    let modal_height = 18.min(area.height.saturating_sub(4));
 
     let modal_area = Rect {
         x: (area.width - modal_width) / 2,
@@ -348,6 +465,8 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
         Span::styled("|", Style::default().fg(Color::DarkGray)),
         Span::styled(" Tab", Style::default().fg(Color::Yellow)),
         Span::styled(": next ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Green)),
+        Span::styled(": create ", Style::default().fg(Color::DarkGray)),
         Span::styled("Esc", Style::default().fg(Color::Red)),
         Span::styled(": cancel ", Style::default().fg(Color::DarkGray)),
     ]);
@@ -358,29 +477,88 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
+    // Main layout: tab bar + content + create button
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Tab bar
+            Constraint::Min(8),    // Tab content
+            Constraint::Length(2), // Create button
+        ])
+        .split(inner);
+
+    // Draw tab bar
+    draw_tab_bar(frame, main_chunks[0], modal.current_tab);
+
+    // Draw tab content
+    match modal.current_tab {
+        CreateVmTab::General => draw_general_tab(frame, main_chunks[1], modal),
+        CreateVmTab::Storage => draw_storage_tab(frame, main_chunks[1], modal),
+        CreateVmTab::Network => draw_network_tab(frame, main_chunks[1], modal),
+        CreateVmTab::CloudInit => draw_cloud_init_tab(frame, main_chunks[1], modal),
+    }
+
+    // Create button (always visible)
+    let submit_style = Style::default().fg(Color::Green);
+    let submit = Paragraph::new(Line::from(vec![Span::styled(
+        "  \u{25b6} Create VM  ",
+        submit_style,
+    )]))
+    .alignment(Alignment::Center);
+    frame.render_widget(submit, main_chunks[2]);
+}
+
+fn draw_tab_bar(frame: &mut Frame, area: Rect, current_tab: CreateVmTab) {
+    let tabs = [
+        (CreateVmTab::General, "1:General"),
+        (CreateVmTab::Storage, "2:Storage"),
+        (CreateVmTab::Network, "3:Network"),
+        (CreateVmTab::CloudInit, "4:Cloud-Init"),
+    ];
+
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (tab, label)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", Style::default()));
+        }
+        let style = if *tab == current_tab {
+            Style::default().fg(Color::Cyan).bold()
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let bracket_style = if *tab == current_tab {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled("[", bracket_style));
+        spans.push(Span::styled(*label, style));
+        spans.push(Span::styled("]", bracket_style));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_general_tab(frame: &mut Frame, area: Rect, modal: &CreateModal) {
     let label_focused = Style::default().fg(Color::Cyan).bold();
     let label_normal = Style::default().fg(Color::DarkGray);
     let value_focused = Style::default().fg(Color::White);
     let value_normal = Style::default().fg(Color::Gray);
 
-    let field_chunks = Layout::default()
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // [0] Padding
-            Constraint::Length(2), // [1] Name
-            Constraint::Length(4), // [2] Disk selector (expanded)
-            Constraint::Length(2), // [3] Volume size (only for templates)
-            Constraint::Length(2), // [4] VCPUs
-            Constraint::Length(2), // [5] Memory
-            Constraint::Length(2), // [6] Nested virt
-            Constraint::Length(2), // [7] Network
-            Constraint::Length(2), // [8] User-data
-            Constraint::Length(2), // [9] Submit
+            Constraint::Length(1), // Padding
+            Constraint::Length(2), // Name
+            Constraint::Length(2), // VCPUs
+            Constraint::Length(2), // Memory
+            Constraint::Length(2), // Nested virt
+            Constraint::Min(0),    // Spacer
         ])
-        .split(inner);
+        .split(area);
 
-    // Name field
-    let name_focused = modal.focused_field == 0;
+    // Name field (field 0)
+    let name_focused = modal.current_tab == CreateVmTab::General && modal.focused_field == 0;
     let cursor = if name_focused { "\u{258c}" } else { "" };
     let name_line = if modal.name.is_empty() && !name_focused {
         Line::from(vec![
@@ -407,16 +585,111 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
             ),
         ])
     };
-    frame.render_widget(Paragraph::new(name_line), field_chunks[1]);
+    frame.render_widget(Paragraph::new(name_line), chunks[1]);
 
-    // Disk selector
-    let disk_focused = modal.focused_field == 1;
+    // VCPUs (field 1)
+    let vcpus_focused = modal.current_tab == CreateVmTab::General && modal.focused_field == 1;
+    let vcpus_cursor = if vcpus_focused { "\u{258c}" } else { "" };
+    let vcpus_line = Line::from(vec![
+        Span::styled(
+            " VCPUs:      ",
+            if vcpus_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("{}{}", modal.vcpus, vcpus_cursor),
+            if vcpus_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(vcpus_line), chunks[2]);
+
+    // Memory (field 2)
+    let memory_focused = modal.current_tab == CreateVmTab::General && modal.focused_field == 2;
+    let memory_cursor = if memory_focused { "\u{258c}" } else { "" };
+    let memory_line = Line::from(vec![
+        Span::styled(
+            " Memory:     ",
+            if memory_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            format!("{}{}", modal.memory_mb, memory_cursor),
+            if memory_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+        Span::styled(" MB", Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(memory_line), chunks[3]);
+
+    // Nested Virt (field 3)
+    let nested_focused = modal.current_tab == CreateVmTab::General && modal.focused_field == 3;
+    let nested_str = if modal.nested_virt {
+        "[x] Enabled"
+    } else {
+        "[ ] Disabled"
+    };
+    let nested_line = Line::from(vec![
+        Span::styled(
+            " Nested Virt:",
+            if nested_focused {
+                label_focused
+            } else {
+                label_normal
+            },
+        ),
+        Span::styled(
+            nested_str,
+            if nested_focused {
+                value_focused
+            } else {
+                value_normal
+            },
+        ),
+        if nested_focused {
+            Span::styled(" [Space: toggle]", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
+    ]);
+    frame.render_widget(Paragraph::new(nested_line), chunks[4]);
+}
+
+fn draw_storage_tab(frame: &mut Frame, area: Rect, modal: &CreateModal) {
+    let label_focused = Style::default().fg(Color::Cyan).bold();
+    let label_normal = Style::default().fg(Color::DarkGray);
+    let value_focused = Style::default().fg(Color::White);
+    let value_normal = Style::default().fg(Color::Gray);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Padding
+            Constraint::Length(4), // Disk selector
+            Constraint::Length(2), // Volume size
+            Constraint::Min(0),    // Spacer
+        ])
+        .split(area);
+
+    // Disk selector (field 0)
+    let disk_focused = modal.current_tab == CreateVmTab::Storage && modal.focused_field == 0;
     let type_str = match modal.disk_source_type {
         DiskSourceType::Template => "Template",
         DiskSourceType::Volume => "Volume",
     };
 
-    // Show selected disk with navigation hints
     let disk_header = Line::from(vec![
         Span::styled(
             " Boot Disk:  ",
@@ -443,13 +716,13 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
             Span::raw("")
         },
     ]);
-    frame.render_widget(Paragraph::new(disk_header), field_chunks[2]);
+    frame.render_widget(Paragraph::new(disk_header), chunks[1]);
 
-    // Show disk list (3 items visible with current selection in middle)
+    // Show disk list
     let disk_list_area = Rect {
-        x: field_chunks[2].x + 13,
-        y: field_chunks[2].y + 1,
-        width: field_chunks[2].width.saturating_sub(14),
+        x: chunks[1].x + 13,
+        y: chunks[1].y + 1,
+        width: chunks[1].width.saturating_sub(14),
         height: 3,
     };
 
@@ -460,7 +733,6 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
         )]);
         frame.render_widget(Paragraph::new(no_disks), disk_list_area);
     } else {
-        // Filter items by current source type
         let filtered_items: Vec<(usize, &DiskItem)> = modal
             .disk_items
             .iter()
@@ -468,13 +740,11 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
             .filter(|(_, item)| item.source_type == modal.disk_source_type)
             .collect();
 
-        // Find position of selected item in filtered list
         let selected_in_filtered = filtered_items
             .iter()
             .position(|(idx, _)| *idx == modal.selected_disk)
             .unwrap_or(0);
 
-        // Show up to 3 items centered around selection
         let start = selected_in_filtered.saturating_sub(1);
         let visible: Vec<_> = filtered_items.iter().skip(start).take(3).collect();
 
@@ -497,7 +767,6 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
             ]));
         }
 
-        // Pad if less than 3 items
         while lines.len() < 3 {
             lines.push(Line::from(""));
         }
@@ -505,8 +774,8 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
         frame.render_widget(Paragraph::new(lines), disk_list_area);
     }
 
-    // Volume Size (only shown when template is selected)
-    let size_focused = modal.focused_field == 2;
+    // Volume Size (field 1)
+    let size_focused = modal.current_tab == CreateVmTab::Storage && modal.focused_field == 1;
     if modal.disk_source_type == DiskSourceType::Template {
         let size_cursor = if size_focused { "\u{258c}" } else { "" };
         let min_size_gb = modal
@@ -536,9 +805,8 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
                 Style::default().fg(Color::DarkGray),
             ),
         ]);
-        frame.render_widget(Paragraph::new(size_line), field_chunks[3]);
+        frame.render_widget(Paragraph::new(size_line), chunks[2]);
     } else {
-        // Show placeholder when volume is selected (size is fixed)
         let size_line = Line::from(vec![
             Span::styled(" Vol Size:   ", label_normal),
             Span::styled(
@@ -546,90 +814,27 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
                 Style::default().fg(Color::DarkGray),
             ),
         ]);
-        frame.render_widget(Paragraph::new(size_line), field_chunks[3]);
+        frame.render_widget(Paragraph::new(size_line), chunks[2]);
     }
+}
 
-    // VCPUs
-    let vcpus_focused = modal.focused_field == 3;
-    let vcpus_cursor = if vcpus_focused { "\u{258c}" } else { "" };
-    let vcpus_line = Line::from(vec![
-        Span::styled(
-            " VCPUs:      ",
-            if vcpus_focused {
-                label_focused
-            } else {
-                label_normal
-            },
-        ),
-        Span::styled(
-            format!("{}{}", modal.vcpus, vcpus_cursor),
-            if vcpus_focused {
-                value_focused
-            } else {
-                value_normal
-            },
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(vcpus_line), field_chunks[4]);
+fn draw_network_tab(frame: &mut Frame, area: Rect, modal: &CreateModal) {
+    let label_focused = Style::default().fg(Color::Cyan).bold();
+    let label_normal = Style::default().fg(Color::DarkGray);
+    let value_focused = Style::default().fg(Color::White);
+    let value_normal = Style::default().fg(Color::Gray);
 
-    // Memory
-    let memory_focused = modal.focused_field == 4;
-    let memory_cursor = if memory_focused { "\u{258c}" } else { "" };
-    let memory_line = Line::from(vec![
-        Span::styled(
-            " Memory:     ",
-            if memory_focused {
-                label_focused
-            } else {
-                label_normal
-            },
-        ),
-        Span::styled(
-            format!("{}{}", modal.memory_mb, memory_cursor),
-            if memory_focused {
-                value_focused
-            } else {
-                value_normal
-            },
-        ),
-        Span::styled(" MB", Style::default().fg(Color::DarkGray)),
-    ]);
-    frame.render_widget(Paragraph::new(memory_line), field_chunks[5]);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Padding
+            Constraint::Length(2), // Network
+            Constraint::Min(0),    // Spacer
+        ])
+        .split(area);
 
-    // Nested Virt
-    let nested_focused = modal.focused_field == 5;
-    let nested_str = if modal.nested_virt {
-        "[x] Enabled"
-    } else {
-        "[ ] Disabled"
-    };
-    let nested_line = Line::from(vec![
-        Span::styled(
-            " Nested Virt:",
-            if nested_focused {
-                label_focused
-            } else {
-                label_normal
-            },
-        ),
-        Span::styled(
-            nested_str,
-            if nested_focused {
-                value_focused
-            } else {
-                value_normal
-            },
-        ),
-        if nested_focused {
-            Span::styled(" [Space: toggle]", Style::default().fg(Color::Yellow))
-        } else {
-            Span::raw("")
-        },
-    ]);
-    frame.render_widget(Paragraph::new(nested_line), field_chunks[6]);
-
-    // Network selector
-    let network_focused = modal.focused_field == 6;
+    // Network selector (field 0)
+    let network_focused = modal.current_tab == CreateVmTab::Network && modal.focused_field == 0;
     let network_line = match modal.selected_network {
         None => Line::from(vec![
             Span::styled(
@@ -678,44 +883,65 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
             ])
         }
     };
-    frame.render_widget(Paragraph::new(network_line), field_chunks[7]);
+    frame.render_widget(Paragraph::new(network_line), chunks[1]);
+}
 
-    // User-Data
-    let user_data_focused = modal.focused_field == 7;
-    let user_data_line = match modal.user_data_mode {
-        UserDataMode::None => Line::from(vec![
-            Span::styled(
-                " User-Data:  ",
-                if user_data_focused {
-                    label_focused
-                } else {
-                    label_normal
-                },
-            ),
-            Span::styled("none", Style::default().fg(Color::DarkGray)),
-            if user_data_focused {
-                Span::styled(" [↑↓: select]", Style::default().fg(Color::Yellow))
-            } else {
-                Span::raw("")
-            },
-        ]),
-        UserDataMode::SshKeys => {
-            let value = if let Some(ref cfg) = modal.ssh_keys_config {
-                format!(
-                    "{} ({})",
-                    cfg.username,
-                    match cfg.source {
-                        SshKeySource::GitHub => format!("github:{}", cfg.github_user),
-                        SshKeySource::Local => "local".to_string(),
-                    }
-                )
-            } else {
-                String::new()
-            };
-            let mut spans = vec![
+fn draw_cloud_init_tab(frame: &mut Frame, area: Rect, modal: &CreateModal) {
+    let label_focused = Style::default().fg(Color::Cyan).bold();
+    let label_normal = Style::default().fg(Color::DarkGray);
+    let value_focused = Style::default().fg(Color::White);
+    let value_normal = Style::default().fg(Color::Gray);
+
+    match modal.user_data_mode {
+        UserDataMode::None => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Padding
+                    Constraint::Length(2), // Mode
+                    Constraint::Min(0),    // Spacer
+                ])
+                .split(area);
+
+            let mode_focused = modal.focused_field == 0;
+            let mode_line = Line::from(vec![
                 Span::styled(
-                    " User-Data:  ",
-                    if user_data_focused {
+                    " Mode:       ",
+                    if mode_focused {
+                        label_focused
+                    } else {
+                        label_normal
+                    },
+                ),
+                Span::styled("none", Style::default().fg(Color::DarkGray)),
+                if mode_focused {
+                    Span::styled(" [↑↓: select]", Style::default().fg(Color::Yellow))
+                } else {
+                    Span::raw("")
+                },
+            ]);
+            frame.render_widget(Paragraph::new(mode_line), chunks[1]);
+        }
+        UserDataMode::SshKeys => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Padding
+                    Constraint::Length(2), // Mode
+                    Constraint::Length(2), // Username
+                    Constraint::Length(2), // Source
+                    Constraint::Length(2), // GitHub user / Local path
+                    Constraint::Length(2), // Password
+                    Constraint::Min(0),    // Spacer
+                ])
+                .split(area);
+
+            // Mode (field 0)
+            let mode_focused = modal.focused_field == 0;
+            let mode_line = Line::from(vec![
+                Span::styled(
+                    " Mode:       ",
+                    if mode_focused {
                         label_focused
                     } else {
                         label_normal
@@ -723,37 +949,160 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
                 ),
                 Span::styled(
                     "SSH Keys",
-                    if user_data_focused {
+                    if mode_focused {
                         value_focused
                     } else {
                         value_normal
                     },
                 ),
-            ];
-            if !value.is_empty() {
-                spans.push(Span::styled(
-                    format!(" {}", value),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            } else if user_data_focused {
-                spans.push(Span::styled(
-                    " not configured",
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            if user_data_focused {
-                spans.push(Span::styled(
-                    " [↑↓: select, Enter: configure]",
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            Line::from(spans)
+                if mode_focused {
+                    Span::styled(" [↑↓: select]", Style::default().fg(Color::Yellow))
+                } else {
+                    Span::raw("")
+                },
+            ]);
+            frame.render_widget(Paragraph::new(mode_line), chunks[1]);
+
+            // Username (field 1)
+            let username_focused = modal.focused_field == 1;
+            let cursor = if username_focused { "\u{258c}" } else { "" };
+            let username_line = Line::from(vec![
+                Span::styled(
+                    " Username:   ",
+                    if username_focused {
+                        label_focused
+                    } else {
+                        label_normal
+                    },
+                ),
+                Span::styled(
+                    format!("{}{}", modal.ssh_username, cursor),
+                    if username_focused {
+                        value_focused
+                    } else {
+                        value_normal
+                    },
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(username_line), chunks[2]);
+
+            // Source (field 2)
+            let source_focused = modal.focused_field == 2;
+            let source_str = match modal.ssh_source {
+                SshKeySource::GitHub => "(\u{25cf}) GitHub  ( ) Local",
+                SshKeySource::Local => "( ) GitHub  (\u{25cf}) Local",
+            };
+            let source_line = Line::from(vec![
+                Span::styled(
+                    " Source:     ",
+                    if source_focused {
+                        label_focused
+                    } else {
+                        label_normal
+                    },
+                ),
+                Span::styled(
+                    source_str,
+                    if source_focused {
+                        value_focused
+                    } else {
+                        value_normal
+                    },
+                ),
+                if source_focused {
+                    Span::styled(" [Space: toggle]", Style::default().fg(Color::Yellow))
+                } else {
+                    Span::raw("")
+                },
+            ]);
+            frame.render_widget(Paragraph::new(source_line), chunks[3]);
+
+            // GitHub user or Local path (field 3)
+            let value_focused_field = modal.focused_field == 3;
+            let cursor = if value_focused_field { "\u{258c}" } else { "" };
+            let (label, value) = match modal.ssh_source {
+                SshKeySource::GitHub => ("GitHub User:", &modal.ssh_github_user),
+                SshKeySource::Local => ("Key File:", &modal.ssh_local_path),
+            };
+            let value_line = Line::from(vec![
+                Span::styled(
+                    format!(" {:<11}", label),
+                    if value_focused_field {
+                        label_focused
+                    } else {
+                        label_normal
+                    },
+                ),
+                Span::styled(
+                    format!("{}{}", value, cursor),
+                    if value_focused_field {
+                        value_focused
+                    } else {
+                        value_normal
+                    },
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(value_line), chunks[4]);
+
+            // Password (field 4)
+            let password_focused = modal.focused_field == 4;
+            let cursor = if password_focused { "\u{258c}" } else { "" };
+            let password_line = if modal.ssh_password.is_empty() {
+                Line::from(vec![
+                    Span::styled(
+                        " Password:   ",
+                        if password_focused {
+                            label_focused
+                        } else {
+                            label_normal
+                        },
+                    ),
+                    if password_focused {
+                        Span::styled(cursor, value_focused)
+                    } else {
+                        Span::styled("optional", Style::default().fg(Color::DarkGray))
+                    },
+                ])
+            } else {
+                let password_display = "*".repeat(modal.ssh_password.len());
+                Line::from(vec![
+                    Span::styled(
+                        " Password:   ",
+                        if password_focused {
+                            label_focused
+                        } else {
+                            label_normal
+                        },
+                    ),
+                    Span::styled(
+                        format!("{}{}", password_display, cursor),
+                        if password_focused {
+                            value_focused
+                        } else {
+                            value_normal
+                        },
+                    ),
+                ])
+            };
+            frame.render_widget(Paragraph::new(password_line), chunks[5]);
         }
         UserDataMode::File => {
-            let mut spans = vec![
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Padding
+                    Constraint::Length(2), // Mode
+                    Constraint::Length(2), // File path
+                    Constraint::Min(0),    // Spacer
+                ])
+                .split(area);
+
+            // Mode (field 0)
+            let mode_focused = modal.focused_field == 0;
+            let mode_line = Line::from(vec![
                 Span::styled(
-                    " User-Data:  ",
-                    if user_data_focused {
+                    " Mode:       ",
+                    if mode_focused {
                         label_focused
                     } else {
                         label_normal
@@ -761,45 +1110,54 @@ pub fn draw(frame: &mut Frame, modal: &CreateModal) {
                 ),
                 Span::styled(
                     "File",
-                    if user_data_focused {
+                    if mode_focused {
                         value_focused
                     } else {
                         value_normal
                     },
                 ),
-            ];
-            if !modal.user_data_file.is_empty() {
-                spans.push(Span::styled(
-                    format!(" {}", modal.user_data_file),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            } else if user_data_focused {
-                spans.push(Span::styled(
-                    " not selected",
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            if user_data_focused {
-                spans.push(Span::styled(
-                    " [↑↓: select, Enter: browse]",
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            Line::from(spans)
-        }
-    };
-    frame.render_widget(Paragraph::new(user_data_line), field_chunks[8]);
+                if mode_focused {
+                    Span::styled(" [↑↓: select]", Style::default().fg(Color::Yellow))
+                } else {
+                    Span::raw("")
+                },
+            ]);
+            frame.render_widget(Paragraph::new(mode_line), chunks[1]);
 
-    // Submit button
-    let submit_style = if modal.focused_field == 8 {
-        Style::default().fg(Color::Black).bg(Color::Green).bold()
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    let submit = Paragraph::new(Line::from(vec![Span::styled(
-        "  \u{25b6} Create VM  ",
-        submit_style,
-    )]))
-    .alignment(Alignment::Center);
-    frame.render_widget(submit, field_chunks[9]);
+            // File path (field 1)
+            let file_focused = modal.focused_field == 1;
+            let cursor = if file_focused { "\u{258c}" } else { "" };
+            let display_path = if modal.user_data_file.is_empty() && !file_focused {
+                "not selected".to_string()
+            } else {
+                format!("{}{}", modal.user_data_file, cursor)
+            };
+            let file_line = Line::from(vec![
+                Span::styled(
+                    " File:       ",
+                    if file_focused {
+                        label_focused
+                    } else {
+                        label_normal
+                    },
+                ),
+                Span::styled(
+                    display_path,
+                    if file_focused {
+                        value_focused
+                    } else if modal.user_data_file.is_empty() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        value_normal
+                    },
+                ),
+                if file_focused {
+                    Span::styled(" [Enter: browse]", Style::default().fg(Color::Yellow))
+                } else {
+                    Span::raw("")
+                },
+            ]);
+            frame.render_widget(Paragraph::new(file_line), chunks[2]);
+        }
+    }
 }

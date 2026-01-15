@@ -1,5 +1,4 @@
 pub mod log_detail;
-pub mod ssh_keys;
 pub mod vm_create;
 pub mod vm_detail;
 

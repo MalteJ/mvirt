@@ -28,6 +28,16 @@ pub enum UserDataMode {
     File,
 }
 
+/// Tab in Create VM modal
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum CreateVmTab {
+    #[default]
+    General, // Name, VCPUs, Memory, Nested Virt
+    Storage,   // Boot Disk, Vol Size
+    Network,   // Network selector
+    CloudInit, // User-Data mode
+}
+
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum SshKeySource {
     #[default]
@@ -42,17 +52,6 @@ pub struct SshKeysConfig {
     pub github_user: String,
     pub local_path: String,
     pub root_password: String,
-}
-
-impl SshKeysConfig {
-    pub fn new() -> Self {
-        Self {
-            local_path: dirs::home_dir()
-                .map(|p| p.join(".ssh/id_rsa.pub").to_string_lossy().to_string())
-                .unwrap_or_else(|| "~/.ssh/id_rsa.pub".to_string()),
-            ..Default::default()
-        }
-    }
 }
 
 #[derive(Clone)]
