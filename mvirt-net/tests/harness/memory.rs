@@ -38,7 +38,7 @@ impl TestGuestMemory {
         let region = MmapRegion::new(MEMORY_SIZE as usize)
             .map_err(|e| std::io::Error::other(format!("MmapRegion::new: {e}")))?;
         let guest_region = GuestRegionMmap::new(region, GuestAddress(0))
-            .map_err(|e| std::io::Error::other(format!("GuestRegionMmap::new: {e}")))?;
+            .ok_or_else(|| std::io::Error::other("GuestRegionMmap::new failed"))?;
         let mem = GuestMemoryMmap::from_regions(vec![guest_region])
             .map_err(|e| std::io::Error::other(format!("GuestMemoryMmap::from_regions: {e}")))?;
 
@@ -189,7 +189,7 @@ impl SharedMemory {
         };
 
         let guest_region = GuestRegionMmap::new(region, GuestAddress(0))
-            .map_err(|e| std::io::Error::other(format!("GuestRegionMmap: {e}")))?;
+            .ok_or_else(|| std::io::Error::other("GuestRegionMmap failed"))?;
 
         GuestMemoryMmap::from_regions(vec![guest_region])
             .map_err(|e| std::io::Error::other(format!("from_regions: {e}")))

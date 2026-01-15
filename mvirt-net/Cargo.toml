@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 # gRPC
-tonic = "0.12"
-prost = "0.13"
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
 
 # Async runtime (control plane only)
 tokio = { version = "1", features = ["full"] }
@@ -40,20 +41,20 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # vhost-user
-vhost = { version = "0.13", features = ["vhost-user"] }
-vhost-user-backend = "0.17"
-vm-memory = { version = "0.16", features = ["backend-mmap", "backend-atomic"] }
-virtio-queue = "0.14"
-vmm-sys-util = "0.12"
+vhost = { version = "0.15", features = ["vhost-user"] }
+vhost-user-backend = "0.21"
+vm-memory = { version = "=0.17.1", features = ["backend-mmap", "backend-atomic"] }
+virtio-queue = "0.17"
+vmm-sys-util = "0.15"
 
 # Networking / Packet processing
-smoltcp = { version = "0.11", default-features = false, features = [
+smoltcp = { version = "0.12", default-features = false, features = [
     "medium-ethernet",
     "proto-ipv4",
     "proto-ipv6",
     "socket-raw",
 ] }
-dhcproto = "0.12"
+dhcproto = "0.14"
 
 # IP address handling
 ipnet = "2"
@@ -63,12 +64,12 @@ prefix-trie = "0.8"
 crossbeam-channel = "0.5"
 
 # Low-level (hugepages, eventfd)
-nix = { version = "0.29", features = ["mman", "event"] }
+nix = { version = "0.30", features = ["mman", "event"] }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tempfile = "3"
-vhost = { version = "0.13", features = ["vhost-user-frontend"] }
-nix = { version = "0.29", features = ["poll", "event"] }
+vhost = { version = "0.15", features = ["vhost-user-frontend"] }
+nix = { version = "0.30", features = ["poll", "event"] }

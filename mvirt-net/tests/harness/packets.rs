@@ -36,9 +36,9 @@ pub fn arp_request(sender_mac: [u8; 6], sender_ip: [u8; 4], target_ip: [u8; 4]) 
     let arp_repr = ArpRepr::EthernetIpv4 {
         operation: ArpOperation::Request,
         source_hardware_addr: EthernetAddress::from_bytes(&sender_mac),
-        source_protocol_addr: Ipv4Address::from_bytes(&sender_ip),
+        source_protocol_addr: Ipv4Address::from_octets(sender_ip),
         target_hardware_addr: EthernetAddress::from_bytes(&[0, 0, 0, 0, 0, 0]),
-        target_protocol_addr: Ipv4Address::from_bytes(&target_ip),
+        target_protocol_addr: Ipv4Address::from_octets(target_ip),
     };
 
     let eth_repr = EthernetRepr {
@@ -85,9 +85,9 @@ pub fn parse_arp_reply(frame: &[u8]) -> Option<ArpReply> {
             target_protocol_addr,
         } => Some(ArpReply {
             sender_mac: source_hardware_addr.as_bytes().try_into().ok()?,
-            sender_ip: source_protocol_addr.as_bytes().try_into().ok()?,
+            sender_ip: source_protocol_addr.octets(),
             target_mac: target_hardware_addr.as_bytes().try_into().ok()?,
-            target_ip: target_protocol_addr.as_bytes().try_into().ok()?,
+            target_ip: target_protocol_addr.octets(),
         }),
         _ => None,
     }
@@ -358,8 +358,8 @@ pub fn icmp_echo_request(
     };
 
     let ipv4_repr = Ipv4Repr {
-        src_addr: Ipv4Address::from_bytes(&src_ip),
-        dst_addr: Ipv4Address::from_bytes(&dst_ip),
+        src_addr: Ipv4Address::from_octets(src_ip),
+        dst_addr: Ipv4Address::from_octets(dst_ip),
         next_header: IpProtocol::Icmp,
         payload_len: icmp_repr.buffer_len(),
         hop_limit: 64,
@@ -428,8 +428,8 @@ pub fn parse_icmp_echo_reply(frame: &[u8]) -> Option<IcmpEchoReply> {
     } = repr
     {
         Some(IcmpEchoReply {
-            src_ip: ipv4.src_addr().as_bytes().try_into().ok()?,
-            dst_ip: ipv4.dst_addr().as_bytes().try_into().ok()?,
+            src_ip: ipv4.src_addr().octets().try_into().ok()?,
+            dst_ip: ipv4.dst_addr().octets().try_into().ok()?,
             ident,
             seq_no,
             data: data.to_vec(),
@@ -484,8 +484,8 @@ pub fn parse_icmp_echo_request(frame: &[u8]) -> Option<IcmpEchoRequest> {
         Some(IcmpEchoRequest {
             src_mac: eth.src_addr().as_bytes().try_into().ok()?,
             dst_mac: eth.dst_addr().as_bytes().try_into().ok()?,
-            src_ip: ipv4.src_addr().as_bytes().try_into().ok()?,
-            dst_ip: ipv4.dst_addr().as_bytes().try_into().ok()?,
+            src_ip: ipv4.src_addr().octets().try_into().ok()?,
+            dst_ip: ipv4.dst_addr().octets().try_into().ok()?,
             ident,
             seq_no,
             data: data.to_vec(),
@@ -514,8 +514,8 @@ pub const GATEWAY_IPV6: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 
 /// Build a Neighbor Solicitation packet for the gateway
 pub fn neighbor_solicitation(src_mac: [u8; 6], src_ip: [u8; 16], target_ip: [u8; 16]) -> Vec<u8> {
-    let src_addr = smoltcp::wire::Ipv6Address::from_bytes(&src_ip);
-    let target_addr = smoltcp::wire::Ipv6Address::from_bytes(&target_ip);
+    let src_addr = smoltcp::wire::Ipv6Address::from_octets(src_ip);
+    let target_addr = smoltcp::wire::Ipv6Address::from_octets(target_ip);
 
     // Solicited-node multicast address for target
     let dst_addr = smoltcp::wire::Ipv6Address::new(
@@ -570,8 +570,8 @@ pub fn neighbor_solicitation(src_mac: [u8; 6], src_ip: [u8; 16], target_ip: [u8;
 
     let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
     icmp_repr.emit(
-        &IpAddress::Ipv6(src_addr),
-        &IpAddress::Ipv6(dst_addr),
+        &src_addr,
+        &dst_addr,
         &mut icmp_packet,
         &smoltcp::phy::ChecksumCapabilities::default(),
     );
@@ -607,8 +607,8 @@ pub fn parse_neighbor_advertisement(frame: &[u8]) -> Option<NeighborAdvertisemen
     }
 
     let repr = Icmpv6Repr::parse(
-        &IpAddress::Ipv6(ipv6.src_addr()),
-        &IpAddress::Ipv6(ipv6.dst_addr()),
+        &ipv6.src_addr(),
+        &ipv6.dst_addr(),
         &icmp,
         &smoltcp::phy::ChecksumCapabilities::default(),
     )
@@ -626,8 +626,8 @@ pub fn parse_neighbor_advertisement(frame: &[u8]) -> Option<NeighborAdvertisemen
         })?;
 
         Some(NeighborAdvertisement {
-            src_ip: ipv6.src_addr().as_bytes().try_into().ok()?,
-            target_ip: target_addr.as_bytes().try_into().ok()?,
+            src_ip: ipv6.src_addr().octets().try_into().ok()?,
+            target_ip: target_addr.octets(),
             target_mac,
             router: flags.contains(NdiscNeighborFlags::ROUTER),
             solicited: flags.contains(NdiscNeighborFlags::SOLICITED),
@@ -639,7 +639,7 @@ pub fn parse_neighbor_advertisement(frame: &[u8]) -> Option<NeighborAdvertisemen
 
 /// Build a Router Solicitation packet
 pub fn router_solicitation(src_mac: [u8; 6], src_ip: [u8; 16]) -> Vec<u8> {
-    let src_addr = smoltcp::wire::Ipv6Address::from_bytes(&src_ip);
+    let src_addr = smoltcp::wire::Ipv6Address::from_octets(src_ip);
     let dst_addr = smoltcp::wire::Ipv6Address::new(0xff02, 0, 0, 0, 0, 0, 0, 2); // all-routers
 
     let lladdr = RawHardwareAddress::from_bytes(&src_mac);
@@ -675,8 +675,8 @@ pub fn router_solicitation(src_mac: [u8; 6], src_ip: [u8; 16]) -> Vec<u8> {
 
     let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
     icmp_repr.emit(
-        &IpAddress::Ipv6(src_addr),
-        &IpAddress::Ipv6(dst_addr),
+        &src_addr,
+        &dst_addr,
         &mut icmp_packet,
         &smoltcp::phy::ChecksumCapabilities::default(),
     );
@@ -715,8 +715,8 @@ pub fn parse_router_advertisement(frame: &[u8]) -> Option<RouterAdvertisement> {
     }
 
     let repr = Icmpv6Repr::parse(
-        &IpAddress::Ipv6(ipv6.src_addr()),
-        &IpAddress::Ipv6(ipv6.dst_addr()),
+        &ipv6.src_addr(),
+        &ipv6.dst_addr(),
         &icmp,
         &smoltcp::phy::ChecksumCapabilities::default(),
     )
@@ -737,10 +737,10 @@ pub fn parse_router_advertisement(frame: &[u8]) -> Option<RouterAdvertisement> {
             [bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]]
         })?;
 
-        let prefix = prefix_info.map(|p| (p.prefix.as_bytes().try_into().unwrap(), p.prefix_len));
+        let prefix = prefix_info.map(|p| (p.prefix.octets(), p.prefix_len));
 
         Some(RouterAdvertisement {
-            src_ip: ipv6.src_addr().as_bytes().try_into().ok()?,
+            src_ip: ipv6.src_addr().octets().try_into().ok()?,
             src_mac,
             hop_limit,
             managed: flags.contains(NdiscRouterFlags::MANAGED),
@@ -825,8 +825,8 @@ pub fn dhcpv6_request(
 
 /// Wrap DHCPv6 message in UDP/IPv6/Ethernet
 fn wrap_dhcpv6_in_udp_ip_eth(dhcp_data: Vec<u8>, client_mac: [u8; 6], src_ip: [u8; 16]) -> Vec<u8> {
-    let src_addr = smoltcp::wire::Ipv6Address::from_bytes(&src_ip);
-    let dst_addr = smoltcp::wire::Ipv6Address::from_bytes(&DHCPV6_ALL_SERVERS);
+    let src_addr = smoltcp::wire::Ipv6Address::from_octets(src_ip);
+    let dst_addr = smoltcp::wire::Ipv6Address::from_octets(DHCPV6_ALL_SERVERS);
 
     let udp_repr = UdpRepr {
         src_port: DHCPV6_CLIENT_PORT,
@@ -1010,8 +1010,8 @@ pub fn icmpv6_echo_request(
 ) -> Vec<u8> {
     use smoltcp::wire::Icmpv6Repr;
 
-    let src_addr = smoltcp::wire::Ipv6Address::from_bytes(&src_ip);
-    let dst_addr = smoltcp::wire::Ipv6Address::from_bytes(&dst_ip);
+    let src_addr = smoltcp::wire::Ipv6Address::from_octets(src_ip);
+    let dst_addr = smoltcp::wire::Ipv6Address::from_octets(dst_ip);
 
     let icmp_repr = Icmpv6Repr::EchoRequest {
         ident,
@@ -1044,8 +1044,8 @@ pub fn icmpv6_echo_request(
 
     let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
     icmp_repr.emit(
-        &IpAddress::Ipv6(src_addr),
-        &IpAddress::Ipv6(dst_addr),
+        &src_addr,
+        &dst_addr,
         &mut icmp_packet,
         &smoltcp::phy::ChecksumCapabilities::default(),
     );
@@ -1081,8 +1081,8 @@ pub fn parse_icmpv6_echo_reply(frame: &[u8]) -> Option<Icmpv6EchoReply> {
     }
 
     let repr = Icmpv6Repr::parse(
-        &IpAddress::Ipv6(ipv6.src_addr()),
-        &IpAddress::Ipv6(ipv6.dst_addr()),
+        &ipv6.src_addr(),
+        &ipv6.dst_addr(),
         &icmp,
         &smoltcp::phy::ChecksumCapabilities::default(),
     )
@@ -1095,8 +1095,8 @@ pub fn parse_icmpv6_echo_reply(frame: &[u8]) -> Option<Icmpv6EchoReply> {
     } = repr
     {
         Some(Icmpv6EchoReply {
-            src_ip: ipv6.src_addr().as_bytes().try_into().ok()?,
-            dst_ip: ipv6.dst_addr().as_bytes().try_into().ok()?,
+            src_ip: ipv6.src_addr().octets().try_into().ok()?,
+            dst_ip: ipv6.dst_addr().octets().try_into().ok()?,
             ident,
             seq_no,
             data: data.to_vec(),
@@ -1137,8 +1137,8 @@ pub fn parse_icmpv6_echo_request(frame: &[u8]) -> Option<Icmpv6EchoRequest> {
     }
 
     let repr = Icmpv6Repr::parse(
-        &IpAddress::Ipv6(ipv6.src_addr()),
-        &IpAddress::Ipv6(ipv6.dst_addr()),
+        &ipv6.src_addr(),
+        &ipv6.dst_addr(),
         &icmp,
         &smoltcp::phy::ChecksumCapabilities::default(),
     )
@@ -1153,8 +1153,8 @@ pub fn parse_icmpv6_echo_request(frame: &[u8]) -> Option<Icmpv6EchoRequest> {
         Some(Icmpv6EchoRequest {
             src_mac: eth.src_addr().as_bytes().try_into().ok()?,
             dst_mac: eth.dst_addr().as_bytes().try_into().ok()?,
-            src_ip: ipv6.src_addr().as_bytes().try_into().ok()?,
-            dst_ip: ipv6.dst_addr().as_bytes().try_into().ok()?,
+            src_ip: ipv6.src_addr().octets().try_into().ok()?,
+            dst_ip: ipv6.dst_addr().octets().try_into().ok()?,
             hop_limit: ipv6.hop_limit(),
             ident,
             seq_no,

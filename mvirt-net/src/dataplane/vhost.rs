@@ -15,7 +15,9 @@ use vm_memory::{
     Address, ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap, Le16,
 };
 use vmm_sys_util::epoll::EventSet;
-use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::event::{
+    EventConsumer, EventFlag, EventNotifier, new_event_consumer_and_notifier,
+};
 
 use crate::config::NicEntry;
 
@@ -76,12 +78,16 @@ pub struct VhostNetBackend {
 
     /// Stored vrings for external RX injection (set on first handle_event)
     vrings: RwLock<Option<Vec<VringRwLock>>>,
+
+    /// Exit event for signaling worker threads to terminate (consumer, notifier)
+    exit_event: (EventConsumer, EventNotifier),
 }
 
 impl VhostNetBackend {
     /// Create a new vhost-user net backend
     pub fn new(nic_config: NicEntry, shutdown: Arc<AtomicBool>) -> io::Result<Self> {
         debug!(nic_id = %nic_config.id, "Creating VhostNetBackend");
+        let exit_event = new_event_consumer_and_notifier(EventFlag::NONBLOCK)?;
         Ok(Self {
             nic_config,
             mem: RwLock::new(GuestMemoryAtomic::new(GuestMemoryMmap::new())),
@@ -90,6 +96,7 @@ impl VhostNetBackend {
             packet_handler: Mutex::new(None),
             rx_queue: Mutex::new(Vec::new()),
             vrings: RwLock::new(None),
+            exit_event,
         })
     }
 
@@ -416,8 +423,18 @@ impl VhostUserBackend for VhostNetBackend {
         }
     }
 
-    fn exit_event(&self, _thread_index: usize) -> Option<EventFd> {
-        None
+    fn exit_event(&self, _thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
+        // Clone the exit event pair for this thread
+        Some((
+            self.exit_event
+                .0
+                .try_clone()
+                .expect("Failed to clone EventConsumer"),
+            self.exit_event
+                .1
+                .try_clone()
+                .expect("Failed to clone EventNotifier"),
+        ))
     }
 }
 

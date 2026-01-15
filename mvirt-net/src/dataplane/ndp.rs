@@ -6,8 +6,8 @@
 
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, Icmpv6Message, Icmpv6Packet,
-    Icmpv6Repr, IpAddress, IpProtocol, Ipv6Address, Ipv6Packet, Ipv6Repr, NdiscNeighborFlags,
-    NdiscRepr, NdiscRouterFlags, RawHardwareAddress,
+    Icmpv6Repr, IpProtocol, Ipv6Address, Ipv6Packet, Ipv6Repr, NdiscNeighborFlags, NdiscRepr,
+    NdiscRouterFlags, RawHardwareAddress,
 };
 use tracing::debug;
 
@@ -90,8 +90,8 @@ impl NdpResponder {
         src_mac: EthernetAddress,
     ) -> Option<Vec<u8>> {
         let icmp_repr = Icmpv6Repr::parse(
-            &IpAddress::Ipv6(src_addr),
-            &IpAddress::Ipv6(dst_addr),
+            &src_addr,
+            &dst_addr,
             icmpv6,
             &smoltcp::phy::ChecksumCapabilities::default(),
         )
@@ -163,8 +163,8 @@ impl NdpResponder {
         // Build ICMPv6 packet
         let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
         icmp_repr.emit(
-            &IpAddress::Ipv6(GATEWAY_IPV6),
-            &IpAddress::Ipv6(dst_addr),
+            &GATEWAY_IPV6,
+            &dst_addr,
             &mut icmp_packet,
             &smoltcp::phy::ChecksumCapabilities::default(),
         );
@@ -223,13 +223,9 @@ impl NdpResponder {
         // For RA, use all-nodes multicast MAC if dst is multicast
         let dst_mac = if dst_addr.is_multicast() {
             // Convert IPv6 multicast to Ethernet multicast
+            let octets = dst_addr.octets();
             EthernetAddress::from_bytes(&[
-                0x33,
-                0x33,
-                dst_addr.as_bytes()[12],
-                dst_addr.as_bytes()[13],
-                dst_addr.as_bytes()[14],
-                dst_addr.as_bytes()[15],
+                0x33, 0x33, octets[12], octets[13], octets[14], octets[15],
             ])
         } else {
             // Unicast - we need the actual MAC, but for simplicity broadcast
@@ -256,8 +252,8 @@ impl NdpResponder {
         // Build ICMPv6 packet
         let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
         icmp_repr.emit(
-            &IpAddress::Ipv6(GATEWAY_IPV6),
-            &IpAddress::Ipv6(dst_addr),
+            &GATEWAY_IPV6,
+            &dst_addr,
             &mut icmp_packet,
             &smoltcp::phy::ChecksumCapabilities::default(),
         );
@@ -277,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_gateway_ipv6() {
-        assert!(GATEWAY_IPV6.is_link_local());
+        assert!(GATEWAY_IPV6.is_unicast_link_local());
     }
 
     #[test]

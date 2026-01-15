@@ -5,7 +5,7 @@
 
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, Icmpv6Packet, Icmpv6Repr,
-    IpAddress, IpProtocol, Ipv6Packet, Ipv6Repr,
+    IpProtocol, Ipv6Packet, Ipv6Repr,
 };
 use tracing::debug;
 
@@ -50,8 +50,8 @@ impl Icmpv6Responder {
 
         let icmp = Icmpv6Packet::new_checked(ipv6.payload()).ok()?;
         let icmp_repr = Icmpv6Repr::parse(
-            &IpAddress::Ipv6(ipv6.src_addr()),
-            &IpAddress::Ipv6(ipv6.dst_addr()),
+            &ipv6.src_addr(),
+            &ipv6.dst_addr(),
             &icmp,
             &smoltcp::phy::ChecksumCapabilities::default(),
         )
@@ -139,8 +139,8 @@ impl Icmpv6Responder {
         // Emit ICMPv6 packet
         let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
         icmp_repr.emit(
-            &IpAddress::Ipv6(GATEWAY_IPV6),
-            &IpAddress::Ipv6(dst_ip),
+            &GATEWAY_IPV6,
+            &dst_ip,
             &mut icmp_packet,
             &smoltcp::phy::ChecksumCapabilities::default(),
         );
@@ -159,6 +159,7 @@ impl Default for Icmpv6Responder {
 mod tests {
     use super::*;
     use smoltcp::wire::Icmpv6Message;
+    use smoltcp::wire::Ipv6Address;
 
     fn build_icmpv6_echo_request(
         src_mac: [u8; 6],
@@ -168,8 +169,8 @@ mod tests {
         seq_no: u16,
         data: &[u8],
     ) -> Vec<u8> {
-        let src_addr = smoltcp::wire::Ipv6Address::from_bytes(&src_ip);
-        let dst_addr = smoltcp::wire::Ipv6Address::from_bytes(&dst_ip);
+        let src_addr = Ipv6Address::from_octets(src_ip);
+        let dst_addr = Ipv6Address::from_octets(dst_ip);
 
         let icmp_repr = Icmpv6Repr::EchoRequest {
             ident,
@@ -202,8 +203,8 @@ mod tests {
 
         let mut icmp_packet = Icmpv6Packet::new_unchecked(ipv6_packet.payload_mut());
         icmp_repr.emit(
-            &IpAddress::Ipv6(src_addr),
-            &IpAddress::Ipv6(dst_addr),
+            &src_addr,
+            &dst_addr,
             &mut icmp_packet,
             &smoltcp::phy::ChecksumCapabilities::default(),
         );
@@ -244,7 +245,7 @@ mod tests {
         assert_eq!(ipv6.src_addr(), GATEWAY_IPV6);
         assert_eq!(
             ipv6.dst_addr(),
-            smoltcp::wire::Ipv6Address::from_bytes(&src_ip)
+            smoltcp::wire::Ipv6Address::from_octets(src_ip)
         );
         assert_eq!(ipv6.next_header(), IpProtocol::Icmpv6);
 

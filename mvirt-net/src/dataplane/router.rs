@@ -155,7 +155,7 @@ impl NetworkRouter {
                     return false;
                 }
 
-                let dst = Ipv4Addr::from(ipv4.dst_addr().0);
+                let dst = ipv4.dst_addr();
                 let target = self.lookup_ipv4(dst).map(|e| e.nic_id);
 
                 // Create modified packet with decremented TTL
@@ -176,7 +176,7 @@ impl NetworkRouter {
                     return false;
                 }
 
-                let dst = Ipv6Addr::from(ipv6.dst_addr().0);
+                let dst = ipv6.dst_addr();
 
                 // Skip link-local addresses (handled locally)
                 if dst.segments()[0] == 0xfe80 {

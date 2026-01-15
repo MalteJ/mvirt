@@ -205,7 +205,7 @@ impl Dhcpv4Server {
 
         // Build IPv4 header (broadcast to client)
         let ipv4_repr = Ipv4Repr {
-            src_addr: Ipv4Address::from_bytes(&self.server_id.octets()),
+            src_addr: Ipv4Address::from_octets(self.server_id.octets()),
             dst_addr: Ipv4Address::BROADCAST,
             next_header: IpProtocol::Udp,
             payload_len: udp_repr.header_len() + dhcp_data.len(),

@@ -98,9 +98,9 @@ mod tests {
         let arp_repr = ArpRepr::EthernetIpv4 {
             operation: ArpOperation::Request,
             source_hardware_addr: EthernetAddress::from_bytes(&sender_mac),
-            source_protocol_addr: Ipv4Address::from_bytes(&sender_ip),
+            source_protocol_addr: Ipv4Address::from_octets(sender_ip),
             target_hardware_addr: EthernetAddress::from_bytes(&[0, 0, 0, 0, 0, 0]),
-            target_protocol_addr: Ipv4Address::from_bytes(&target_ip),
+            target_protocol_addr: Ipv4Address::from_octets(target_ip),
         };
 
         let eth_repr = EthernetRepr {

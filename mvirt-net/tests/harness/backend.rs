@@ -217,7 +217,7 @@ fn run_test_backend(
     }));
 
     // Create listener
-    let listener = Listener::new(socket_path, true).expect("Failed to create listener");
+    let mut listener = Listener::new(socket_path, true).expect("Failed to create listener");
 
     eprintln!("[TEST BACKEND] Listening on {}", socket_path);
 
@@ -243,7 +243,7 @@ fn run_test_backend(
 
         eprintln!("[TEST BACKEND] Accepting connection...");
 
-        if let Err(e) = daemon.start(listener) {
+        if let Err(e) = daemon.start(&mut listener) {
             eprintln!("[TEST BACKEND] Start error: {}", e);
             break;
         }
@@ -544,7 +544,7 @@ fn run_routing_backend(
     backend: Arc<VhostNetBackend>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let listener = Listener::new(socket_path.to_string_lossy().as_ref(), true)
+    let mut listener = Listener::new(socket_path.to_string_lossy().as_ref(), true)
         .expect("Failed to create listener");
 
     eprintln!("[ROUTING BACKEND] Listening on {}", socket_path.display());
@@ -571,7 +571,7 @@ fn run_routing_backend(
 
         eprintln!("[ROUTING BACKEND] Accepting connection...");
 
-        if let Err(e) = daemon.start(listener) {
+        if let Err(e) = daemon.start(&mut listener) {
             eprintln!("[ROUTING BACKEND] Start error: {}", e);
             break;
         }

@@ -350,14 +350,17 @@ fn run_worker(
         }
 
         // Create a new listener if we don't have one (e.g., after VM disconnect)
-        let current_listener = if let Some(l) = listener.take() {
+        let mut current_listener = if let Some(l) = listener.take() {
             l
         } else {
-            info!(nic_id = %nic_id, "Creating new listener after disconnect");
+            info!(nic_id = %nic_id, socket_path = %socket_path, "Creating new listener after disconnect");
             match Listener::new(socket_path, true) {
-                Ok(l) => l,
+                Ok(l) => {
+                    info!(nic_id = %nic_id, socket_path = %socket_path, "New listener created successfully");
+                    l
+                }
                 Err(e) => {
-                    error!(nic_id = %nic_id, error = %e, "Failed to create new listener");
+                    error!(nic_id = %nic_id, socket_path = %socket_path, error = %e, "Failed to create new listener");
                     // Wait a bit before retrying
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     continue;
@@ -469,7 +472,7 @@ fn run_worker(
 
         // Start the daemon (accepts connection and spawns handler thread)
         info!(nic_id = %nic_id, "Starting vhost-user daemon");
-        if let Err(e) = daemon.start(current_listener) {
+        if let Err(e) = daemon.start(&mut current_listener) {
             error!(nic_id = %nic_id, error = %e, "Failed to start daemon");
             continue;
         }
@@ -477,9 +480,13 @@ fn run_worker(
         info!(nic_id = %nic_id, "VM connected, running vhost-user daemon");
 
         // Wait for daemon to finish (VM disconnect)
-        if let Err(e) = daemon.wait() {
+        info!(nic_id = %nic_id, "Waiting for VM to disconnect");
+        let wait_result = daemon.wait();
+        info!(nic_id = %nic_id, "VM disconnected, daemon.wait() returned");
+
+        if let Err(e) = wait_result {
             let err_str = e.to_string();
-            if err_str.contains("disconnected") {
+            if err_str.contains("disconnected") || err_str.contains("PartialMessage") {
                 // Normal VM shutdown - not an error
                 debug!(nic_id = %nic_id, "VM disconnected from vhost-user socket");
             } else {
@@ -490,9 +497,21 @@ fn run_worker(
 
         // RX thread will exit when it sees shutdown or channel disconnect
         // We don't need to explicitly join it here as it will terminate on its own
+        info!(nic_id = %nic_id, "Dropping rx_thread handle");
         drop(rx_thread);
+        info!(nic_id = %nic_id, "Dropped rx_thread handle");
 
-        info!(nic_id = %nic_id, "Waiting for new VM connection");
+        // Explicitly drop daemon to release the socket before creating a new listener
+        // The vhost-user library drops the Listener inside daemon.start(), which deletes
+        // the socket file. We need to recreate it for the next connection.
+        info!(nic_id = %nic_id, "Dropping daemon");
+        drop(daemon);
+        info!(nic_id = %nic_id, "Dropped daemon");
+
+        info!(nic_id = %nic_id, "Dropping backend");
+        drop(backend);
+        info!(nic_id = %nic_id, "Dropped backend, ready for new VM connection");
+
         // listener is None now, will be recreated at top of loop
     }
 }

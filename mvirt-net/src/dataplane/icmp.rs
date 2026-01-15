@@ -175,8 +175,8 @@ mod tests {
         };
 
         let ipv4_repr = Ipv4Repr {
-            src_addr: Ipv4Address::from_bytes(&src_ip),
-            dst_addr: Ipv4Address::from_bytes(&dst_ip),
+            src_addr: Ipv4Address::from_octets(src_ip),
+            dst_addr: Ipv4Address::from_octets(dst_ip),
             next_header: IpProtocol::Icmp,
             payload_len: icmp_repr.buffer_len(),
             hop_limit: 64,
