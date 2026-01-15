@@ -5,6 +5,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{error, info};
 
+use mvirt_log::proto::{GetVersionRequest, VersionInfo};
 use mvirt_log::{LogEntry, LogRequest, LogResponse, LogService, LogServiceServer, QueryRequest};
 
 mod storage;
@@ -29,6 +30,15 @@ pub struct MyLogService {
 
 #[tonic::async_trait]
 impl LogService for MyLogService {
+    async fn get_version(
+        &self,
+        _request: Request<GetVersionRequest>,
+    ) -> Result<Response<VersionInfo>, Status> {
+        Ok(Response::new(VersionInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }))
+    }
+
     async fn log(&self, request: Request<LogRequest>) -> Result<Response<LogResponse>, Status> {
         let req = request.into_inner();
         let entry = req

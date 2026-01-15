@@ -2,6 +2,9 @@ syntax = "proto3";
 package mvirt.zfs;
 
 service ZfsService {
+  // System
+  rpc GetVersion(GetVersionRequest) returns (VersionInfo);
+
   // Pool operations
   rpc GetPoolStats(GetPoolStatsRequest) returns (PoolStats);
 
@@ -27,6 +30,14 @@ service ZfsService {
   rpc DeleteTemplate(DeleteTemplateRequest) returns (DeleteTemplateResponse);
   rpc CloneFromTemplate(CloneFromTemplateRequest) returns (Volume);
   rpc PromoteSnapshotToTemplate(PromoteSnapshotRequest) returns (Template);
+}
+
+// === System Messages ===
+
+message GetVersionRequest {}
+
+message VersionInfo {
+  string version = 1;
 }
 
 // === Core Messages ===

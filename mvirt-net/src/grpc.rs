@@ -24,8 +24,7 @@ pub async fn reconcile_routes(store: &Store) {
     };
 
     // Collect expected routes from public networks
-    let mut expected_routes: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut expected_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for network in &networks {
         if network.is_public {
             if let Some(ref subnet) = network.ipv4_subnet {
@@ -86,7 +85,6 @@ impl NetServiceImpl {
             workers: Mutex::new(WorkerManager::new()?),
         })
     }
-
 
     /// Recover workers for existing NICs after service restart
     pub async fn recover_nics(&self) {
@@ -247,6 +245,17 @@ impl NetServiceImpl {
 
 #[tonic::async_trait]
 impl NetService for NetServiceImpl {
+    // === System operations ===
+
+    async fn get_version(
+        &self,
+        _request: Request<GetVersionRequest>,
+    ) -> Result<Response<VersionInfo>, Status> {
+        Ok(Response::new(VersionInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }))
+    }
+
     // === Network operations ===
 
     async fn create_network(

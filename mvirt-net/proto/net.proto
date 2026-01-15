@@ -2,6 +2,9 @@ syntax = "proto3";
 package mvirt.net;
 
 service NetService {
+  // System
+  rpc GetVersion(GetVersionRequest) returns (VersionInfo);
+
   // Network operations
   rpc CreateNetwork(CreateNetworkRequest) returns (Network);
   rpc GetNetwork(GetNetworkRequest) returns (Network);
@@ -15,6 +18,14 @@ service NetService {
   rpc ListNics(ListNicsRequest) returns (ListNicsResponse);
   rpc UpdateNic(UpdateNicRequest) returns (Nic);
   rpc DeleteNic(DeleteNicRequest) returns (DeleteNicResponse);
+}
+
+// === System Messages ===
+
+message GetVersionRequest {}
+
+message VersionInfo {
+  string version = 1;
 }
 
 // === Core Messages ===

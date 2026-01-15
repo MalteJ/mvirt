@@ -2,8 +2,15 @@ syntax = "proto3";
 package mvirt.log;
 
 service LogService {
+  rpc GetVersion(GetVersionRequest) returns (VersionInfo);
   rpc Log(LogRequest) returns (LogResponse);
   rpc Query(QueryRequest) returns (stream LogEntry);
+}
+
+message GetVersionRequest {}
+
+message VersionInfo {
+  string version = 1;
 }
 
 message LogEntry {

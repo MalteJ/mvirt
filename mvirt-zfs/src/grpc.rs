@@ -69,6 +69,17 @@ impl ZfsServiceImpl {
 
 #[tonic::async_trait]
 impl ZfsService for ZfsServiceImpl {
+    // === System operations ===
+
+    async fn get_version(
+        &self,
+        _request: Request<GetVersionRequest>,
+    ) -> Result<Response<VersionInfo>, Status> {
+        Ok(Response::new(VersionInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }))
+    }
+
     // === Pool operations ===
 
     async fn get_pool_stats(

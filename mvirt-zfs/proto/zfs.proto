@@ -2,6 +2,9 @@ syntax = "proto3";
 package mvirt.zfs;
 
 service ZfsService {
+  // System
+  rpc GetVersion(GetVersionRequest) returns (VersionInfo);
+
   // Pool operations
   rpc GetPoolStats(GetPoolStatsRequest) returns (PoolStats);
 
@@ -29,6 +32,14 @@ service ZfsService {
   rpc PromoteSnapshotToTemplate(PromoteSnapshotRequest) returns (Template);
 }
 
+// === System Messages ===
+
+message GetVersionRequest {}
+
+message VersionInfo {
+  string version = 1;
+}
+
 // === Core Messages ===
 
 message PoolStats {
@@ -43,7 +54,7 @@ message PoolStats {
 message Volume {
   string id = 1;                  // UUID
   string name = 2;                // e.g., "docker-01"
-  string path = 3;                // e.g., /dev/zvol/vmpool/docker-01
+  string path = 3;                // e.g., /dev/zvol/mvirt/docker-01
   uint64 volsize_bytes = 4;       // Provisioned size
   uint64 used_bytes = 5;          // Actual used (referenced)
   uint64 volblocksize = 6;
@@ -55,7 +66,7 @@ message Volume {
 message Snapshot {
   string id = 1;                  // UUID
   string name = 2;                // e.g., pre-update
-  string full_name = 3;           // e.g., vmpool/docker-01@pre-update
+  string full_name = 3;           // e.g., mvirt/docker-01@pre-update
   uint64 used_bytes = 4;
   string created_at = 5;
 }
@@ -63,7 +74,7 @@ message Snapshot {
 message Template {
   string id = 1;                  // UUID
   string name = 2;                // e.g., debian-12-base
-  string snapshot_path = 3;       // e.g., vmpool/debian-base@v1
+  string snapshot_path = 3;       // e.g., mvirt/debian-base@v1
   string source_volume = 4;
   uint64 size_bytes = 5;
   string created_at = 6;
