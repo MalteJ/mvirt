@@ -23,4 +23,5 @@ pub use dhcpv6::Dhcpv6Server;
 pub use ndp::NdpResponder;
 pub use packet::{GATEWAY_IPV4, GATEWAY_MAC};
 pub use router::Router;
+pub use vhost::VhostNetBackend;
 pub use worker::{RoutedPacket, WorkerConfig, WorkerHandle, WorkerManager};

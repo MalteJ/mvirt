@@ -12,13 +12,15 @@ The integration tests use a custom test harness that simulates the VM/frontend s
 tests/
 ├── harness/
 │   ├── mod.rs          # Module exports
-│   ├── backend.rs      # TestBackend + VhostUserBackend impl
+│   ├── backend.rs      # TestBackend (uses real VhostNetBackend)
 │   ├── client.rs       # VhostTestClient (VM-side simulation)
 │   ├── memory.rs       # Shared memory via memfd
 │   ├── virtio.rs       # Virtio queue management
 │   └── packets.rs      # Packet builders and parsers
 └── vhost_integration.rs  # Test cases
 ```
+
+The test harness uses the **real** `VhostNetBackend`, `ArpResponder`, and `Dhcpv4Server` from `src/dataplane/` - not mocks. This ensures integration tests exercise the actual production code paths.
 
 ### Key Components
 
@@ -85,10 +87,10 @@ fn test_example() {
 
 ### Test Backend Behavior
 
-When created with an IPv4 address, the backend automatically handles:
+When created with an IPv4 address, the backend uses the real `ArpResponder` and `Dhcpv4Server` implementations:
 
-- **ARP**: Responds to requests for gateway IP (169.254.0.1) with `GATEWAY_MAC`
-- **DHCP**: Responds to Discover with Offer, Request with Ack
+- **ARP**: `ArpResponder` responds to requests for gateway IP (169.254.0.1)
+- **DHCP**: `Dhcpv4Server` responds to Discover with Offer, Request with Ack
   - Assigned IP: The IPv4 passed to `TestBackend::new()`
   - Subnet mask: /32 (255.255.255.255)
   - Router: 169.254.0.1

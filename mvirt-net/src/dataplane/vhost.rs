@@ -77,7 +77,10 @@ pub struct VhostNetBackend {
 impl VhostNetBackend {
     /// Create a new vhost-user net backend
     pub fn new(nic_config: NicEntry, shutdown: Arc<AtomicBool>) -> io::Result<Self> {
-        eprintln!("[VHOST] VhostNetBackend::new() called for NIC {}", nic_config.id);
+        eprintln!(
+            "[VHOST] VhostNetBackend::new() called for NIC {}",
+            nic_config.id
+        );
         Ok(Self {
             nic_config,
             mem: RwLock::new(GuestMemoryAtomic::new(GuestMemoryMmap::new())),
@@ -260,7 +263,9 @@ impl VhostUserBackend for VhostNetBackend {
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
-        let pf = VhostUserProtocolFeatures::CONFIG | VhostUserProtocolFeatures::MQ;
+        let pf = VhostUserProtocolFeatures::CONFIG
+            | VhostUserProtocolFeatures::MQ
+            | VhostUserProtocolFeatures::REPLY_ACK;
         eprintln!("[VHOST] protocol_features() called, returning {:?}", pf);
         tracing::debug!(?pf, "protocol_features() called");
         pf
@@ -285,7 +290,10 @@ impl VhostUserBackend for VhostNetBackend {
         vrings: &[Self::Vring],
         _thread_id: usize,
     ) -> io::Result<()> {
-        eprintln!("[VHOST] handle_event called: device_event={}, evset={:?}", device_event, evset);
+        eprintln!(
+            "[VHOST] handle_event called: device_event={}, evset={:?}",
+            device_event, evset
+        );
         tracing::debug!(device_event, ?evset, "handle_event called");
         if evset != EventSet::IN {
             return Ok(());

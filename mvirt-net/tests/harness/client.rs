@@ -15,8 +15,8 @@ use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 use vm_memory::{Address, GuestAddress};
 use vmm_sys_util::eventfd::EventFd;
 
-use super::memory::{SharedMemory, MEMORY_SIZE};
-use super::virtio::{VirtioQueue, QUEUE_SIZE};
+use super::memory::{MEMORY_SIZE, SharedMemory};
+use super::virtio::{QUEUE_SIZE, VirtioQueue};
 
 /// Virtio feature flags
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;

@@ -4,8 +4,8 @@
 
 use nix::libc;
 use vm_memory::{
-    Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion,
-    GuestRegionMmap, MmapRegion,
+    Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap,
+    MmapRegion,
 };
 
 /// Size of the test memory region (2MB)

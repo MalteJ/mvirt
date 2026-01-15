@@ -13,10 +13,10 @@
 mod harness;
 
 use harness::packets::{
-    arp_request, dhcp_discover, dhcp_request, is_arp_reply, parse_arp_reply, parse_dhcp_response,
-    DhcpMessageType,
+    DhcpMessageType, arp_request, dhcp_discover, dhcp_request, is_arp_reply, parse_arp_reply,
+    parse_dhcp_response,
 };
-use harness::{TestBackend, GATEWAY_IP, GATEWAY_MAC};
+use harness::{GATEWAY_IP, GATEWAY_MAC, TestBackend};
 
 /// Virtio feature flags for assertions
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
@@ -42,7 +42,10 @@ fn test_handshake_and_feature_negotiation() {
         client.has_feature(VIRTIO_F_VERSION_1),
         "Should have VERSION_1"
     );
-    assert!(client.has_feature(VIRTIO_NET_F_MAC), "Should have MAC feature");
+    assert!(
+        client.has_feature(VIRTIO_NET_F_MAC),
+        "Should have MAC feature"
+    );
 }
 
 #[test]

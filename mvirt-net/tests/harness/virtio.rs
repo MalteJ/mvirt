@@ -183,8 +183,11 @@ impl VirtioQueue {
 
         // Update avail idx
         let idx_offset = self.avail_ring.raw_value() + 2; // offset of idx field
-        mem.write(&(avail_idx.wrapping_add(1)).to_le_bytes(), GuestAddress(idx_offset))
-            .map_err(|e| std::io::Error::other(format!("write avail idx: {e}")))?;
+        mem.write(
+            &(avail_idx.wrapping_add(1)).to_le_bytes(),
+            GuestAddress(idx_offset),
+        )
+        .map_err(|e| std::io::Error::other(format!("write avail idx: {e}")))?;
 
         Ok(desc_idx)
     }
@@ -222,8 +225,11 @@ impl VirtioQueue {
 
         // Update avail idx
         let idx_offset = self.avail_ring.raw_value() + 2;
-        mem.write(&(avail_idx.wrapping_add(1)).to_le_bytes(), GuestAddress(idx_offset))
-            .map_err(|e| std::io::Error::other(format!("write avail idx: {e}")))?;
+        mem.write(
+            &(avail_idx.wrapping_add(1)).to_le_bytes(),
+            GuestAddress(idx_offset),
+        )
+        .map_err(|e| std::io::Error::other(format!("write avail idx: {e}")))?;
 
         Ok(desc_idx)
     }

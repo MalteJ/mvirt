@@ -317,13 +317,16 @@ pub fn parse_dhcp_response(frame: &[u8]) -> Option<DhcpResponse> {
         })
         .unwrap_or_default();
 
-    let lease_time = msg.opts().get(OptionCode::AddressLeaseTime).and_then(|opt| {
-        if let DhcpOption::AddressLeaseTime(t) = opt {
-            Some(*t)
-        } else {
-            None
-        }
-    });
+    let lease_time = msg
+        .opts()
+        .get(OptionCode::AddressLeaseTime)
+        .and_then(|opt| {
+            if let DhcpOption::AddressLeaseTime(t) = opt {
+                Some(*t)
+            } else {
+                None
+            }
+        });
 
     Some(DhcpResponse {
         message_type: msg_type,

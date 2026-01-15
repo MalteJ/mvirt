@@ -10,5 +10,6 @@ pub mod memory;
 pub mod packets;
 pub mod virtio;
 
-pub use backend::{TestBackend, GATEWAY_IP, GATEWAY_MAC};
+pub use backend::{GATEWAY_IP, TestBackend};
 pub use client::VhostTestClient;
+pub use mvirt_net::dataplane::GATEWAY_MAC;
