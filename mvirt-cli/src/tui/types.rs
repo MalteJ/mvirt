@@ -92,6 +92,7 @@ pub enum View {
     Storage,
     Network,
     Logs,
+    System,
 }
 
 /// Focus within storage view
@@ -132,6 +133,26 @@ pub struct NetworkState {
     pub networks: Vec<Network>,
     pub nics: Vec<Nic>,
     pub selected_network_id: Option<String>,
+}
+
+/// Focus within system view (which section is active)
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum SystemFocus {
+    #[default]
+    Overview,
+    Cores,
+    Numa,
+    Disks,
+    Nics,
+}
+
+/// Service versions from mvirt components
+#[derive(Default, Clone)]
+pub struct ServiceVersions {
+    pub vmm: Option<String>,
+    pub zfs: Option<String>,
+    pub net: Option<String>,
+    pub log: Option<String>,
 }
 
 #[allow(dead_code)] // Storage actions will be used when modals are implemented
@@ -203,12 +224,17 @@ pub enum Action {
         volume_name: String,
     },
 
+    // System actions
+    RefreshVersions,
+
     // Network actions
     RefreshNetworks,
     CreateNetwork {
         name: String,
         ipv4_subnet: Option<String>,
         ipv6_prefix: Option<String>,
+        dns_servers: Vec<String>,
+        is_public: bool,
     },
     DeleteNetwork {
         id: String,
@@ -273,6 +299,9 @@ pub enum ActionResult {
         volume: Volume,
         logs: Vec<LogEntry>,
     },
+
+    // System results
+    VersionsRefreshed(ServiceVersions),
 
     // Network results
     NetworksRefreshed(Result<Vec<Network>, String>),

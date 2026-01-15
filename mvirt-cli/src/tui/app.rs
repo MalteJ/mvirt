@@ -17,8 +17,8 @@ use crate::tui::modals::volume_resize::VolumeResizeModal;
 use crate::tui::modals::volume_snapshot::VolumeSnapshotModal;
 use crate::tui::modals::volume_template::VolumeTemplateModal;
 use crate::tui::types::{
-    Action, ActionResult, NetworkFocus, NetworkItem, NetworkState, StorageFocus, StorageState,
-    View, VolumeSelection,
+    Action, ActionResult, NetworkFocus, NetworkItem, NetworkState, ServiceVersions, StorageFocus,
+    StorageState, SystemFocus, View, VolumeSelection,
 };
 use crate::tui::widgets::console::ConsoleSession;
 use crate::tui::widgets::file_picker::FilePicker;
@@ -94,6 +94,13 @@ pub struct App {
     // Network modals
     pub network_create_modal: Option<NetworkCreateModal>,
     pub nic_create_modal: Option<NicCreateModal>,
+
+    // System view state
+    pub system_focus: SystemFocus,
+    pub system_cores_scroll: usize,
+    pub system_disks_table_state: TableState,
+    pub system_nics_table_state: TableState,
+    pub service_versions: ServiceVersions,
 }
 
 impl App {
@@ -174,6 +181,13 @@ impl App {
             // Network modals
             network_create_modal: None,
             nic_create_modal: None,
+
+            // System view state
+            system_focus: SystemFocus::Overview,
+            system_cores_scroll: 0,
+            system_disks_table_state: TableState::default(),
+            system_nics_table_state: TableState::default(),
+            service_versions: ServiceVersions::default(),
         }
     }
 
@@ -438,6 +452,11 @@ impl App {
                 self.volume_detail_logs = logs;
                 self.status_message = None;
                 self.status_message_time = None;
+            }
+
+            // System results
+            ActionResult::VersionsRefreshed(versions) => {
+                self.service_versions = versions;
             }
 
             // Network results
@@ -740,6 +759,8 @@ impl App {
                     View::Network
                 } else if self.log_available {
                     View::Logs
+                } else if self.vm_available {
+                    View::System
                 } else {
                     View::Vm
                 }
@@ -749,6 +770,8 @@ impl App {
                     View::Network
                 } else if self.log_available {
                     View::Logs
+                } else if self.vm_available {
+                    View::System
                 } else {
                     View::Vm
                 }
@@ -756,16 +779,26 @@ impl App {
             View::Network => {
                 if self.log_available {
                     View::Logs
+                } else if self.vm_available {
+                    View::System
                 } else {
                     View::Vm
                 }
             }
-            View::Logs => View::Vm,
+            View::Logs => {
+                if self.vm_available {
+                    View::System
+                } else {
+                    View::Vm
+                }
+            }
+            View::System => View::Vm,
         };
         match self.active_view {
             View::Storage => self.refresh_storage(),
             View::Network => self.refresh_networks(),
             View::Logs => self.refresh_logs(),
+            View::System => self.refresh_system(),
             View::Vm => {}
         }
     }
@@ -776,6 +809,7 @@ impl App {
             View::Storage => self.refresh_storage(),
             View::Logs => self.refresh_logs(),
             View::Network => self.refresh_networks(),
+            View::System => self.refresh_system(),
             View::Vm => {}
         }
     }
@@ -1543,12 +1577,14 @@ impl App {
     pub fn submit_network_create(&mut self) {
         if let Some(modal) = &self.network_create_modal {
             match modal.validate() {
-                Ok((name, ipv4_subnet, ipv6_prefix)) => {
+                Ok((name, ipv4_subnet, ipv6_prefix, dns_servers, is_public)) => {
                     self.set_status(format!("Creating network {}...", name));
                     self.send_action(Action::CreateNetwork {
                         name,
                         ipv4_subnet,
                         ipv6_prefix,
+                        dns_servers,
+                        is_public,
                     });
                     self.network_create_modal = None;
                 }
@@ -1586,6 +1622,127 @@ impl App {
                 Err(e) => {
                     self.set_status(format!("Error: {}", e));
                 }
+            }
+        }
+    }
+
+    // === System Methods ===
+
+    pub fn refresh_system(&mut self) {
+        if self.vm_available {
+            let _ = self.action_tx.send(Action::RefreshSystemInfo);
+        }
+        // Fetch versions if not yet loaded
+        if self.service_versions.vmm.is_none() {
+            let _ = self.action_tx.send(Action::RefreshVersions);
+        }
+    }
+
+    pub fn toggle_system_focus(&mut self) {
+        self.system_focus = match self.system_focus {
+            SystemFocus::Overview => SystemFocus::Cores,
+            SystemFocus::Cores => SystemFocus::Numa,
+            SystemFocus::Numa => SystemFocus::Disks,
+            SystemFocus::Disks => SystemFocus::Nics,
+            SystemFocus::Nics => SystemFocus::Overview,
+        };
+    }
+
+    pub fn system_next(&mut self) {
+        let Some(info) = &self.system_info else {
+            return;
+        };
+        match self.system_focus {
+            SystemFocus::Overview | SystemFocus::Numa => {}
+            SystemFocus::Cores => {
+                if let Some(cpu) = &info.cpu {
+                    let max_scroll = cpu.cores.len().saturating_sub(10);
+                    if self.system_cores_scroll < max_scroll {
+                        self.system_cores_scroll += 1;
+                    }
+                }
+            }
+            SystemFocus::Disks => {
+                let len = info.disks.len();
+                if len == 0 {
+                    return;
+                }
+                let i = match self.system_disks_table_state.selected() {
+                    Some(i) => {
+                        if i >= len - 1 {
+                            0
+                        } else {
+                            i + 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.system_disks_table_state.select(Some(i));
+            }
+            SystemFocus::Nics => {
+                let len = info.nics.len();
+                if len == 0 {
+                    return;
+                }
+                let i = match self.system_nics_table_state.selected() {
+                    Some(i) => {
+                        if i >= len - 1 {
+                            0
+                        } else {
+                            i + 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.system_nics_table_state.select(Some(i));
+            }
+        }
+    }
+
+    pub fn system_previous(&mut self) {
+        let Some(info) = &self.system_info else {
+            return;
+        };
+        match self.system_focus {
+            SystemFocus::Overview | SystemFocus::Numa => {}
+            SystemFocus::Cores => {
+                if self.system_cores_scroll > 0 {
+                    self.system_cores_scroll -= 1;
+                }
+            }
+            SystemFocus::Disks => {
+                let len = info.disks.len();
+                if len == 0 {
+                    return;
+                }
+                let i = match self.system_disks_table_state.selected() {
+                    Some(i) => {
+                        if i == 0 {
+                            len - 1
+                        } else {
+                            i - 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.system_disks_table_state.select(Some(i));
+            }
+            SystemFocus::Nics => {
+                let len = info.nics.len();
+                if len == 0 {
+                    return;
+                }
+                let i = match self.system_nics_table_state.selected() {
+                    Some(i) => {
+                        if i == 0 {
+                            len - 1
+                        } else {
+                            i - 1
+                        }
+                    }
+                    None => 0,
+                };
+                self.system_nics_table_state.select(Some(i));
             }
         }
     }

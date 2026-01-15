@@ -8,17 +8,21 @@ pub struct NetworkCreateModal {
     pub name: String,
     pub ipv4_subnet: String,
     pub ipv6_prefix: String,
+    pub dns_servers: String,
     pub is_public: bool,
     pub focused_field: usize,
 }
 
 impl NetworkCreateModal {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            dns_servers: "8.8.8.8, 8.8.4.4".to_string(),
+            ..Default::default()
+        }
     }
 
     pub fn field_count() -> usize {
-        5 // name, ipv4_subnet, ipv6_prefix, is_public, submit
+        6 // name, ipv4_subnet, ipv6_prefix, dns_servers, is_public, submit
     }
 
     pub fn focus_next(&mut self) {
@@ -38,6 +42,7 @@ impl NetworkCreateModal {
             0 => Some(&mut self.name),
             1 => Some(&mut self.ipv4_subnet),
             2 => Some(&mut self.ipv6_prefix),
+            3 => Some(&mut self.dns_servers),
             _ => None,
         }
     }
@@ -47,21 +52,24 @@ impl NetworkCreateModal {
     }
 
     pub fn is_checkbox_field(&self) -> bool {
-        self.focused_field == 3
+        self.focused_field == 4
     }
 
     pub fn toggle_checkbox(&mut self) {
-        if self.focused_field == 3 {
+        if self.focused_field == 4 {
             self.is_public = !self.is_public;
         }
     }
 
     pub fn is_submit_field(&self) -> bool {
-        self.focused_field == 4
+        self.focused_field == 5
     }
 
-    /// Returns (name, ipv4_subnet or None, ipv6_prefix or None, is_public)
-    pub fn validate(&self) -> Result<(String, Option<String>, Option<String>, bool), String> {
+    /// Returns (name, ipv4_subnet or None, ipv6_prefix or None, dns_servers, is_public)
+    #[allow(clippy::type_complexity)]
+    pub fn validate(
+        &self,
+    ) -> Result<(String, Option<String>, Option<String>, Vec<String>, bool), String> {
         if self.name.is_empty() {
             return Err("Name is required".to_string());
         }
@@ -97,12 +105,20 @@ impl NetworkCreateModal {
             return Err("At least one of IPv4 or IPv6 must be configured".to_string());
         }
 
-        Ok((self.name.clone(), ipv4, ipv6, self.is_public))
+        // Parse DNS servers (comma or space separated)
+        let dns_servers: Vec<String> = self
+            .dns_servers
+            .split([',', ' '])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        Ok((self.name.clone(), ipv4, ipv6, dns_servers, self.is_public))
     }
 }
 
 pub fn draw(frame: &mut Frame, modal: &NetworkCreateModal) {
-    let area = centered_rect(60, 16, frame.area());
+    let area = centered_rect(60, 18, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -119,6 +135,7 @@ pub fn draw(frame: &mut Frame, modal: &NetworkCreateModal) {
             Constraint::Length(2), // Name
             Constraint::Length(2), // IPv4 Subnet
             Constraint::Length(2), // IPv6 Prefix
+            Constraint::Length(2), // DNS Servers
             Constraint::Length(2), // Public checkbox
             Constraint::Length(1), // Spacing
             Constraint::Length(2), // Submit
@@ -189,8 +206,25 @@ pub fn draw(frame: &mut Frame, modal: &NetworkCreateModal) {
     ]);
     frame.render_widget(Paragraph::new(ipv6_line), chunks[2]);
 
+    // DNS Servers field
+    let dns_style = if modal.focused_field == 3 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let dns_line = Line::from(vec![
+        Span::styled(" DNS Servers: ", Style::default().fg(Color::Cyan)),
+        Span::styled(&modal.dns_servers, dns_style),
+        if modal.focused_field == 3 {
+            Span::styled("_", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
+    ]);
+    frame.render_widget(Paragraph::new(dns_line), chunks[3]);
+
     // Public checkbox
-    let public_style = if modal.focused_field == 3 {
+    let public_style = if modal.focused_field == 4 {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::White)
@@ -204,17 +238,17 @@ pub fn draw(frame: &mut Frame, modal: &NetworkCreateModal) {
             Style::default().fg(Color::DarkGray),
         ),
     ]);
-    frame.render_widget(Paragraph::new(public_line), chunks[3]);
+    frame.render_widget(Paragraph::new(public_line), chunks[4]);
 
     // Submit button
-    let submit_style = if modal.focused_field == 4 {
+    let submit_style = if modal.focused_field == 5 {
         Style::default().fg(Color::Black).bg(Color::Cyan)
     } else {
         Style::default().fg(Color::Cyan)
     };
     frame.render_widget(
         Paragraph::new(Span::styled(" [ Create ] ", submit_style)).alignment(Alignment::Center),
-        chunks[5],
+        chunks[6],
     );
 }
 

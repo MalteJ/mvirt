@@ -11,8 +11,8 @@ use crate::net_proto::{
 use crate::proto::vm_service_client::VmServiceClient;
 use crate::proto::*;
 use crate::tui::types::{
-    Action, ActionResult, CreateVmParams, DiskSourceType, SshKeySource, SshKeysConfig,
-    StorageState, UserDataMode,
+    Action, ActionResult, CreateVmParams, DiskSourceType, ServiceVersions, SshKeySource,
+    SshKeysConfig, StorageState, UserDataMode,
 };
 use crate::zfs_proto::zfs_service_client::ZfsServiceClient;
 use crate::zfs_proto::*;
@@ -856,6 +856,52 @@ pub async fn action_worker(
                 }
             }
 
+            // === System Actions ===
+            Action::RefreshVersions => {
+                let mut versions = ServiceVersions::default();
+
+                // Query VMM version
+                if let Some(ref mut client) = vm_client {
+                    if let Ok(response) =
+                        client.get_version(crate::proto::GetVersionRequest {}).await
+                    {
+                        versions.vmm = Some(response.into_inner().version);
+                    }
+                }
+
+                // Query ZFS version
+                if let Some(ref mut client) = zfs_client {
+                    if let Ok(response) = client
+                        .get_version(crate::zfs_proto::GetVersionRequest {})
+                        .await
+                    {
+                        versions.zfs = Some(response.into_inner().version);
+                    }
+                }
+
+                // Query Net version
+                if let Some(ref mut client) = net_client {
+                    if let Ok(response) = client
+                        .get_version(crate::net_proto::GetVersionRequest {})
+                        .await
+                    {
+                        versions.net = Some(response.into_inner().version);
+                    }
+                }
+
+                // Query Log version
+                if let Some(ref mut client) = log_client {
+                    if let Ok(response) = client
+                        .get_version(mvirt_log::proto::GetVersionRequest {})
+                        .await
+                    {
+                        versions.log = Some(response.into_inner().version);
+                    }
+                }
+
+                ActionResult::VersionsRefreshed(versions)
+            }
+
             // === Network Actions ===
             Action::RefreshNetworks => {
                 if let Some(ref mut client) = net_client {
@@ -875,6 +921,8 @@ pub async fn action_worker(
                 name,
                 ipv4_subnet,
                 ipv6_prefix,
+                dns_servers,
+                is_public,
             } => {
                 if let Some(ref mut client) = net_client {
                     let req = CreateNetworkRequest {
@@ -883,8 +931,9 @@ pub async fn action_worker(
                         ipv4_subnet: ipv4_subnet.unwrap_or_default(),
                         ipv6_enabled: ipv6_prefix.is_some(),
                         ipv6_prefix: ipv6_prefix.unwrap_or_default(),
-                        dns_servers: vec![],
+                        dns_servers,
                         ntp_servers: vec![],
+                        is_public,
                     };
                     match client.create_network(req).await {
                         Ok(response) => ActionResult::NetworkCreated(Ok(response.into_inner())),
