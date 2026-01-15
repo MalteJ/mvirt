@@ -666,7 +666,8 @@ impl WorkerManager {
 
         // Create TUN device
         let tun = TunDevice::new().map_err(|e| format!("Failed to create TUN device: {e}"))?;
-        tun.bring_up().map_err(|e| format!("Failed to bring up TUN device: {e}"))?;
+        tun.bring_up()
+            .map_err(|e| format!("Failed to bring up TUN device: {e}"))?;
 
         info!(name = %tun.name(), "TUN device created and brought up");
 

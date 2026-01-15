@@ -65,7 +65,7 @@ impl TunDevice {
         }
 
         // Create TUN device via ioctl
-        let ret = unsafe { libc::ioctl(file.as_raw_fd(), TUNSETIFF, &ifr) };
+        let ret = unsafe { libc::ioctl(file.as_raw_fd(), TUNSETIFF as _, &ifr) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -128,7 +128,7 @@ impl TunDevice {
         }
 
         // SIOCGIFFLAGS
-        let ret = unsafe { libc::ioctl(sock_guard.0, libc::SIOCGIFFLAGS, &ifr) };
+        let ret = unsafe { libc::ioctl(sock_guard.0, libc::SIOCGIFFLAGS as _, &ifr) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -137,7 +137,7 @@ impl TunDevice {
         ifr.ifr_flags |= libc::IFF_UP as libc::c_short;
 
         // SIOCSIFFLAGS
-        let ret = unsafe { libc::ioctl(sock_guard.0, libc::SIOCSIFFLAGS, &ifr) };
+        let ret = unsafe { libc::ioctl(sock_guard.0, libc::SIOCSIFFLAGS as _, &ifr) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
