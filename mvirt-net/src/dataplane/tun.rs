@@ -14,6 +14,7 @@ pub const TUN_NAME: &str = "mvirt-net";
 /// TUN device flags from linux/if_tun.h
 const IFF_TUN: libc::c_short = 0x0001;
 const IFF_NO_PI: libc::c_short = 0x1000;
+const IFF_MULTI_QUEUE: libc::c_short = 0x0100; // Multi-queue TUN support
 const IFF_VNET_HDR: libc::c_short = 0x4000; // Prepend virtio_net_hdr to packets
 
 /// ioctl request code for TUNSETIFF
@@ -47,12 +48,38 @@ pub struct TunDevice {
 }
 
 impl TunDevice {
-    /// Create the global TUN device "mvirt-net"
+    /// Create a single-queue TUN device "mvirt-net"
     ///
     /// This creates a Layer 3 TUN device (raw IP packets, no Ethernet header).
-    /// The device is created with IFF_NO_PI, meaning no packet information
-    /// header is prepended to packets.
+    /// For multi-queue support, use `new_multiqueue()` instead.
     pub fn new() -> io::Result<Self> {
+        Self::create_queue(false)
+    }
+
+    /// Create multiple TUN queues for parallel packet processing
+    ///
+    /// Each queue can be handled by a separate thread/reactor for better
+    /// throughput. All queues share the same device name and IP configuration.
+    ///
+    /// # Arguments
+    /// * `num_queues` - Number of queues to create (typically = number of CPUs)
+    pub fn new_multiqueue(num_queues: usize) -> io::Result<Vec<Self>> {
+        if num_queues == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "num_queues must be > 0",
+            ));
+        }
+
+        let mut queues = Vec::with_capacity(num_queues);
+        for _ in 0..num_queues {
+            queues.push(Self::create_queue(true)?);
+        }
+        Ok(queues)
+    }
+
+    /// Internal: Create a TUN queue (single or multi-queue mode)
+    fn create_queue(multiqueue: bool) -> io::Result<Self> {
         // Open /dev/net/tun
         let file = OpenOptions::new()
             .read(true)
@@ -61,9 +88,14 @@ impl TunDevice {
 
         // Prepare ifreq struct
         // IFF_VNET_HDR enables virtio_net_hdr for GSO/TSO support
+        let mut flags = IFF_TUN | IFF_NO_PI | IFF_VNET_HDR;
+        if multiqueue {
+            flags |= IFF_MULTI_QUEUE;
+        }
+
         let mut ifr = IfReq {
             ifr_name: [0; libc::IFNAMSIZ],
-            ifr_flags: IFF_TUN | IFF_NO_PI | IFF_VNET_HDR,
+            ifr_flags: flags,
             _pad: [0; 22],
         };
 

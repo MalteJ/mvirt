@@ -38,8 +38,9 @@ pub trait ReactorBackend: Send {
 
     /// Send a packet (non-blocking)
     ///
-    /// Sends the data portion of the buffer.
-    fn send(&mut self, buf: &PoolBuffer) -> io::Result<()>;
+    /// Takes ownership of the buffer for zero-copy delivery.
+    /// The virtio header carries GSO/checksum offload info.
+    fn send(&mut self, buf: PoolBuffer, virtio_hdr: VirtioNetHdr) -> io::Result<()>;
 
     /// File descriptor for polling (if available)
     ///
@@ -105,7 +106,7 @@ impl ReactorBackend for TunBackend {
         }
     }
 
-    fn send(&mut self, buf: &PoolBuffer) -> io::Result<()> {
+    fn send(&mut self, buf: PoolBuffer, _virtio_hdr: VirtioNetHdr) -> io::Result<()> {
         // TUN expects virtio_net_hdr + IP packet
         // The buffer contains Ethernet frame, so we need to:
         // 1. Create a virtio_net_hdr (all zeros = no offload)
@@ -120,6 +121,7 @@ impl ReactorBackend for TunBackend {
         }
 
         // Create zero virtio header (no GSO, no checksum offload)
+        // We ignore the incoming virtio_hdr as TUN handles checksums itself
         let hdr = VirtioNetHdr::default();
         let hdr_bytes = hdr.as_slice();
 
@@ -132,10 +134,79 @@ impl ReactorBackend for TunBackend {
         writev(fd, &iov).map_err(io::Error::from)?;
 
         Ok(())
+        // buf dropped here, returned to pool
     }
 
     fn poll_fd(&self) -> Option<RawFd> {
         Some(self.fd)
+    }
+}
+
+// ============================================================================
+// Vhost Backend Implementation
+// ============================================================================
+
+use crossbeam_channel::TryRecvError;
+
+/// Sender for forwarding packets from VhostNetBackend to VhostBackend
+pub type VhostPacketSender = crossbeam_channel::Sender<(PoolBuffer, VirtioNetHdr)>;
+
+/// vhost-user backend wrapper for VM vNICs
+///
+/// This wraps `VhostNetBackend` to implement `ReactorBackend`.
+/// Packets from the guest arrive via an internal channel (populated by packet_handler),
+/// packets to the guest are injected via `inject_buffer_and_deliver`.
+pub struct VhostBackend {
+    backend: std::sync::Arc<super::vhost::VhostNetBackend>,
+    /// Receiver for packets from guest (via VhostNetBackend's packet_handler)
+    rx: crossbeam_channel::Receiver<(PoolBuffer, VirtioNetHdr)>,
+}
+
+impl VhostBackend {
+    /// Create a new vhost backend wrapper
+    ///
+    /// Returns the backend and a sender that should be used in the packet_handler
+    /// to forward packets from the guest to the Reactor.
+    pub fn new(
+        backend: std::sync::Arc<super::vhost::VhostNetBackend>,
+    ) -> (Self, VhostPacketSender) {
+        let (tx, rx) = crossbeam_channel::bounded(1024);
+        (Self { backend, rx }, tx)
+    }
+
+    /// Get reference to the underlying VhostNetBackend
+    pub fn backend(&self) -> &std::sync::Arc<super::vhost::VhostNetBackend> {
+        &self.backend
+    }
+}
+
+impl ReactorBackend for VhostBackend {
+    fn try_recv(&mut self, buf: &mut PoolBuffer) -> io::Result<RecvResult> {
+        // Receive packet from the channel (populated by VhostNetBackend's packet_handler)
+        match self.rx.try_recv() {
+            Ok((packet, _virtio_hdr)) => {
+                // Copy packet data to the provided buffer
+                // Note: This is a copy, but it's fast (memcpy) and keeps the trait simple
+                let data = packet.data();
+                let write_area = buf.write_area();
+                let len = data.len().min(write_area.len());
+                write_area[..len].copy_from_slice(&data[..len]);
+                Ok(RecvResult::Packet(len))
+            }
+            Err(TryRecvError::Empty) => Ok(RecvResult::WouldBlock),
+            Err(TryRecvError::Disconnected) => Ok(RecvResult::Done),
+        }
+    }
+
+    fn send(&mut self, buf: PoolBuffer, virtio_hdr: VirtioNetHdr) -> io::Result<()> {
+        // Inject packet to guest's RX queue (zero-copy)
+        self.backend.inject_buffer_and_deliver(buf, virtio_hdr);
+        Ok(())
+    }
+
+    fn poll_fd(&self) -> Option<RawFd> {
+        // No fd to poll - packets come via channel from VhostUserDaemon thread
+        None
     }
 }
 

@@ -20,7 +20,16 @@ use tracing::debug;
 use super::buffer::PoolBuffer;
 use super::packet::{GATEWAY_MAC, parse_ethernet};
 use super::vhost::VirtioNetHdr;
-use super::worker::RoutedPacket;
+
+/// A packet routed to a target NIC (zero-copy via PoolBuffer)
+pub struct RoutedPacket {
+    /// Target NIC ID
+    pub target_nic_id: String,
+    /// Raw Ethernet frame in PoolBuffer
+    pub buffer: PoolBuffer,
+    /// Virtio-net header with GSO/checksum offload metadata
+    pub virtio_hdr: VirtioNetHdr,
+}
 
 /// Result of routing a packet
 pub enum RouteResult {
@@ -378,6 +387,12 @@ impl NetworkRouter {
     #[inline]
     pub fn lookup_ipv6(&self, addr: Ipv6Addr) -> Option<RouteEntry> {
         self.routing.load().lookup_ipv6(addr).cloned()
+    }
+
+    /// Get the NIC channel for a given NIC ID - LOCK-FREE
+    #[inline]
+    pub fn get_nic_channel(&self, nic_id: &str) -> Option<NicChannel> {
+        self.routing.load().get_nic_channel(nic_id).cloned()
     }
 
     /// Route a packet to its destination (TRUE zero-copy path, LOCK-FREE lookups)

@@ -5,7 +5,7 @@ use tracing::{info, warn};
 
 use crate::audit::NetAuditLogger;
 use crate::config::{NetworkEntry, NicEntry, NicEntryBuilder, NicState};
-use crate::dataplane::WorkerManager;
+use crate::dataplane::ReactorManager;
 use crate::proto::net_service_server::NetService;
 use crate::proto::*;
 use crate::store::Store;
@@ -69,7 +69,7 @@ pub struct NetServiceImpl {
     socket_dir: String,
     store: Arc<Store>,
     audit: Arc<NetAuditLogger>,
-    workers: Mutex<WorkerManager>,
+    reactors: Mutex<ReactorManager>,
 }
 
 impl NetServiceImpl {
@@ -82,13 +82,13 @@ impl NetServiceImpl {
             socket_dir,
             store,
             audit,
-            workers: Mutex::new(WorkerManager::new()?),
+            reactors: Mutex::new(ReactorManager::new()?),
         })
     }
 
-    /// Recover workers for existing NICs after service restart
+    /// Recover reactors for existing NICs after service restart
     pub async fn recover_nics(&self) {
-        info!("Recovering workers for existing NICs");
+        info!("Recovering reactors for existing NICs");
 
         let nics = match self.store.list_nics(None).await {
             Ok(nics) => nics,
@@ -112,11 +112,11 @@ impl NetServiceImpl {
                 }
             };
 
-            // Start worker for this NIC
-            if let Err(e) = self.workers.lock().unwrap().start(nic.clone(), network) {
-                warn!(nic_id = %nic.id, error = %e, "Failed to recover worker for NIC");
+            // Start reactor for this NIC
+            if let Err(e) = self.reactors.lock().unwrap().start(nic.clone(), network) {
+                warn!(nic_id = %nic.id, error = %e, "Failed to recover reactor for NIC");
             } else {
-                info!(nic_id = %nic.id, socket = %nic.socket_path, "Recovered worker for NIC");
+                info!(nic_id = %nic.id, socket = %nic.socket_path, "Recovered reactor for NIC");
             }
         }
     }
@@ -544,7 +544,7 @@ impl NetService for NetServiceImpl {
             self.audit.network_deleted(&req.id, &network.name).await;
 
             // Clean up the network's router
-            self.workers.lock().unwrap().remove_network(&req.id);
+            self.reactors.lock().unwrap().remove_network(&req.id);
         }
 
         Ok(Response::new(DeleteNetworkResponse {
@@ -708,16 +708,16 @@ impl NetService for NetServiceImpl {
             )
             .await;
 
-        // Spawn vhost-user worker thread
+        // Spawn vhost-user reactor
         if let Err(e) = self
-            .workers
+            .reactors
             .lock()
             .unwrap()
             .start(entry.clone(), network.clone())
         {
-            warn!(nic_id = %entry.id, error = %e, "Failed to start vhost-user worker");
+            warn!(nic_id = %entry.id, error = %e, "Failed to start vhost-user reactor");
             return Err(Status::internal(format!(
-                "Failed to start vhost-user worker: {e}"
+                "Failed to start vhost-user reactor: {e}"
             )));
         }
 
@@ -849,10 +849,10 @@ impl NetService for NetServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("NIC not found"))?;
 
-        // Stop vhost-user worker thread
-        if let Err(e) = self.workers.lock().unwrap().stop(&nic.id) {
-            // Not fatal - worker might not be running (e.g., after restart)
-            warn!(nic_id = %nic.id, error = %e, "Failed to stop worker (may not be running)");
+        // Stop vhost-user reactor
+        if let Err(e) = self.reactors.lock().unwrap().stop(&nic.id) {
+            // Not fatal - reactor might not be running (e.g., after restart)
+            warn!(nic_id = %nic.id, error = %e, "Failed to stop reactor (may not be running)");
         }
 
         // Deallocate addresses
