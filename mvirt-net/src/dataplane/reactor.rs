@@ -273,6 +273,8 @@ pub struct Reactor<B: ReactorBackend> {
     config: ReactorConfig,
     /// Shutdown signal
     shutdown: Receiver<()>,
+    /// Pending inbox packet from poll_with_timeout (avoids message loss)
+    pending_inbox: Option<InboundPacket>,
 }
 
 impl<B: ReactorBackend> Reactor<B> {
@@ -303,6 +305,7 @@ impl<B: ReactorBackend> Reactor<B> {
             handlers,
             config,
             shutdown,
+            pending_inbox: None,
         };
 
         (reactor, outbox)
@@ -327,12 +330,17 @@ impl<B: ReactorBackend> Reactor<B> {
             // 2. Process backend RX (packets from device)
             did_work |= self.process_backend_rx();
 
-            // 3. Process completions (e.g., TX completions for vhost)
+            // 3. Flush RX queue to guest (single signal for all packets - interrupt coalescing)
+            if let Err(e) = self.backend.flush_rx() {
+                trace!(reactor_id = %self.config.id, error = %e, "Flush RX failed");
+            }
+
+            // 4. Process completions (e.g., TX completions for vhost)
             if let Err(e) = self.backend.process_completions() {
                 warn!(reactor_id = %self.config.id, error = %e, "Completion processing failed");
             }
 
-            // 4. If no work, poll with timeout
+            // 5. If no work, poll with timeout
             if !did_work {
                 self.poll_with_timeout();
             }
@@ -344,6 +352,14 @@ impl<B: ReactorBackend> Reactor<B> {
     /// Process packets from inbox (other reactors)
     fn process_inbox(&mut self) -> bool {
         let mut count = 0;
+
+        // First, process any pending packet from poll_with_timeout
+        if let Some(packet) = self.pending_inbox.take() {
+            count += 1;
+            if let Err(e) = self.backend.send(packet.buffer, packet.virtio_hdr) {
+                trace!(reactor_id = %self.config.id, error = %e, "Failed to send to backend");
+            }
+        }
 
         while count < BATCH_LIMIT {
             match self.inbox.try_recv() {
@@ -483,12 +499,8 @@ impl<B: ReactorBackend> Reactor<B> {
                 if ip_data.len() < 20 {
                     return;
                 }
-                let dst_ip = std::net::Ipv4Addr::new(
-                    ip_data[16],
-                    ip_data[17],
-                    ip_data[18],
-                    ip_data[19],
-                );
+                let dst_ip =
+                    std::net::Ipv4Addr::new(ip_data[16], ip_data[17], ip_data[18], ip_data[19]);
 
                 // Look up destination in routing table
                 let Some(entry) = self.router.lookup_ipv4(dst_ip) else {
@@ -763,10 +775,7 @@ impl<B: ReactorBackend> Reactor<B> {
             // No local route, send to TUN for internet
             // Pass through virtio_hdr so TUN can compute checksum if needed
             if let Some(sender) = self.registry.get_tun(&self.config.network_id) {
-                let _ = sender.try_send(InboundPacket {
-                    buffer,
-                    virtio_hdr,
-                });
+                let _ = sender.try_send(InboundPacket { buffer, virtio_hdr });
             }
         } else {
             debug!(reactor_id = %self.config.id, %dst_ip, "No route for IPv4 (non-public network)");
@@ -798,10 +807,7 @@ impl<B: ReactorBackend> Reactor<B> {
             // No local route, send to TUN for internet
             // Pass through virtio_hdr so TUN can compute checksum if needed
             if let Some(sender) = self.registry.get_tun(&self.config.network_id) {
-                let _ = sender.try_send(InboundPacket {
-                    buffer,
-                    virtio_hdr,
-                });
+                let _ = sender.try_send(InboundPacket { buffer, virtio_hdr });
             }
         } else {
             debug!(reactor_id = %self.config.id, %dst_ip, "No route for IPv6 (non-public network)");
@@ -809,14 +815,17 @@ impl<B: ReactorBackend> Reactor<B> {
     }
 
     /// Poll with timeout when idle
-    fn poll_with_timeout(&self) {
+    fn poll_with_timeout(&mut self) {
         if let Some(fd) = self.backend.poll_fd() {
             let poll_fd = PollFd::new(unsafe { BorrowedFd::borrow_raw(fd) }, PollFlags::POLLIN);
             // 1ms timeout
             let _ = poll(&mut [poll_fd], PollTimeout::from(1u16));
         } else {
-            // No fd to poll, just sleep briefly
-            std::thread::sleep(Duration::from_millis(1));
+            // No fd to poll - wait on inbox channel with timeout
+            // Store received packet for processing in next iteration
+            if let Ok(packet) = self.inbox.recv_timeout(Duration::from_millis(1)) {
+                self.pending_inbox = Some(packet);
+            }
         }
     }
 }

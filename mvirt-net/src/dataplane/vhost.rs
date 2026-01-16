@@ -191,8 +191,11 @@ impl VhostNetBackend {
         self.rx_queue.push(RxItem::Buffer(buffer, virtio_hdr));
     }
 
-    /// Inject a zero-copy buffer and immediately deliver it to the guest
+    /// Inject a zero-copy buffer to the RX queue for later delivery
     /// This is the main entry point for routed packets from other vNICs
+    ///
+    /// NOTE: This only queues the packet. Call `flush_rx_queue()` to deliver
+    /// all pending packets to the guest with a single signal (interrupt coalescing).
     pub fn inject_buffer_and_deliver(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
         trace!(
             packet_len = buffer.len,
@@ -200,16 +203,7 @@ impl VhostNetBackend {
             "Injecting buffer to RX queue"
         );
         self.rx_queue.push(RxItem::Buffer(buffer, virtio_hdr));
-
-        // Try to deliver immediately if vrings are available
-        let vrings_guard = self.vrings.read().unwrap();
-        if let Some(ref vrings) = *vrings_guard
-            && let Some(rx_vring) = vrings.get(RX_QUEUE as usize)
-        {
-            let _ = self.process_rx(rx_vring);
-            // Always signal for external packets - guest may be idle
-            let _ = rx_vring.signal_used_queue();
-        }
+        // No immediate delivery - Reactor calls flush_rx_queue() after batch processing
     }
 
     /// Inject a batch of zero-copy buffers and deliver them with a single signal
@@ -237,6 +231,33 @@ impl VhostNetBackend {
             let _ = self.process_rx(rx_vring);
             // Signal once for the whole batch
             let _ = rx_vring.signal_used_queue();
+        }
+    }
+
+    /// Flush all pending RX packets to guest and signal once (interrupt coalescing)
+    ///
+    /// Called by the Reactor after batch processing to deliver all queued packets
+    /// with a single eventfd write, reducing syscall overhead.
+    ///
+    /// Returns Ok(true) if packets were delivered and guest was signaled.
+    pub fn flush_rx_queue(&self) -> io::Result<bool> {
+        if self.rx_queue.is_empty() {
+            return Ok(false);
+        }
+
+        let vrings_guard = self.vrings.read().unwrap();
+        if let Some(ref vrings) = *vrings_guard
+            && let Some(rx_vring) = vrings.get(RX_QUEUE as usize)
+        {
+            let needs_signal = self.process_rx(rx_vring)?;
+            if needs_signal {
+                rx_vring
+                    .signal_used_queue()
+                    .map_err(|e| io::Error::other(format!("Failed to signal: {e}")))?;
+            }
+            Ok(needs_signal)
+        } else {
+            Ok(false)
         }
     }
 

@@ -551,6 +551,8 @@ fn run_rx_injection(
                 );
                 // Zero-copy injection - pass buffer and virtio header directly
                 backend.inject_buffer_and_deliver(packet.buffer, packet.virtio_hdr);
+                // Flush the RX queue to deliver packets to guest (interrupt coalescing)
+                let _ = backend.flush_rx_queue();
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,

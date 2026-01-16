@@ -17,7 +17,10 @@ use super::vhost::VirtioNetHdr;
 /// Result of a receive operation
 pub enum RecvResult {
     /// Successfully received a packet with the given length and virtio header
-    Packet { len: usize, virtio_hdr: VirtioNetHdr },
+    Packet {
+        len: usize,
+        virtio_hdr: VirtioNetHdr,
+    },
     /// No packet available (would block)
     WouldBlock,
     /// Backend is done (e.g., connection closed)
@@ -52,6 +55,15 @@ pub trait ReactorBackend: Send {
     /// Called each iteration of the event loop. Used by vhost-user
     /// to process TX completions and return buffers to the guest.
     fn process_completions(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Flush pending RX packets to device (interrupt coalescing for vhost backends)
+    ///
+    /// Called by the Reactor after processing inbox packets to deliver all
+    /// queued packets with a single signal, reducing syscall overhead.
+    /// Default implementation is a no-op for backends that don't need this.
+    fn flush_rx(&mut self) -> io::Result<()> {
         Ok(())
     }
 
@@ -215,6 +227,12 @@ impl ReactorBackend for VhostBackend {
     fn poll_fd(&self) -> Option<RawFd> {
         // No fd to poll - packets come via channel from VhostUserDaemon thread
         None
+    }
+
+    fn flush_rx(&mut self) -> io::Result<()> {
+        // Flush all pending RX packets to guest with a single signal
+        self.backend.flush_rx_queue()?;
+        Ok(())
     }
 }
 
