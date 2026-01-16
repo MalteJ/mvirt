@@ -20,7 +20,7 @@ use nix::libc;
 use tracing::{debug, error, info, trace, warn};
 use vhost::vhost_user::Listener;
 use vhost_user_backend::VhostUserDaemon;
-use vm_memory::GuestMemoryAtomic;
+use vm_memory::{ByteValued, GuestMemoryAtomic};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::config::{NetworkEntry, NicEntry};
@@ -33,9 +33,9 @@ use super::icmpv6::Icmpv6Responder;
 use super::ndp::NdpResponder;
 use super::router::{NetworkRouter, NicChannel, RouteResult};
 use super::tun::TunDevice;
-use super::vhost::VhostNetBackend;
+use super::vhost::{VhostNetBackend, VirtioNetHdr};
 
-use super::buffer::{BufferPool, PoolBuffer};
+use super::buffer::{BufferPool, ETH_HEADROOM, PoolBuffer, VIRTIO_HDR_SIZE};
 
 /// Message for inter-worker routing (zero-copy)
 pub struct RoutedPacket {
@@ -49,6 +49,8 @@ pub struct RoutedPacket {
 pub struct TunPacket {
     /// Raw IP packet (no Ethernet header) in PoolBuffer
     pub buffer: PoolBuffer,
+    /// Virtio-net header with GSO/checksum offload metadata
+    pub virtio_hdr: VirtioNetHdr,
 }
 
 /// Configuration for a worker thread
@@ -305,7 +307,8 @@ impl PacketProcessor {
     }
 
     /// Route a packet to another vNIC or internet (consumes PoolBuffer for zero-copy)
-    fn route(&self, buffer: PoolBuffer) {
+    /// The virtio_hdr contains GSO/checksum offload info for TUN packets
+    fn route(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
         let len = buffer.len;
         match self.router.route_packet(&self.nic_id, buffer) {
             RouteResult::Routed => {
@@ -313,10 +316,18 @@ impl PacketProcessor {
             }
             RouteResult::ToInternet(buf) => {
                 if let Some(ref tx) = self.tun_tx {
-                    if let Err(e) = tx.send(TunPacket { buffer: buf }) {
+                    // Pass virtio header for GSO/checksum offload
+                    if let Err(e) = tx.send(TunPacket {
+                        buffer: buf,
+                        virtio_hdr,
+                    }) {
                         debug!(nic_id = %self.nic_id, error = %e, "Failed to send packet to TUN");
                     } else {
-                        debug!(nic_id = %self.nic_id, "Sent packet to TUN for internet routing");
+                        debug!(
+                            nic_id = %self.nic_id,
+                            gso_type = virtio_hdr.gso_type,
+                            "Sent packet to TUN for internet routing"
+                        );
                     }
                 } else {
                     debug!(nic_id = %self.nic_id, "ToInternet packet but no TUN available");
@@ -493,7 +504,7 @@ fn run_worker(
 
         // Clone backend for use in packet handler (for injecting protocol responses)
         let backend_for_handler = backend.clone();
-        backend.set_packet_handler(Box::new(move |buffer: PoolBuffer| {
+        backend.set_packet_handler(Box::new(move |buffer: PoolBuffer, virtio_hdr: VirtioNetHdr| {
             // First try protocol handlers (ARP, DHCP, ICMP, etc.)
             // These just read the data and may return a response
             if let Some(response) = processor.try_protocols(buffer.data()) {
@@ -504,7 +515,8 @@ fn run_worker(
             }
 
             // No protocol match - route the packet (zero-copy, consumes buffer)
-            processor.route(buffer);
+            // Pass virtio_hdr for GSO/checksum offload to TUN
+            processor.route(buffer, virtio_hdr);
         }));
 
         // Spawn RX injection thread to handle routed packets from other vNICs
@@ -900,14 +912,63 @@ fn run_tun_io(
             match tun_rx.try_recv() {
                 Ok(packet) => {
                     did_work = true;
-                    let io_slice = packet.buffer.as_io_slice();
+                    // Adjust virtio header offsets: VM sends offsets relative to
+                    // Ethernet frame, but TUN operates on raw IP packets (no Ethernet).
+                    // Subtract ETH_HEADROOM (14) from csum_start and hdr_len.
+                    let mut hdr = packet.virtio_hdr;
+                    let eth_offset = ETH_HEADROOM as u16;
+                    let orig_csum_start = hdr.csum_start.to_native();
+                    let orig_hdr_len = hdr.hdr_len.to_native();
+                    if orig_csum_start >= eth_offset {
+                        hdr.csum_start = (orig_csum_start - eth_offset).into();
+                    }
+                    if orig_hdr_len >= eth_offset {
+                        hdr.hdr_len = (orig_hdr_len - eth_offset).into();
+                    }
+
+                    let payload_len = packet.buffer.len;
+                    debug!(
+                        flags = hdr.flags,
+                        gso_type = hdr.gso_type,
+                        orig_hdr_len,
+                        orig_csum_start,
+                        csum_offset = hdr.csum_offset.to_native(),
+                        gso_size = hdr.gso_size.to_native(),
+                        adj_hdr_len = hdr.hdr_len.to_native(),
+                        adj_csum_start = hdr.csum_start.to_native(),
+                        payload_len,
+                        "TUN write virtio header"
+                    );
+
+                    // Use scatter-gather I/O: virtio header + payload
+                    // With IFF_VNET_HDR, kernel expects virtio_net_hdr prepended
+                    let hdr_bytes = hdr.as_slice();
+                    let payload = packet.buffer.as_io_slice();
+                    let iov = [
+                        std::io::IoSlice::new(hdr_bytes),
+                        std::io::IoSlice::new(payload.as_ref()),
+                    ];
                     let fd = unsafe { BorrowedFd::borrow_raw(tun_fd) };
-                    match writev(fd, &[std::io::IoSlice::new(io_slice.as_ref())]) {
+                    match writev(fd, &iov) {
                         Ok(written) => {
-                            trace!(len = written, "Wrote packet to TUN");
+                            trace!(
+                                len = written,
+                                gso_type = hdr.gso_type,
+                                "Wrote packet to TUN with virtio header"
+                            );
                         }
                         Err(e) => {
-                            warn!(error = %e, "Failed to write packet to TUN");
+                            warn!(
+                                error = %e,
+                                flags = hdr.flags,
+                                gso_type = hdr.gso_type,
+                                hdr_len = hdr.hdr_len.to_native(),
+                                csum_start = hdr.csum_start.to_native(),
+                                csum_offset = hdr.csum_offset.to_native(),
+                                gso_size = hdr.gso_size.to_native(),
+                                payload_len,
+                                "Failed to write packet to TUN"
+                            );
                         }
                     }
                 }
@@ -935,8 +996,15 @@ fn run_tun_io(
 
                     match tun.read_packet(buffer.write_area()) {
                         Ok(len) => {
-                            buffer.len = len;
-                            route_tun_packet_to_nic_buffer(buffer, &routers, &pool);
+                            // With IFF_VNET_HDR, kernel prepends 12-byte virtio_net_hdr
+                            // Skip it to get the raw IP packet
+                            if len > VIRTIO_HDR_SIZE {
+                                buffer.start += VIRTIO_HDR_SIZE;
+                                buffer.len = len - VIRTIO_HDR_SIZE;
+                                route_tun_packet_to_nic_buffer(buffer, &routers, &pool);
+                            } else {
+                                trace!(len, "TUN packet too small, dropping");
+                            }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(e) => {

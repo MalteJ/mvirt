@@ -183,7 +183,7 @@ fn run_test_backend(
     // Clone backend for use in packet handler
     let backend_for_handler = backend.clone();
 
-    backend.set_packet_handler(Box::new(move |buffer| {
+    backend.set_packet_handler(Box::new(move |buffer, _virtio_hdr| {
         let packet = buffer.data();
 
         // Try ARP first (IPv4)
@@ -416,7 +416,7 @@ impl RoutingTestBackend {
         let nic_id_a = nic_a.id.clone();
         let backend_a_for_handler = backend_a.clone();
 
-        backend_a.set_packet_handler(Box::new(move |buffer| {
+        backend_a.set_packet_handler(Box::new(move |buffer, _virtio_hdr| {
             let packet = buffer.data();
 
             // Try ARP
@@ -440,7 +440,7 @@ impl RoutingTestBackend {
         let nic_id_b = nic_b.id.clone();
         let backend_b_for_handler = backend_b.clone();
 
-        backend_b.set_packet_handler(Box::new(move |buffer| {
+        backend_b.set_packet_handler(Box::new(move |buffer, _virtio_hdr| {
             let packet = buffer.data();
 
             // Try ARP

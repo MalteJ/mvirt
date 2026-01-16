@@ -14,12 +14,19 @@ pub const TUN_NAME: &str = "mvirt-net";
 /// TUN device flags from linux/if_tun.h
 const IFF_TUN: libc::c_short = 0x0001;
 const IFF_NO_PI: libc::c_short = 0x1000;
+const IFF_VNET_HDR: libc::c_short = 0x4000; // Prepend virtio_net_hdr to packets
 
 /// ioctl request code for TUNSETIFF
 const TUNSETIFF: libc::c_ulong = 0x400454ca;
 
 /// ioctl request code for TUNSETOFFLOAD (enable TSO/checksum offload)
 const TUNSETOFFLOAD: libc::c_ulong = 0x400454d0;
+
+/// ioctl request code for TUNSETVNETHDRSZ (set virtio header size)
+const TUNSETVNETHDRSZ: libc::c_ulong = 0x400454d8;
+
+/// Size of virtio_net_hdr with num_buffers field (12 bytes)
+const VNET_HDR_SIZE: libc::c_int = 12;
 
 /// TUN offload flags (from linux/if_tun.h)
 const TUN_F_CSUM: libc::c_uint = 0x01; // Checksum offload
@@ -54,9 +61,10 @@ impl TunDevice {
             .open("/dev/net/tun")?;
 
         // Prepare ifreq struct
+        // IFF_VNET_HDR enables virtio_net_hdr for GSO/TSO support
         let mut ifr = IfReq {
             ifr_name: [0; libc::IFNAMSIZ],
-            ifr_flags: IFF_TUN | IFF_NO_PI,
+            ifr_flags: IFF_TUN | IFF_NO_PI | IFF_VNET_HDR,
             _pad: [0; 22],
         };
 
@@ -74,6 +82,13 @@ impl TunDevice {
 
         // Create TUN device via ioctl
         let ret = unsafe { libc::ioctl(file.as_raw_fd(), TUNSETIFF as _, &ifr) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Set virtio header size to 12 bytes (includes num_buffers field)
+        // Default is 10 bytes, but we use the full 12-byte header
+        let ret = unsafe { libc::ioctl(file.as_raw_fd(), TUNSETVNETHDRSZ as _, &VNET_HDR_SIZE) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }

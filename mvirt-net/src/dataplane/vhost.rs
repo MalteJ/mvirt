@@ -109,9 +109,9 @@ impl RxItem {
 }
 
 /// Packet handler callback type - processes TX packets
-/// Takes a PoolBuffer by ownership (zero-copy), no return value
+/// Takes a PoolBuffer by ownership (zero-copy) and the virtio header for GSO/checksum info
 /// Handler is responsible for routing and/or generating responses via inject methods
-pub type PacketHandler = Box<dyn Fn(PoolBuffer) + Send + Sync>;
+pub type PacketHandler = Box<dyn Fn(PoolBuffer, VirtioNetHdr) + Send + Sync>;
 
 /// vhost-user backend for a single vNIC
 pub struct VhostNetBackend {
@@ -298,26 +298,24 @@ impl VhostNetBackend {
 
             // Process virtio-net header and packet
             if buffer.len > VIRTIO_NET_HDR_SIZE {
-                // Parse virtio-net header to check for checksum offload
-                let hdr_data = buffer.data();
-                let flags = hdr_data[0];
-                let csum_start = u16::from_le_bytes([hdr_data[6], hdr_data[7]]);
-                let csum_offset = u16::from_le_bytes([hdr_data[8], hdr_data[9]]);
+                // Parse full virtio-net header for GSO/checksum offload
+                let virtio_hdr = {
+                    let hdr_bytes = &buffer.data()[..VIRTIO_NET_HDR_SIZE];
+                    // SAFETY: VirtioNetHdr is repr(C) and we have enough bytes
+                    *VirtioNetHdr::from_slice(hdr_bytes).unwrap()
+                };
 
                 // Strip virtio header (zero-copy - just adjust pointers)
                 buffer.strip_virtio_hdr();
 
-                // Finalize checksum if guest requested it
-                if flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
-                    finalize_checksum(buffer.data_mut(), csum_start, csum_offset);
-                }
-
-                // Pass buffer to handler (handler takes ownership, does routing/responses)
-                // Handler doesn't need packet_handler lock, so we can safely hold it
+                // Pass buffer AND virtio header to handler
+                // Handler decides whether to finalize checksum based on destination:
+                // - TUN (internet): Keep header, kernel does GSO/checksum
+                // - Local routing: Finalize checksum before forwarding
                 {
                     let handler_guard = self.packet_handler.lock().unwrap();
                     if let Some(ref handler) = *handler_guard {
-                        handler(buffer);
+                        handler(buffer, virtio_hdr);
                     }
                     // If no handler, buffer is dropped here (returned to pool)
                 }
@@ -623,57 +621,6 @@ impl VhostUserBackend for VhostNetBackend {
                 .expect("Failed to clone EventNotifier"),
         ))
     }
-}
-
-/// Finalize checksum for a packet with VIRTIO_NET_HDR_F_NEEDS_CSUM set
-///
-/// The guest has computed a partial checksum (pseudo-header) and stored it
-/// at csum_start + csum_offset. We need to:
-/// 1. Read the partial checksum
-/// 2. Compute the one's complement sum over the data from csum_start to end
-/// 3. Fold and finalize the checksum
-/// 4. Write the result back
-///
-/// # Arguments
-/// * `packet` - The full packet (Ethernet frame) as mutable slice
-/// * `csum_start` - Offset from start of Ethernet frame where checksum data begins
-/// * `csum_offset` - Offset from csum_start where the checksum field is located
-fn finalize_checksum(packet: &mut [u8], csum_start: u16, csum_offset: u16) {
-    let start = csum_start as usize;
-    let offset = csum_offset as usize;
-
-    // Validate offsets
-    if start + offset + 2 > packet.len() {
-        return;
-    }
-
-    // Compute one's complement sum over the checksummed region
-    let data = &packet[start..];
-    let mut sum: u32 = 0;
-
-    // Sum 16-bit words
-    let mut i = 0;
-    while i + 1 < data.len() {
-        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
-        i += 2;
-    }
-
-    // Handle odd byte
-    if i < data.len() {
-        sum += (data[i] as u32) << 8;
-    }
-
-    // Fold 32-bit sum to 16 bits
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    // One's complement
-    let checksum = !(sum as u16);
-
-    // Write the final checksum
-    let csum_pos = start + offset;
-    packet[csum_pos..csum_pos + 2].copy_from_slice(&checksum.to_be_bytes());
 }
 
 /// Parse MAC address string to bytes
