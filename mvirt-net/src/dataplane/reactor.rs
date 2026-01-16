@@ -386,7 +386,7 @@ impl<B: ReactorBackend> Reactor<B> {
         let mut count = 0;
 
         while count < BATCH_LIMIT {
-            // Allocate buffer
+            // Allocate buffer (may not be used for zero-copy backends)
             let Some(mut buffer) = self.pool.alloc() else {
                 warn!(reactor_id = %self.config.id, "Buffer pool exhausted");
                 break;
@@ -395,9 +395,19 @@ impl<B: ReactorBackend> Reactor<B> {
             // Try to receive
             match self.backend.try_recv(&mut buffer) {
                 Ok(RecvResult::Packet { len, virtio_hdr }) => {
+                    // Standard path: data was copied into buffer
                     count += 1;
                     buffer.len = len;
                     self.handle_rx_packet(buffer, virtio_hdr);
+                }
+                Ok(RecvResult::PacketOwned {
+                    buffer: owned_buffer,
+                    virtio_hdr,
+                }) => {
+                    // Zero-copy path: use the buffer from the channel directly
+                    // The pre-allocated buffer is dropped and returned to pool
+                    count += 1;
+                    self.handle_rx_packet(owned_buffer, virtio_hdr);
                 }
                 Ok(RecvResult::WouldBlock) => break,
                 Ok(RecvResult::Done) => {
@@ -420,7 +430,8 @@ impl<B: ReactorBackend> Reactor<B> {
         // vNIC reactors receive Ethernet frames
         if self.handlers.is_none() {
             // TUN reactor: [virtio_hdr (12B)][raw IP packet]
-            self.handle_tun_rx_packet(buffer);
+            // Pass through the virtio_hdr for checksum/GSO offload info
+            self.handle_tun_rx_packet(buffer, virtio_hdr);
             return;
         }
 
@@ -471,8 +482,8 @@ impl<B: ReactorBackend> Reactor<B> {
     /// 2. Determine IP version and extract destination IP
     /// 3. Look up destination NIC in routing table
     /// 4. Prepend Ethernet header with destination NIC's MAC
-    /// 5. Forward to the destination vNIC reactor
-    fn handle_tun_rx_packet(&mut self, mut buffer: PoolBuffer) {
+    /// 5. Forward to the destination vNIC reactor with the virtio header preserved
+    fn handle_tun_rx_packet(&mut self, mut buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
         let data = buffer.data();
 
         // Need at least virtio header + minimal IP header
@@ -590,7 +601,8 @@ impl<B: ReactorBackend> Reactor<B> {
         // Prepend Ethernet header
         buffer.prepend_eth_header(dst_mac, GATEWAY_MAC, ethertype);
 
-        // Forward to destination vNIC
+        // Forward to destination vNIC with the original virtio header
+        // (preserves checksum/GSO offload info from the TUN device)
         trace!(
             reactor_id = %self.config.id,
             dst_nic = %nic_id,
@@ -598,10 +610,16 @@ impl<B: ReactorBackend> Reactor<B> {
             "Forwarding TUN packet to vNIC"
         );
 
-        let _ = sender.try_send(InboundPacket {
-            buffer,
-            virtio_hdr: VirtioNetHdr::default(),
-        });
+        if sender
+            .try_send(InboundPacket { buffer, virtio_hdr })
+            .is_err()
+        {
+            warn!(
+                reactor_id = %self.config.id,
+                dst_nic = %nic_id,
+                "vNIC inbox full, dropping packet from TUN"
+            );
+        }
     }
 
     /// Send a reply packet (copies Vec<u8> into PoolBuffer)
@@ -733,10 +751,19 @@ impl<B: ReactorBackend> Reactor<B> {
 
         // Try L2 forwarding by MAC
         if let Some(sender) = self.registry.get_by_mac(&dst_mac) {
-            let _ = sender.try_send(InboundPacket {
-                buffer,
-                virtio_hdr: VirtioNetHdr::default(),
-            });
+            if sender
+                .try_send(InboundPacket {
+                    buffer,
+                    virtio_hdr: VirtioNetHdr::default(),
+                })
+                .is_err()
+            {
+                warn!(
+                    reactor_id = %self.config.id,
+                    dst_mac = ?dst_mac,
+                    "L2 destination inbox full, dropping packet"
+                );
+            }
             return;
         }
 
@@ -765,17 +792,34 @@ impl<B: ReactorBackend> Reactor<B> {
         // Lookup in routing table
         if let Some(entry) = self.router.lookup_ipv4(dst_ip) {
             // Route to local NIC
-            if let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id) {
-                let _ = sender.try_send(InboundPacket {
-                    buffer,
-                    virtio_hdr: VirtioNetHdr::default(),
-                });
+            if let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id)
+                && sender
+                    .try_send(InboundPacket {
+                        buffer,
+                        virtio_hdr: VirtioNetHdr::default(),
+                    })
+                    .is_err()
+            {
+                warn!(
+                    reactor_id = %self.config.id,
+                    %dst_ip,
+                    dst_nic = %entry.nic_id,
+                    "Destination NIC inbox full, dropping IPv4 packet"
+                );
             }
         } else if self.router.is_public() {
             // No local route, send to TUN for internet
             // Pass through virtio_hdr so TUN can compute checksum if needed
-            if let Some(sender) = self.registry.get_tun(&self.config.network_id) {
-                let _ = sender.try_send(InboundPacket { buffer, virtio_hdr });
+            if let Some(sender) = self.registry.get_tun(&self.config.network_id)
+                && sender
+                    .try_send(InboundPacket { buffer, virtio_hdr })
+                    .is_err()
+            {
+                warn!(
+                    reactor_id = %self.config.id,
+                    %dst_ip,
+                    "TUN inbox full, dropping IPv4 packet"
+                );
             }
         } else {
             debug!(reactor_id = %self.config.id, %dst_ip, "No route for IPv4 (non-public network)");
@@ -797,17 +841,34 @@ impl<B: ReactorBackend> Reactor<B> {
         // Lookup in routing table
         if let Some(entry) = self.router.lookup_ipv6(dst_ip) {
             // Route to local NIC
-            if let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id) {
-                let _ = sender.try_send(InboundPacket {
-                    buffer,
-                    virtio_hdr: VirtioNetHdr::default(),
-                });
+            if let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id)
+                && sender
+                    .try_send(InboundPacket {
+                        buffer,
+                        virtio_hdr: VirtioNetHdr::default(),
+                    })
+                    .is_err()
+            {
+                warn!(
+                    reactor_id = %self.config.id,
+                    %dst_ip,
+                    dst_nic = %entry.nic_id,
+                    "Destination NIC inbox full, dropping IPv6 packet"
+                );
             }
         } else if self.router.is_public() {
             // No local route, send to TUN for internet
             // Pass through virtio_hdr so TUN can compute checksum if needed
-            if let Some(sender) = self.registry.get_tun(&self.config.network_id) {
-                let _ = sender.try_send(InboundPacket { buffer, virtio_hdr });
+            if let Some(sender) = self.registry.get_tun(&self.config.network_id)
+                && sender
+                    .try_send(InboundPacket { buffer, virtio_hdr })
+                    .is_err()
+            {
+                warn!(
+                    reactor_id = %self.config.id,
+                    %dst_ip,
+                    "TUN inbox full, dropping IPv6 packet"
+                );
             }
         } else {
             debug!(reactor_id = %self.config.id, %dst_ip, "No route for IPv6 (non-public network)");
@@ -818,12 +879,16 @@ impl<B: ReactorBackend> Reactor<B> {
     fn poll_with_timeout(&mut self) {
         if let Some(fd) = self.backend.poll_fd() {
             let poll_fd = PollFd::new(unsafe { BorrowedFd::borrow_raw(fd) }, PollFlags::POLLIN);
-            // 1ms timeout
+            // 1ms timeout for fd-based backends (TUN)
             let _ = poll(&mut [poll_fd], PollTimeout::from(1u16));
         } else {
-            // No fd to poll - wait on inbox channel with timeout
-            // Store received packet for processing in next iteration
-            if let Ok(packet) = self.inbox.recv_timeout(Duration::from_millis(1)) {
+            // Channel-based backends (vhost): use very short timeout (10µs instead of 1ms)
+            // This is critical for performance! The vhost backend receives ACKs via the rx
+            // channel from VhostNetBackend, but this poll_with_timeout only waits on the
+            // inbox channel. A 1ms delay here kills TCP throughput because ACKs from the
+            // VM are delayed, causing the TCP window to close.
+            // 10µs provides a good balance between latency and CPU usage.
+            if let Ok(packet) = self.inbox.recv_timeout(Duration::from_micros(10)) {
                 self.pending_inbox = Some(packet);
             }
         }

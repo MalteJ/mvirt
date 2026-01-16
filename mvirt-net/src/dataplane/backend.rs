@@ -10,15 +10,23 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::sys::uio::writev;
 use vm_memory::ByteValued;
 
-use super::buffer::PoolBuffer;
+use super::buffer::{PoolBuffer, VIRTIO_HDR_SIZE};
 use super::tun::TunDevice;
 use super::vhost::VirtioNetHdr;
 
 /// Result of a receive operation
 pub enum RecvResult {
     /// Successfully received a packet with the given length and virtio header
+    /// The data is written into the provided buffer.
     Packet {
         len: usize,
+        virtio_hdr: VirtioNetHdr,
+    },
+    /// Successfully received a packet with zero-copy (buffer ownership transferred)
+    /// Used by VhostBackend to avoid unnecessary memcpy - the packet already
+    /// arrives as a PoolBuffer from the channel.
+    PacketOwned {
+        buffer: PoolBuffer,
         virtio_hdr: VirtioNetHdr,
     },
     /// No packet available (would block)
@@ -112,11 +120,20 @@ impl ReactorBackend for TunBackend {
     fn try_recv(&mut self, buf: &mut PoolBuffer) -> io::Result<RecvResult> {
         match self.tun.read_packet(buf.write_area()) {
             Ok(0) => Ok(RecvResult::Done),
-            Ok(n) => Ok(RecvResult::Packet {
-                len: n,
-                // TUN packets have virtio header prepended, parse it
-                virtio_hdr: VirtioNetHdr::default(),
-            }),
+            Ok(n) if n >= VIRTIO_HDR_SIZE => {
+                // TUN packets have virtio header prepended - parse it
+                // SAFETY: VirtioNetHdr is repr(C) and we verified we have enough bytes
+                let hdr_bytes = &buf.write_area()[..VIRTIO_HDR_SIZE];
+                let virtio_hdr = *VirtioNetHdr::from_slice(hdr_bytes).unwrap();
+                Ok(RecvResult::Packet { len: n, virtio_hdr })
+            }
+            Ok(n) => {
+                // Packet too small (shouldn't happen in practice)
+                Ok(RecvResult::Packet {
+                    len: n,
+                    virtio_hdr: VirtioNetHdr::default(),
+                })
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(RecvResult::WouldBlock),
             Err(e) => Err(e),
         }
@@ -201,17 +218,14 @@ impl VhostBackend {
 }
 
 impl ReactorBackend for VhostBackend {
-    fn try_recv(&mut self, buf: &mut PoolBuffer) -> io::Result<RecvResult> {
+    fn try_recv(&mut self, _buf: &mut PoolBuffer) -> io::Result<RecvResult> {
         // Receive packet from the channel (populated by VhostNetBackend's packet_handler)
+        // Use zero-copy: return the buffer directly instead of copying data.
+        // The caller's pre-allocated buffer (_buf) is not used - it will be returned to pool.
         match self.rx.try_recv() {
-            Ok((packet, virtio_hdr)) => {
-                // Copy packet data to the provided buffer
-                // Note: This is a copy, but it's fast (memcpy) and keeps the trait simple
-                let data = packet.data();
-                let write_area = buf.write_area();
-                let len = data.len().min(write_area.len());
-                write_area[..len].copy_from_slice(&data[..len]);
-                Ok(RecvResult::Packet { len, virtio_hdr })
+            Ok((buffer, virtio_hdr)) => {
+                // Zero-copy: return the buffer directly from the channel
+                Ok(RecvResult::PacketOwned { buffer, virtio_hdr })
             }
             Err(TryRecvError::Empty) => Ok(RecvResult::WouldBlock),
             Err(TryRecvError::Disconnected) => Ok(RecvResult::Done),
@@ -239,6 +253,8 @@ impl ReactorBackend for VhostBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataplane::buffer::BufferPool;
+    use std::sync::Arc;
 
     #[test]
     fn test_recv_result_variants() {
@@ -249,5 +265,13 @@ mod tests {
         };
         let _ = RecvResult::WouldBlock;
         let _ = RecvResult::Done;
+
+        // Test PacketOwned variant (requires a PoolBuffer)
+        let pool = Arc::new(BufferPool::new().unwrap());
+        let buffer = pool.alloc().unwrap();
+        let _ = RecvResult::PacketOwned {
+            buffer,
+            virtio_hdr: VirtioNetHdr::default(),
+        };
     }
 }
