@@ -603,14 +603,8 @@ impl VhostUserBackend for VhostNetBackend {
                         .signal_used_queue()
                         .map_err(|e| io::Error::other(format!("Failed to signal: {e}")))?;
                 }
-
-                // Always try to process any generated RX packets (e.g., ARP/DHCP responses)
-                // This must happen even if TX doesn't need notification
-                if self.process_rx(&vrings[RX_QUEUE as usize])? {
-                    vrings[RX_QUEUE as usize]
-                        .signal_used_queue()
-                        .map_err(|e| io::Error::other(format!("Failed to signal: {e}")))?;
-                }
+                // Note: RX processing is handled exclusively by the reactor thread
+                // to avoid lock contention on the RX queue
             }
             _ => {}
         }

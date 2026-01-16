@@ -601,8 +601,22 @@ impl<B: ReactorBackend> Reactor<B> {
         // Prepend Ethernet header
         buffer.prepend_eth_header(dst_mac, GATEWAY_MAC, ethertype);
 
-        // Forward to destination vNIC with the original virtio header
-        // (preserves checksum/GSO offload info from the TUN device)
+        // Adjust virtio header offsets for the added Ethernet header (14 bytes)
+        // csum_start and hdr_len are relative to the start of the packet
+        let mut adjusted_hdr = virtio_hdr;
+        const ETH_HDR_LEN: u16 = 14;
+        if adjusted_hdr.csum_start.to_native() > 0 {
+            adjusted_hdr.csum_start =
+                vm_memory::Le16::from(adjusted_hdr.csum_start.to_native() + ETH_HDR_LEN);
+        }
+        // csum_offset is relative to csum_start, so it doesn't need adjustment
+        // hdr_len adjustment for GSO if needed
+        if adjusted_hdr.hdr_len.to_native() > 0 {
+            adjusted_hdr.hdr_len =
+                vm_memory::Le16::from(adjusted_hdr.hdr_len.to_native() + ETH_HDR_LEN);
+        }
+
+        // Forward to destination vNIC with adjusted virtio header
         trace!(
             reactor_id = %self.config.id,
             dst_nic = %nic_id,
@@ -611,7 +625,10 @@ impl<B: ReactorBackend> Reactor<B> {
         );
 
         if sender
-            .try_send(InboundPacket { buffer, virtio_hdr })
+            .try_send(InboundPacket {
+                buffer,
+                virtio_hdr: adjusted_hdr,
+            })
             .is_err()
         {
             warn!(
@@ -752,10 +769,7 @@ impl<B: ReactorBackend> Reactor<B> {
         // Try L2 forwarding by MAC
         if let Some(sender) = self.registry.get_by_mac(&dst_mac) {
             if sender
-                .try_send(InboundPacket {
-                    buffer,
-                    virtio_hdr: VirtioNetHdr::default(),
-                })
+                .try_send(InboundPacket { buffer, virtio_hdr })
                 .is_err()
             {
                 warn!(
@@ -794,10 +808,7 @@ impl<B: ReactorBackend> Reactor<B> {
             // Route to local NIC
             if let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id)
                 && sender
-                    .try_send(InboundPacket {
-                        buffer,
-                        virtio_hdr: VirtioNetHdr::default(),
-                    })
+                    .try_send(InboundPacket { buffer, virtio_hdr })
                     .is_err()
             {
                 warn!(
@@ -843,10 +854,7 @@ impl<B: ReactorBackend> Reactor<B> {
             // Route to local NIC
             if let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id)
                 && sender
-                    .try_send(InboundPacket {
-                        buffer,
-                        virtio_hdr: VirtioNetHdr::default(),
-                    })
+                    .try_send(InboundPacket { buffer, virtio_hdr })
                     .is_err()
             {
                 warn!(
