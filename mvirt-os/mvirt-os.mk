@@ -3,11 +3,18 @@
 
 MVIRT_OS_DIR := mvirt-os
 
+# Target: vm (default) or metal
+TARGET ?= vm
+
 KERNEL_VERSION := $(shell cat $(MVIRT_OS_DIR)/kernel.version)
 KERNEL_MAJOR := $(shell echo $(KERNEL_VERSION) | cut -d. -f1)
 KERNEL_URL := https://cdn.kernel.org/pub/linux/kernel/v$(KERNEL_MAJOR).x/linux-$(KERNEL_VERSION).tar.xz
 KERNEL_DIR := $(MVIRT_OS_DIR)/kernel
 KERNEL_TARBALL := $(MVIRT_OS_DIR)/target/linux-$(KERNEL_VERSION).tar.xz
+
+# Config fragments
+KERNEL_BASE_CONFIG := $(MVIRT_OS_DIR)/kernel-base.config
+KERNEL_TARGET_CONFIG := $(MVIRT_OS_DIR)/kernel-$(TARGET).config
 
 # Cloud-Hypervisor
 CH_VERSION := v50.0
@@ -27,11 +34,18 @@ RUST_TARGET_DIR := target/$(MUSL_TARGET)/release
 # UKI settings
 EFI_STUB := /usr/lib/systemd/boot/efi/linuxx64.efi.stub
 
-# Output
-INITRAMFS := $(MVIRT_OS_DIR)/target/initramfs.cpio.gz
+# Target-specific outputs
 BZIMAGE := $(KERNEL_DIR)/arch/x86/boot/bzImage
-UKI := $(MVIRT_OS_DIR)/target/mvirt.efi
+BZIMAGE_TARGET := $(KERNEL_DIR)/arch/x86/boot/bzImage-$(TARGET)
+INITRAMFS := $(MVIRT_OS_DIR)/target/initramfs.cpio.gz
+UKI_TARGET := $(MVIRT_OS_DIR)/target/mvirt-$(TARGET).efi
+ISO_TARGET := $(MVIRT_OS_DIR)/target/mvirt-os-$(TARGET).iso
 INITRAMFS_ROOTFS := $(MVIRT_OS_DIR)/initramfs/rootfs
+
+# Legacy paths (for backwards compatibility)
+UKI := $(MVIRT_OS_DIR)/target/mvirt.efi
+ISO := $(MVIRT_OS_DIR)/target/mvirt-os.iso
+ISO_DIR := $(MVIRT_OS_DIR)/target/iso
 
 # ============ KERNEL ============
 
@@ -44,15 +58,32 @@ $(KERNEL_DIR): $(KERNEL_TARBALL)
 
 os-download: $(KERNEL_DIR)
 
-$(KERNEL_DIR)/.config: $(KERNEL_DIR) $(MVIRT_OS_DIR)/kernel.config
+# Config generation for specific target
+$(KERNEL_DIR)/.config-$(TARGET): $(KERNEL_DIR) $(KERNEL_BASE_CONFIG) $(KERNEL_TARGET_CONFIG)
 	cd $(KERNEL_DIR) && make tinyconfig
-	cd $(KERNEL_DIR) && ./scripts/kconfig/merge_config.sh -m .config ../kernel.config
+	cd $(KERNEL_DIR) && ./scripts/kconfig/merge_config.sh -m .config \
+		$(abspath $(KERNEL_BASE_CONFIG)) $(abspath $(KERNEL_TARGET_CONFIG))
 	cd $(KERNEL_DIR) && make olddefconfig
+	cp $(KERNEL_DIR)/.config $@
 
-$(BZIMAGE): $(KERNEL_DIR)/.config
+# Build kernel for specific target
+$(BZIMAGE_TARGET): $(KERNEL_DIR)/.config-$(TARGET)
+	cp $(KERNEL_DIR)/.config-$(TARGET) $(KERNEL_DIR)/.config
 	cd $(KERNEL_DIR) && make -j$(NPROC)
+	cp $(BZIMAGE) $@
 
-kernel: $(BZIMAGE)
+# Phony targets for kernel variants
+.PHONY: kernel kernel-vm kernel-metal kernel-all
+
+kernel: $(BZIMAGE_TARGET)
+
+kernel-vm:
+	$(MAKE) $(KERNEL_DIR)/arch/x86/boot/bzImage-vm TARGET=vm
+
+kernel-metal:
+	$(MAKE) $(KERNEL_DIR)/arch/x86/boot/bzImage-metal TARGET=metal
+
+kernel-all: kernel-vm kernel-metal
 
 menuconfig: $(KERNEL_DIR)
 	cd $(KERNEL_DIR) && make menuconfig
@@ -89,47 +120,56 @@ initramfs: $(INITRAMFS)
 
 # ============ UKI ============
 
-$(UKI): $(BZIMAGE) $(INITRAMFS) $(MVIRT_OS_DIR)/cmdline.txt $(MVIRT_OS_DIR)/kernel.version | $(MVIRT_OS_DIR)/target
+$(UKI_TARGET): $(BZIMAGE_TARGET) $(INITRAMFS) $(MVIRT_OS_DIR)/cmdline.txt $(MVIRT_OS_DIR)/kernel.version | $(MVIRT_OS_DIR)/target
 	ukify build \
-		--linux=$(BZIMAGE) \
+		--linux=$(BZIMAGE_TARGET) \
 		--initrd=$(INITRAMFS) \
 		--cmdline=@$(MVIRT_OS_DIR)/cmdline.txt \
 		--uname=$(KERNEL_VERSION) \
 		--stub=$(EFI_STUB) \
-		--output=$(UKI)
+		--output=$(UKI_TARGET)
 
-uki: $(UKI)
+# Phony targets for UKI variants
+.PHONY: uki uki-vm uki-metal uki-all
+
+uki: $(UKI_TARGET)
+
+uki-vm: initramfs
+	$(MAKE) $(MVIRT_OS_DIR)/target/mvirt-vm.efi TARGET=vm
+
+uki-metal: initramfs
+	$(MAKE) $(MVIRT_OS_DIR)/target/mvirt-metal.efi TARGET=metal
+
+uki-all: uki-vm uki-metal
 
 # ============ ISO (UEFI + Legacy BIOS) ============
 
-ISO := $(MVIRT_OS_DIR)/target/mvirt-os.iso
-ISO_DIR := $(MVIRT_OS_DIR)/target/iso
-
 CMDLINE := $(shell cat $(MVIRT_OS_DIR)/cmdline.txt 2>/dev/null)
+ISO_DIR_TARGET := $(MVIRT_OS_DIR)/target/iso-$(TARGET)
 
-$(ISO): $(UKI) $(MVIRT_OS_DIR)/cmdline.txt | $(MVIRT_OS_DIR)/target
-	rm -rf $(ISO_DIR)
-	mkdir -p $(ISO_DIR)/boot/grub
-	mkdir -p $(ISO_DIR)/EFI/BOOT
-	mkdir -p $(ISO_DIR)/isolinux
+$(ISO_TARGET): $(UKI_TARGET) $(MVIRT_OS_DIR)/cmdline.txt | $(MVIRT_OS_DIR)/target
+	rm -rf $(ISO_DIR_TARGET)
+	mkdir -p $(ISO_DIR_TARGET)/boot/grub
+	mkdir -p $(ISO_DIR_TARGET)/EFI/BOOT
+	mkdir -p $(ISO_DIR_TARGET)/isolinux
 	# Copy kernel and initramfs
-	cp $(BZIMAGE) $(ISO_DIR)/boot/vmlinuz
-	cp $(INITRAMFS) $(ISO_DIR)/boot/initramfs.cpio.gz
+	cp $(BZIMAGE_TARGET) $(ISO_DIR_TARGET)/boot/vmlinuz
+	cp $(INITRAMFS) $(ISO_DIR_TARGET)/boot/initramfs.cpio.gz
 	# UEFI: Copy UKI as EFI bootloader
-	cp $(UKI) $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI
+	cp $(UKI_TARGET) $(ISO_DIR_TARGET)/EFI/BOOT/BOOTX64.EFI
 	# Legacy BIOS: ISOLINUX
-	cp /usr/lib/ISOLINUX/isolinux.bin $(ISO_DIR)/isolinux/
-	cp /usr/lib/syslinux/modules/bios/ldlinux.c32 $(ISO_DIR)/isolinux/
-	cp /usr/lib/syslinux/modules/bios/libcom32.c32 $(ISO_DIR)/isolinux/
-	cp /usr/lib/syslinux/modules/bios/libutil.c32 $(ISO_DIR)/isolinux/
-	cp /usr/lib/syslinux/modules/bios/menu.c32 $(ISO_DIR)/isolinux/
+	cp /usr/lib/ISOLINUX/isolinux.bin $(ISO_DIR_TARGET)/isolinux/
+	cp /usr/lib/syslinux/modules/bios/ldlinux.c32 $(ISO_DIR_TARGET)/isolinux/
+	cp /usr/lib/syslinux/modules/bios/libcom32.c32 $(ISO_DIR_TARGET)/isolinux/
+	cp /usr/lib/syslinux/modules/bios/libutil.c32 $(ISO_DIR_TARGET)/isolinux/
+	cp /usr/lib/syslinux/modules/bios/menu.c32 $(ISO_DIR_TARGET)/isolinux/
 	# ISOLINUX config
-	printf 'DEFAULT mvirt\nTIMEOUT 30\nPROMPT 0\n\nLABEL mvirt\n    KERNEL /boot/vmlinuz\n    INITRD /boot/initramfs.cpio.gz\n    APPEND $(CMDLINE)\n' > $(ISO_DIR)/isolinux/isolinux.cfg
+	printf 'DEFAULT mvirt\nTIMEOUT 30\nPROMPT 0\n\nLABEL mvirt\n    KERNEL /boot/vmlinuz\n    INITRD /boot/initramfs.cpio.gz\n    APPEND $(CMDLINE)\n' > $(ISO_DIR_TARGET)/isolinux/isolinux.cfg
 	# GRUB config for UEFI (fallback)
-	printf 'set timeout=3\nset default=0\n\nmenuentry "mvirt-os" {\n    linux /boot/vmlinuz $(CMDLINE)\n    initrd /boot/initramfs.cpio.gz\n}\n' > $(ISO_DIR)/boot/grub/grub.cfg
+	printf 'set timeout=3\nset default=0\n\nmenuentry "mvirt-os" {\n    linux /boot/vmlinuz $(CMDLINE)\n    initrd /boot/initramfs.cpio.gz\n}\n' > $(ISO_DIR_TARGET)/boot/grub/grub.cfg
 	# Create hybrid ISO (UEFI + BIOS bootable)
 	xorriso -as mkisofs \
-		-o $(ISO) \
+		-o $(ISO_TARGET) \
 		-isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
 		-c isolinux/boot.cat \
 		-b isolinux/isolinux.bin \
@@ -140,9 +180,20 @@ $(ISO): $(UKI) $(MVIRT_OS_DIR)/cmdline.txt | $(MVIRT_OS_DIR)/target
 		-e EFI/BOOT/BOOTX64.EFI \
 		-no-emul-boot \
 		-isohybrid-gpt-basdat \
-		$(ISO_DIR)
+		$(ISO_DIR_TARGET)
 
-iso: $(ISO)
+# Phony targets for ISO variants
+.PHONY: iso iso-vm iso-metal iso-all
+
+iso: $(ISO_TARGET)
+
+iso-vm:
+	$(MAKE) $(MVIRT_OS_DIR)/target/mvirt-os-vm.iso TARGET=vm
+
+iso-metal:
+	$(MAKE) $(MVIRT_OS_DIR)/target/mvirt-os-metal.iso TARGET=metal
+
+iso-all: iso-vm iso-metal
 
 # ============ TARGET DIR ============
 

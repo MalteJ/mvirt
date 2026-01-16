@@ -4,6 +4,7 @@
 MUSL_TARGET := x86_64-unknown-linux-musl
 
 .PHONY: all build release os kernel initramfs uki iso menuconfig clean distclean check docker deb deb-clean install mvirt-log mvirt-zfs
+.PHONY: kernel-vm kernel-metal kernel-all uki-vm uki-metal uki-all iso-vm iso-metal iso-all
 
 # Include subsystems
 include mvirt-os/mvirt-os.mk
