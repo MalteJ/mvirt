@@ -3,6 +3,8 @@
 //! Provides utilities for simulating the VM side of vhost-user connections.
 
 #![allow(dead_code)]
+// Re-exports are used by integration tests in separate test binaries
+#![allow(unused_imports)]
 
 pub mod backend;
 pub mod client;

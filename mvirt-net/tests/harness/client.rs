@@ -25,6 +25,14 @@ const VIRTIO_NET_F_STATUS: u64 = 1 << 16;
 const VIRTIO_RING_F_EVENT_IDX: u64 = 1 << 29;
 const VHOST_USER_F_PROTOCOL_FEATURES: u64 = 1 << 30;
 
+/// TSO/Checksum offload features
+const VIRTIO_NET_F_CSUM: u64 = 1 << 0;
+const VIRTIO_NET_F_GUEST_TSO4: u64 = 1 << 7;
+const VIRTIO_NET_F_GUEST_TSO6: u64 = 1 << 8;
+const VIRTIO_NET_F_HOST_TSO4: u64 = 1 << 11;
+const VIRTIO_NET_F_HOST_TSO6: u64 = 1 << 12;
+const VIRTIO_NET_F_MRG_RXBUF: u64 = 1 << 15;
+
 /// Queue indices
 const RX_QUEUE_IDX: usize = 0;
 const TX_QUEUE_IDX: usize = 1;
@@ -143,13 +151,19 @@ impl VhostTestClient {
 
         eprintln!("[TEST] Backend features: {:#x}", backend_features);
 
-        // Negotiate features
+        // Negotiate features (including TSO/CSUM offload)
         self.features = backend_features
             & (VIRTIO_F_VERSION_1
                 | VIRTIO_NET_F_MAC
                 | VIRTIO_NET_F_STATUS
                 | VIRTIO_RING_F_EVENT_IDX
-                | VHOST_USER_F_PROTOCOL_FEATURES);
+                | VHOST_USER_F_PROTOCOL_FEATURES
+                | VIRTIO_NET_F_CSUM
+                | VIRTIO_NET_F_GUEST_TSO4
+                | VIRTIO_NET_F_GUEST_TSO6
+                | VIRTIO_NET_F_HOST_TSO4
+                | VIRTIO_NET_F_HOST_TSO6
+                | VIRTIO_NET_F_MRG_RXBUF);
 
         self.frontend
             .set_features(self.features)

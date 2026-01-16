@@ -18,6 +18,14 @@ const IFF_NO_PI: libc::c_short = 0x1000;
 /// ioctl request code for TUNSETIFF
 const TUNSETIFF: libc::c_ulong = 0x400454ca;
 
+/// ioctl request code for TUNSETOFFLOAD (enable TSO/checksum offload)
+const TUNSETOFFLOAD: libc::c_ulong = 0x400454d0;
+
+/// TUN offload flags (from linux/if_tun.h)
+const TUN_F_CSUM: libc::c_uint = 0x01; // Checksum offload
+const TUN_F_TSO4: libc::c_uint = 0x02; // TCP segmentation offload IPv4
+const TUN_F_TSO6: libc::c_uint = 0x04; // TCP segmentation offload IPv6
+
 /// ifreq structure for TUN device configuration
 #[repr(C)]
 struct IfReq {
@@ -142,6 +150,24 @@ impl TunDevice {
             return Err(io::Error::last_os_error());
         }
 
+        Ok(())
+    }
+
+    /// Enable TSO and checksum offload on the TUN device
+    ///
+    /// This enables the kernel to handle TCP segmentation and checksum
+    /// computation for large packets (up to 64KB), reducing CPU overhead.
+    /// Must be called after the device is created.
+    pub fn enable_offload(&self) -> io::Result<()> {
+        let offload = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
+
+        // SAFETY: ioctl on valid fd with valid flags
+        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), TUNSETOFFLOAD as _, offload) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        tracing::info!("TUN device offload enabled (CSUM, TSO4, TSO6)");
         Ok(())
     }
 }

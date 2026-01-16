@@ -1670,6 +1670,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-channel",
+ "crossbeam-queue",
  "dhcproto",
  "ipnet",
  "mvirt-log",

@@ -24,8 +24,8 @@ use vm_memory::GuestMemoryAtomic;
 // Import real mvirt-net types
 use mvirt_net::config::NicEntry;
 use mvirt_net::dataplane::{
-    ArpResponder, Dhcpv4Server, Dhcpv6Server, IcmpResponder, Icmpv6Responder, NdpResponder,
-    NetworkRouter, NicChannel, VhostNetBackend,
+    ArpResponder, BufferPool, Dhcpv4Server, Dhcpv6Server, IcmpResponder, Icmpv6Responder,
+    NdpResponder, NetworkRouter, NicChannel, VhostNetBackend,
 };
 
 use super::VhostTestClient;
@@ -130,6 +130,9 @@ fn run_test_backend(
     ipv6: Option<&str>,
     shutdown: Arc<AtomicBool>,
 ) {
+    // Create buffer pool for zero-copy packet processing
+    let pool = Arc::new(BufferPool::new().expect("Failed to create buffer pool"));
+
     // Create NIC entry for the real VhostNetBackend
     let nic = NicEntry {
         id: "test-nic".to_string(),
@@ -148,7 +151,7 @@ fn run_test_backend(
 
     // Create the REAL VhostNetBackend
     let backend = Arc::new(
-        VhostNetBackend::new(nic.clone(), shutdown.clone())
+        VhostNetBackend::new(nic.clone(), shutdown.clone(), pool)
             .expect("Failed to create VhostNetBackend"),
     );
 
@@ -302,8 +305,11 @@ impl RoutingTestBackend {
         let socket_path_b = tmp_dir.path().join("nic_b.sock");
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        // Create buffer pool for zero-copy packet processing
+        let pool = Arc::new(BufferPool::new().expect("Failed to create buffer pool"));
+
         // Create shared router for this network (non-public for tests)
-        let router = NetworkRouter::new("test-network".to_string(), false);
+        let router = NetworkRouter::new("test-network".to_string(), false, pool.clone());
 
         // Create channels for each NIC
         let (tx_a, rx_a) = crossbeam_channel::unbounded();
@@ -372,6 +378,7 @@ impl RoutingTestBackend {
                     updated_at: String::new(),
                 },
                 shutdown.clone(),
+                pool.clone(),
             )
             .expect("Failed to create backend A"),
         );
@@ -393,6 +400,7 @@ impl RoutingTestBackend {
                     updated_at: String::new(),
                 },
                 shutdown.clone(),
+                pool.clone(),
             )
             .expect("Failed to create backend B"),
         );
@@ -528,9 +536,9 @@ fn run_rx_injection(
             Ok(packet) => {
                 eprintln!(
                     "[RX INJECT] Injecting packet of {} bytes",
-                    packet.data.len()
+                    packet.buffer.len
                 );
-                backend.inject_and_deliver(packet.data);
+                backend.inject_and_deliver_slice(packet.buffer.data());
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,

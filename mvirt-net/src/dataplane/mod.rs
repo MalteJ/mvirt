@@ -7,8 +7,10 @@
 //! - Each vNIC gets a dedicated worker thread (shared-nothing)
 //! - Workers handle vhost-user protocol and packet processing
 //! - Inter-vNIC routing via crossbeam channels
+//! - Zero-copy buffer pool for high-performance packet handling
 
 pub mod arp;
+pub mod buffer;
 pub mod dhcpv4;
 pub mod dhcpv6;
 pub mod icmp;
@@ -21,6 +23,7 @@ pub mod vhost;
 pub mod worker;
 
 pub use arp::ArpResponder;
+pub use buffer::{BUFFER_SIZE, BufferPool, ETH_HEADROOM, HEADROOM, MAX_PACKET, PoolBuffer};
 pub use dhcpv4::Dhcpv4Server;
 pub use dhcpv6::Dhcpv6Server;
 pub use icmp::IcmpResponder;
@@ -29,5 +32,8 @@ pub use ndp::NdpResponder;
 pub use packet::{GATEWAY_IPV4, GATEWAY_MAC};
 pub use router::{NetworkRouter, NicChannel, RouteResult};
 pub use tun::{TunDevice, add_route, get_routes, remove_route};
-pub use vhost::VhostNetBackend;
+pub use vhost::{
+    VIRTIO_NET_HDR_F_DATA_VALID, VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE,
+    VIRTIO_NET_HDR_GSO_TCPV4, VIRTIO_NET_HDR_GSO_TCPV6, VhostNetBackend, VirtioNetHdr,
+};
 pub use worker::{RoutedPacket, WorkerConfig, WorkerHandle, WorkerManager};
