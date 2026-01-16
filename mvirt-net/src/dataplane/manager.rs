@@ -88,6 +88,8 @@ pub struct ReactorManager {
     reactors: HashMap<String, ReactorHandle>,
     /// Per-network routers
     routers: SharedRouters,
+    /// TUN reactor's router (shared reference for adding routes)
+    tun_router: NetworkRouter,
     /// Shared registry for inter-reactor communication
     registry: Arc<ReactorRegistry>,
     /// TUN reactor shutdown signal
@@ -133,12 +135,13 @@ impl ReactorManager {
 
         let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
 
+        // Clone tun_router for the reactor - they share the same underlying routing state
         let (mut tun_reactor, tun_sender) = Reactor::new(
             tun_backend,
             tun_config,
             pool.clone(),
             registry.clone(),
-            tun_router,
+            tun_router.clone(),
             shutdown_rx,
         );
 
@@ -156,6 +159,7 @@ impl ReactorManager {
         Ok(Self {
             reactors: HashMap::new(),
             routers,
+            tun_router,
             registry,
             tun_shutdown: Some(shutdown_tx),
             tun_thread: Some(tun_thread),
@@ -255,7 +259,7 @@ impl ReactorManager {
         self.registry
             .register_nic(mac, nic.id.clone(), reactor_sender);
 
-        // 11. Add routes for NIC's IPs
+        // 11. Add routes for NIC's IPs to network router
         if !ipv4_addr.is_unspecified() {
             router.add_ipv4_route(
                 Ipv4Net::new(ipv4_addr, 32).expect("Valid /32 prefix"),
@@ -269,6 +273,25 @@ impl ReactorManager {
                 nic.id.clone(),
                 true,
             );
+        }
+
+        // 11b. Also add routes to TUN router for public networks
+        // This allows incoming packets from the internet to be routed to the vNIC
+        if network.is_public {
+            if !ipv4_addr.is_unspecified() {
+                self.tun_router.add_ipv4_route(
+                    Ipv4Net::new(ipv4_addr, 32).expect("Valid /32 prefix"),
+                    nic.id.clone(),
+                    true,
+                );
+            }
+            if !ipv6_addr.is_unspecified() {
+                self.tun_router.add_ipv6_route(
+                    Ipv6Net::new(ipv6_addr, 128).expect("Valid /128 prefix"),
+                    nic.id.clone(),
+                    true,
+                );
+            }
         }
 
         // 12. Spawn VhostUserDaemon thread
@@ -319,11 +342,13 @@ impl ReactorManager {
     pub fn stop(&mut self, nic_id: &str) -> Result<(), String> {
         if let Some(handle) = self.reactors.remove(nic_id) {
             handle.stop();
-            // Unregister from router
+            // Unregister from network router
             let routers = self.routers.load();
             if let Some(router) = routers.get(&handle.network_id) {
                 router.unregister_nic(nic_id);
             }
+            // Also unregister from TUN router (for public networks)
+            self.tun_router.unregister_nic(nic_id);
             Ok(())
         } else {
             Err(format!("No reactor for NIC {}", nic_id))
@@ -339,6 +364,8 @@ impl ReactorManager {
             if let Some(router) = routers.get(&handle.network_id) {
                 router.unregister_nic(&nic_id);
             }
+            // Also unregister from TUN router
+            self.tun_router.unregister_nic(&nic_id);
         }
 
         // Stop TUN reactor

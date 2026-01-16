@@ -19,7 +19,8 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use tracing::{debug, info, trace, warn};
 
 use super::backend::{ReactorBackend, RecvResult};
-use super::buffer::{BufferPool, PoolBuffer};
+use super::buffer::{BufferPool, PoolBuffer, VIRTIO_HDR_SIZE};
+use super::packet::GATEWAY_MAC;
 use super::router::NetworkRouter;
 use super::vhost::VirtioNetHdr;
 use super::{
@@ -58,6 +59,8 @@ pub struct ReactorRegistry {
     mac_to_sender: ArcSwap<HashMap<[u8; 6], ReactorSender>>,
     /// NIC ID -> Reactor sender (for routing by NIC ID)
     nic_to_sender: ArcSwap<HashMap<String, ReactorSender>>,
+    /// NIC ID -> MAC address (for TUN responses that need to construct Ethernet headers)
+    nic_to_mac: ArcSwap<HashMap<String, [u8; 6]>>,
     /// Network ID -> TUN reactor sender (for internet-bound packets)
     network_to_tun: ArcSwap<HashMap<String, ReactorSender>>,
 }
@@ -68,21 +71,27 @@ impl ReactorRegistry {
         Self {
             mac_to_sender: ArcSwap::new(Arc::new(HashMap::new())),
             nic_to_sender: ArcSwap::new(Arc::new(HashMap::new())),
+            nic_to_mac: ArcSwap::new(Arc::new(HashMap::new())),
             network_to_tun: ArcSwap::new(Arc::new(HashMap::new())),
         }
     }
 
     /// Register a vNIC reactor
     pub fn register_nic(&self, mac: [u8; 6], nic_id: String, sender: ReactorSender) {
-        // Update MAC mapping
+        // Update MAC -> sender mapping
         let mut mac_map = (**self.mac_to_sender.load()).clone();
         mac_map.insert(mac, sender.clone());
         self.mac_to_sender.store(Arc::new(mac_map));
 
-        // Update NIC ID mapping
+        // Update NIC ID -> sender mapping
         let mut nic_map = (**self.nic_to_sender.load()).clone();
-        nic_map.insert(nic_id, sender);
+        nic_map.insert(nic_id.clone(), sender);
         self.nic_to_sender.store(Arc::new(nic_map));
+
+        // Update NIC ID -> MAC mapping (for TUN to construct Ethernet headers)
+        let mut nic_mac_map = (**self.nic_to_mac.load()).clone();
+        nic_mac_map.insert(nic_id, mac);
+        self.nic_to_mac.store(Arc::new(nic_mac_map));
     }
 
     /// Unregister a vNIC reactor
@@ -94,6 +103,10 @@ impl ReactorRegistry {
         let mut nic_map = (**self.nic_to_sender.load()).clone();
         nic_map.remove(nic_id);
         self.nic_to_sender.store(Arc::new(nic_map));
+
+        let mut nic_mac_map = (**self.nic_to_mac.load()).clone();
+        nic_mac_map.remove(nic_id);
+        self.nic_to_mac.store(Arc::new(nic_mac_map));
     }
 
     /// Register a TUN reactor for a network
@@ -111,6 +124,11 @@ impl ReactorRegistry {
     /// Get sender for a NIC ID
     pub fn get_by_nic_id(&self, nic_id: &str) -> Option<ReactorSender> {
         self.nic_to_sender.load().get(nic_id).cloned()
+    }
+
+    /// Get MAC address for a NIC ID (for TUN to construct Ethernet headers)
+    pub fn get_mac_by_nic_id(&self, nic_id: &str) -> Option<[u8; 6]> {
+        self.nic_to_mac.load().get(nic_id).copied()
     }
 
     /// Get TUN sender for a network
@@ -382,6 +400,15 @@ impl<B: ReactorBackend> Reactor<B> {
 
     /// Handle a received packet from the backend
     fn handle_rx_packet(&mut self, buffer: PoolBuffer) {
+        // TUN reactor receives raw IP packets with virtio header prepended
+        // vNIC reactors receive Ethernet frames
+        if self.handlers.is_none() {
+            // TUN reactor: [virtio_hdr (12B)][raw IP packet]
+            self.handle_tun_rx_packet(buffer);
+            return;
+        }
+
+        // vNIC reactor: Ethernet frame
         let data = buffer.data();
         if data.len() < 14 {
             return; // Too small for Ethernet
@@ -390,36 +417,179 @@ impl<B: ReactorBackend> Reactor<B> {
         // Parse Ethernet header
         let ethertype = u16::from_be_bytes([data[12], data[13]]);
 
-        // Protocol handlers only for Layer 2 (vNIC) reactors
-        if self.handlers.is_some() {
-            match ethertype {
-                0x0806 => {
-                    // ARP - handled and consumed
-                    if let Some(ref handlers) = self.handlers
-                        && let Some(reply) = handlers.arp.process(data)
-                    {
-                        self.send_reply(&reply);
-                    }
+        // Protocol handlers for Layer 2 (vNIC) reactors
+        match ethertype {
+            0x0806 => {
+                // ARP - handled and consumed
+                if let Some(ref handlers) = self.handlers
+                    && let Some(reply) = handlers.arp.process(data)
+                {
+                    self.send_reply(&reply);
+                }
+                return;
+            }
+            0x0800 => {
+                // IPv4 - check ICMP/DHCP
+                if self.handle_ipv4_protocols(&buffer) {
                     return;
                 }
-                0x0800 => {
-                    // IPv4 - check ICMP/DHCP
-                    if self.handle_ipv4_protocols(&buffer) {
-                        return;
-                    }
-                }
-                0x86DD => {
-                    // IPv6 - check ICMPv6/NDP/DHCPv6
-                    if self.handle_ipv6_protocols(&buffer) {
-                        return;
-                    }
-                }
-                _ => {}
             }
+            0x86DD => {
+                // IPv6 - check ICMPv6/NDP/DHCPv6
+                if self.handle_ipv6_protocols(&buffer) {
+                    return;
+                }
+            }
+            _ => {}
         }
 
         // Route the packet
         self.route_packet(buffer);
+    }
+
+    /// Handle a packet received from the TUN device (Layer 3, raw IP)
+    ///
+    /// TUN packets have format: [virtio_hdr (12B)][raw IP packet]
+    /// We need to:
+    /// 1. Strip the virtio header
+    /// 2. Determine IP version and extract destination IP
+    /// 3. Look up destination NIC in routing table
+    /// 4. Prepend Ethernet header with destination NIC's MAC
+    /// 5. Forward to the destination vNIC reactor
+    fn handle_tun_rx_packet(&mut self, mut buffer: PoolBuffer) {
+        let data = buffer.data();
+
+        // Need at least virtio header + minimal IP header
+        if data.len() < VIRTIO_HDR_SIZE + 20 {
+            debug!(
+                reactor_id = %self.config.id,
+                len = data.len(),
+                "TUN packet too small"
+            );
+            return;
+        }
+
+        // Strip virtio header to get raw IP packet
+        buffer.strip_virtio_hdr();
+        let ip_data = buffer.data();
+
+        // Parse IP version from first nibble
+        let ip_version = ip_data[0] >> 4;
+
+        // Look up destination NIC and MAC based on IP version
+        let (nic_id, sender, dst_mac, ethertype) = match ip_version {
+            4 => {
+                // IPv4: destination IP at offset 16-20
+                if ip_data.len() < 20 {
+                    return;
+                }
+                let dst_ip = std::net::Ipv4Addr::new(
+                    ip_data[16],
+                    ip_data[17],
+                    ip_data[18],
+                    ip_data[19],
+                );
+
+                // Look up destination in routing table
+                let Some(entry) = self.router.lookup_ipv4(dst_ip) else {
+                    debug!(
+                        reactor_id = %self.config.id,
+                        %dst_ip,
+                        "No route for incoming TUN IPv4 packet"
+                    );
+                    return;
+                };
+
+                // Get sender for this NIC
+                let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id) else {
+                    debug!(
+                        reactor_id = %self.config.id,
+                        %dst_ip,
+                        nic_id = %entry.nic_id,
+                        "Destination NIC not found in registry"
+                    );
+                    return;
+                };
+
+                // Get destination MAC for Ethernet header
+                let Some(dst_mac) = self.registry.get_mac_by_nic_id(&entry.nic_id) else {
+                    debug!(
+                        reactor_id = %self.config.id,
+                        nic_id = %entry.nic_id,
+                        "Destination NIC MAC not found in registry"
+                    );
+                    return;
+                };
+
+                (entry.nic_id, sender, dst_mac, 0x0800u16)
+            }
+            6 => {
+                // IPv6: destination IP at offset 24-40
+                if ip_data.len() < 40 {
+                    return;
+                }
+                let mut dst_bytes = [0u8; 16];
+                dst_bytes.copy_from_slice(&ip_data[24..40]);
+                let dst_ip = std::net::Ipv6Addr::from(dst_bytes);
+
+                // Look up destination in routing table
+                let Some(entry) = self.router.lookup_ipv6(dst_ip) else {
+                    debug!(
+                        reactor_id = %self.config.id,
+                        %dst_ip,
+                        "No route for incoming TUN IPv6 packet"
+                    );
+                    return;
+                };
+
+                // Get sender for this NIC
+                let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id) else {
+                    debug!(
+                        reactor_id = %self.config.id,
+                        %dst_ip,
+                        nic_id = %entry.nic_id,
+                        "Destination NIC not found in registry"
+                    );
+                    return;
+                };
+
+                // Get destination MAC for Ethernet header
+                let Some(dst_mac) = self.registry.get_mac_by_nic_id(&entry.nic_id) else {
+                    debug!(
+                        reactor_id = %self.config.id,
+                        nic_id = %entry.nic_id,
+                        "Destination NIC MAC not found in registry"
+                    );
+                    return;
+                };
+
+                (entry.nic_id, sender, dst_mac, 0x86DDu16)
+            }
+            _ => {
+                debug!(
+                    reactor_id = %self.config.id,
+                    ip_version,
+                    "Unknown IP version from TUN"
+                );
+                return;
+            }
+        };
+
+        // Prepend Ethernet header
+        buffer.prepend_eth_header(dst_mac, GATEWAY_MAC, ethertype);
+
+        // Forward to destination vNIC
+        trace!(
+            reactor_id = %self.config.id,
+            dst_nic = %nic_id,
+            len = buffer.len,
+            "Forwarding TUN packet to vNIC"
+        );
+
+        let _ = sender.try_send(InboundPacket {
+            buffer,
+            virtio_hdr: VirtioNetHdr::default(),
+        });
     }
 
     /// Send a reply packet (copies Vec<u8> into PoolBuffer)
