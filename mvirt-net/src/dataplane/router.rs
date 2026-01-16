@@ -16,7 +16,7 @@ use prefix_trie::PrefixMap;
 use smoltcp::wire::{EthernetProtocol, Ipv4Packet, Ipv6Packet};
 use tracing::debug;
 
-use super::buffer::{BufferPool, PoolBuffer};
+use super::buffer::PoolBuffer;
 use super::packet::{GATEWAY_MAC, parse_ethernet};
 use super::worker::RoutedPacket;
 
@@ -54,8 +54,6 @@ pub struct NetworkRouter {
     inner: Arc<RwLock<NetworkRouterInner>>,
     #[allow(dead_code)]
     network_id: String,
-    /// Shared buffer pool for zero-copy packet allocation
-    pool: Arc<BufferPool>,
 }
 
 struct NetworkRouterInner {
@@ -76,8 +74,7 @@ impl NetworkRouter {
     /// * `network_id` - Unique network identifier
     /// * `is_public` - If true, packets without local destination go to TUN (internet).
     ///   If false, such packets are dropped (network isolation).
-    /// * `pool` - Shared buffer pool for zero-copy packet allocation
-    pub fn new(network_id: String, is_public: bool, pool: Arc<BufferPool>) -> Self {
+    pub fn new(network_id: String, is_public: bool) -> Self {
         Self {
             inner: Arc::new(RwLock::new(NetworkRouterInner {
                 ipv4_routes: PrefixMap::new(),
@@ -86,7 +83,6 @@ impl NetworkRouter {
                 is_public,
             })),
             network_id,
-            pool,
         }
     }
 
@@ -160,35 +156,22 @@ impl NetworkRouter {
             .map(|(_, entry)| entry.clone())
     }
 
-    /// Route a packet to its destination (zero-copy path)
+    /// Route a packet to its destination (TRUE zero-copy path)
+    ///
+    /// Consumes the buffer. No allocation, no copy (except in-place header modifications).
     ///
     /// Returns:
     /// - `RouteResult::Routed` if packet was sent to a local NIC
     /// - `RouteResult::ToInternet(buffer)` if packet should go to TUN (public networks only)
     /// - `RouteResult::Dropped` if packet was dropped (TTL expired, parse error, or no route in non-public network)
-    pub fn route_packet(&self, source_nic_id: &str, packet: &[u8]) -> RouteResult {
+    pub fn route_packet(&self, source_nic_id: &str, mut buffer: PoolBuffer) -> RouteResult {
         // Parse the packet to determine destination
-        let Some(frame) = parse_ethernet(packet) else {
+        let Some(frame) = parse_ethernet(buffer.data()) else {
             return RouteResult::Dropped;
         };
 
         // Ethernet header is 14 bytes
         const ETH_HEADER_LEN: usize = 14;
-
-        // Allocate a PoolBuffer for the packet (single copy)
-        let Some(mut buffer) = self.pool.alloc() else {
-            debug!("Buffer pool exhausted, dropping packet");
-            return RouteResult::Dropped;
-        };
-
-        // Copy packet into buffer (this is the ONLY copy in the routing path)
-        let write_area = buffer.write_area();
-        if packet.len() > write_area.len() {
-            debug!(len = packet.len(), "Packet too large, dropping");
-            return RouteResult::Dropped;
-        }
-        write_area[..packet.len()].copy_from_slice(packet);
-        buffer.len = packet.len();
 
         let target_nic_id = match frame.ethertype() {
             EthernetProtocol::Ipv4 => {
@@ -284,8 +267,7 @@ impl NetworkRouter {
                 debug!(
                     source = %source_nic_id,
                     target = %target,
-                    len = packet.len(),
-                    "Routed packet"
+                    "Routed packet (zero-copy)"
                 );
                 return RouteResult::Routed;
             }
@@ -344,13 +326,9 @@ fn decrement_ipv6_hop_limit(ip_packet: &mut [u8]) {
 mod tests {
     use super::*;
 
-    fn test_pool() -> Arc<BufferPool> {
-        Arc::new(BufferPool::new().expect("Failed to create pool"))
-    }
-
     #[test]
     fn test_ipv4_lpm() {
-        let router = NetworkRouter::new("test-net".to_string(), false, test_pool());
+        let router = NetworkRouter::new("test-net".to_string(), false);
 
         // Add a /24 network route
         router.add_ipv4_route("10.0.0.0/24".parse().unwrap(), "nic-1".to_string(), false);
@@ -373,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_lpm() {
-        let router = NetworkRouter::new("test-net".to_string(), false, test_pool());
+        let router = NetworkRouter::new("test-net".to_string(), false);
 
         // Add a /64 network route
         router.add_ipv6_route("fd00::/64".parse().unwrap(), "nic-1".to_string(), false);
@@ -396,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_unregister_removes_routes() {
-        let router = NetworkRouter::new("test-net".to_string(), false, test_pool());
+        let router = NetworkRouter::new("test-net".to_string(), false);
 
         router.add_ipv4_route("10.0.0.0/24".parse().unwrap(), "nic-1".to_string(), false);
         router.add_ipv4_route("10.0.1.0/24".parse().unwrap(), "nic-2".to_string(), false);
@@ -414,8 +392,8 @@ mod tests {
     #[test]
     fn test_network_isolation() {
         // Two separate routers for different networks
-        let router_a = NetworkRouter::new("net-a".to_string(), false, test_pool());
-        let router_b = NetworkRouter::new("net-b".to_string(), false, test_pool());
+        let router_a = NetworkRouter::new("net-a".to_string(), false);
+        let router_b = NetworkRouter::new("net-b".to_string(), false);
 
         // Same prefix in both networks
         router_a.add_ipv4_route("10.0.0.0/24".parse().unwrap(), "nic-a".to_string(), false);

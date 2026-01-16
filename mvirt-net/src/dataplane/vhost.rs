@@ -23,7 +23,7 @@ use vmm_sys_util::event::{
 
 use crate::config::NicEntry;
 
-use super::buffer::BufferPool;
+use super::buffer::{BufferPool, PoolBuffer};
 
 /// Virtio net header size (without mergeable rx buffers)
 const VIRTIO_NET_HDR_SIZE: usize = 12;
@@ -74,8 +74,44 @@ pub struct VirtioNetHdr {
 // SAFETY: VirtioNetHdr contains only POD types
 unsafe impl ByteValued for VirtioNetHdr {}
 
-/// Packet handler callback type
-pub type PacketHandler = Box<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
+/// Item in the RX queue - either a zero-copy buffer or a Vec for local protocol responses
+pub enum RxItem {
+    /// Zero-copy buffer from pool (for routed packets)
+    Buffer(PoolBuffer),
+    /// Heap-allocated Vec (for small local protocol responses like ARP, DHCP)
+    Vec(Vec<u8>),
+}
+
+impl RxItem {
+    /// Get the packet data as a slice
+    #[inline]
+    pub fn data(&self) -> &[u8] {
+        match self {
+            RxItem::Buffer(b) => b.data(),
+            RxItem::Vec(v) => v.as_slice(),
+        }
+    }
+
+    /// Get the packet length
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            RxItem::Buffer(b) => b.len,
+            RxItem::Vec(v) => v.len(),
+        }
+    }
+
+    /// Check if the packet is empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Packet handler callback type - processes TX packets
+/// Takes a PoolBuffer by ownership (zero-copy), no return value
+/// Handler is responsible for routing and/or generating responses via inject methods
+pub type PacketHandler = Box<dyn Fn(PoolBuffer) + Send + Sync>;
 
 /// vhost-user backend for a single vNIC
 pub struct VhostNetBackend {
@@ -96,7 +132,8 @@ pub struct VhostNetBackend {
     packet_handler: Mutex<Option<PacketHandler>>,
 
     /// Pending RX packets to inject into guest (lock-free queue)
-    rx_queue: SegQueue<Vec<u8>>,
+    /// Stores RxItem which can be either zero-copy PoolBuffer or Vec for local responses
+    rx_queue: SegQueue<RxItem>,
 
     /// Stored vrings for external RX injection (set on first handle_event)
     vrings: RwLock<Option<Vec<VringRwLock>>>,
@@ -136,21 +173,31 @@ impl VhostNetBackend {
         *ph = Some(handler);
     }
 
-    /// Inject a packet into the guest's RX queue
-    pub fn inject_packet(&self, packet: Vec<u8>) {
-        debug!(
+    /// Inject a Vec packet into the guest's RX queue (for local protocol responses)
+    /// Use this for small packets generated locally (ARP, DHCP, ICMP responses)
+    pub fn inject_vec(&self, packet: Vec<u8>) {
+        trace!(
             packet_len = packet.len(),
-            "inject_packet: queuing packet for RX"
+            "inject_vec: queuing packet for RX"
         );
-        self.rx_queue.push(packet);
+        self.rx_queue.push(RxItem::Vec(packet));
     }
 
-    /// Inject a packet from a slice and immediately deliver it to the guest
-    /// This is used for routed packets from other vNICs (zero-copy friendly)
-    pub fn inject_and_deliver_slice(&self, packet: &[u8]) {
-        trace!(packet_len = packet.len(), "Injecting packet to RX queue");
-        // Add to lock-free queue
-        self.rx_queue.push(packet.to_vec());
+    /// Inject a zero-copy PoolBuffer into the guest's RX queue
+    /// Use this for routed packets that are already in a PoolBuffer
+    pub fn inject_buffer(&self, buffer: PoolBuffer) {
+        trace!(
+            packet_len = buffer.len,
+            "inject_buffer: queuing packet for RX"
+        );
+        self.rx_queue.push(RxItem::Buffer(buffer));
+    }
+
+    /// Inject a zero-copy buffer and immediately deliver it to the guest
+    /// This is the main entry point for routed packets from other vNICs
+    pub fn inject_buffer_and_deliver(&self, buffer: PoolBuffer) {
+        trace!(packet_len = buffer.len, "Injecting buffer to RX queue");
+        self.rx_queue.push(RxItem::Buffer(buffer));
 
         // Try to deliver immediately if vrings are available
         let vrings_guard = self.vrings.read().unwrap();
@@ -163,31 +210,14 @@ impl VhostNetBackend {
         }
     }
 
-    /// Inject a packet and immediately deliver it to the guest
-    /// This is used for routed packets from other vNICs
-    pub fn inject_and_deliver(&self, packet: Vec<u8>) {
-        // Add to lock-free queue
-        self.rx_queue.push(packet);
-
-        // Try to deliver immediately if vrings are available
-        let vrings_guard = self.vrings.read().unwrap();
-        if let Some(ref vrings) = *vrings_guard
-            && let Some(rx_vring) = vrings.get(RX_QUEUE as usize)
-        {
-            let _ = self.process_rx(rx_vring);
-            // Always signal for external packets - guest may be idle
-            let _ = rx_vring.signal_used_queue();
-        }
-    }
-
-    /// Inject a batch of packets and deliver them all to the guest with a single signal
+    /// Inject a batch of zero-copy buffers and deliver them with a single signal
     /// This amortizes the eventfd syscall overhead across multiple packets
-    pub fn inject_batch<'a>(&self, packets: impl Iterator<Item = &'a [u8]>) {
+    pub fn inject_buffer_batch(&self, buffers: impl Iterator<Item = PoolBuffer>) {
         let mut count = 0;
 
-        // Add all packets to lock-free queue
-        for packet in packets {
-            self.rx_queue.push(packet.to_vec());
+        // Add all buffers to lock-free queue (zero-copy!)
+        for buffer in buffers {
+            self.rx_queue.push(RxItem::Buffer(buffer));
             count += 1;
         }
 
@@ -195,7 +225,7 @@ impl VhostNetBackend {
             return;
         }
 
-        trace!(packet_count = count, "Injecting batch to RX queue");
+        trace!(packet_count = count, "Injecting buffer batch to RX queue");
 
         // Try to deliver all and signal once
         let vrings_guard = self.vrings.read().unwrap();
@@ -232,42 +262,8 @@ impl VhostNetBackend {
 
             // Allocate buffer from pool for zero-copy packet processing
             let Some(mut buffer) = self.pool.alloc() else {
-                // Pool exhausted - fall back to Vec allocation
-                trace!("Buffer pool exhausted in TX, using Vec fallback");
-                let mut packet = Vec::new();
-                for desc in avail_desc.clone() {
-                    if !desc.is_write_only() {
-                        let len = desc.len() as usize;
-                        let mut buf = vec![0u8; len];
-                        mem.read(&mut buf, desc.addr())
-                            .map_err(|e| io::Error::other(format!("Failed to read desc: {e}")))?;
-                        packet.extend_from_slice(&buf);
-                    }
-                }
-                if packet.len() > VIRTIO_NET_HDR_SIZE {
-                    // Parse virtio-net header to check for checksum offload
-                    let flags = packet[0];
-                    let csum_start = u16::from_le_bytes([packet[6], packet[7]]);
-                    let csum_offset = u16::from_le_bytes([packet[8], packet[9]]);
-
-                    // Finalize checksum if guest requested it
-                    if flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
-                        finalize_checksum(
-                            &mut packet[VIRTIO_NET_HDR_SIZE..],
-                            csum_start,
-                            csum_offset,
-                        );
-                    }
-
-                    let eth_frame = &packet[VIRTIO_NET_HDR_SIZE..];
-                    let handler_guard = self.packet_handler.lock().unwrap();
-                    if let Some(ref handler) = *handler_guard
-                        && let Some(response) = handler(eth_frame)
-                    {
-                        self.inject_packet(response);
-                    }
-                }
-                // Mark descriptor as used and continue
+                // Pool exhausted - skip this packet (will be retried on next TX kick)
+                trace!("Buffer pool exhausted in TX, dropping packet");
                 let desc_idx = avail_desc.head_index();
                 queue
                     .add_used(&*mem, desc_idx, 0)
@@ -308,20 +304,22 @@ impl VhostNetBackend {
                 let csum_start = u16::from_le_bytes([hdr_data[6], hdr_data[7]]);
                 let csum_offset = u16::from_le_bytes([hdr_data[8], hdr_data[9]]);
 
-                // Adjust buffer to point past virtio header (zero-copy!)
-                buffer.start += VIRTIO_NET_HDR_SIZE;
-                buffer.len -= VIRTIO_NET_HDR_SIZE;
+                // Strip virtio header (zero-copy - just adjust pointers)
+                buffer.strip_virtio_hdr();
 
                 // Finalize checksum if guest requested it
                 if flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
                     finalize_checksum(buffer.data_mut(), csum_start, csum_offset);
                 }
 
-                let handler_guard = self.packet_handler.lock().unwrap();
-                if let Some(ref handler) = *handler_guard
-                    && let Some(response) = handler(buffer.data())
+                // Pass buffer to handler (handler takes ownership, does routing/responses)
+                // Handler doesn't need packet_handler lock, so we can safely hold it
                 {
-                    self.inject_packet(response);
+                    let handler_guard = self.packet_handler.lock().unwrap();
+                    if let Some(ref handler) = *handler_guard {
+                        handler(buffer);
+                    }
+                    // If no handler, buffer is dropped here (returned to pool)
                 }
             }
 
@@ -404,7 +402,7 @@ impl VhostNetBackend {
                         if hdr_end < to_write {
                             let pkt_end = to_write - hdr_end;
                             mem.write(
-                                &packet[..pkt_end],
+                                &packet.data()[..pkt_end],
                                 desc.addr().unchecked_add(hdr_end as u64),
                             )
                             .map_err(|e| io::Error::other(format!("Failed to write pkt: {e}")))?;
@@ -412,8 +410,11 @@ impl VhostNetBackend {
                     } else {
                         // Write only packet data (header already written)
                         let pkt_offset = written - hdr_bytes.len();
-                        mem.write(&packet[pkt_offset..pkt_offset + to_write], desc.addr())
-                            .map_err(|e| io::Error::other(format!("Failed to write pkt: {e}")))?;
+                        mem.write(
+                            &packet.data()[pkt_offset..pkt_offset + to_write],
+                            desc.addr(),
+                        )
+                        .map_err(|e| io::Error::other(format!("Failed to write pkt: {e}")))?;
                     }
 
                     written += to_write;

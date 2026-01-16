@@ -260,8 +260,9 @@ impl PacketProcessor {
         }
     }
 
-    /// Process an incoming packet and return an optional response
-    fn process(&self, packet: &[u8]) -> Option<Vec<u8>> {
+    /// Try all protocol handlers, return response if any matches
+    /// This does NOT consume the buffer - just reads data for protocol detection
+    fn try_protocols(&self, packet: &[u8]) -> Option<Vec<u8>> {
         if packet.len() < 14 {
             return None;
         }
@@ -300,14 +301,19 @@ impl PacketProcessor {
             return Some(reply);
         }
 
-        // Try routing to another vNIC or internet (public networks)
-        match self.router.route_packet(&self.nic_id, packet) {
+        None
+    }
+
+    /// Route a packet to another vNIC or internet (consumes PoolBuffer for zero-copy)
+    fn route(&self, buffer: PoolBuffer) {
+        let len = buffer.len;
+        match self.router.route_packet(&self.nic_id, buffer) {
             RouteResult::Routed => {
-                debug!(nic_id = %self.nic_id, len = packet.len(), "Routed packet to local vNIC");
+                debug!(nic_id = %self.nic_id, len = len, "Routed packet to local vNIC");
             }
-            RouteResult::ToInternet(buffer) => {
+            RouteResult::ToInternet(buf) => {
                 if let Some(ref tx) = self.tun_tx {
-                    if let Err(e) = tx.send(TunPacket { buffer }) {
+                    if let Err(e) = tx.send(TunPacket { buffer: buf }) {
                         debug!(nic_id = %self.nic_id, error = %e, "Failed to send packet to TUN");
                     } else {
                         debug!(nic_id = %self.nic_id, "Sent packet to TUN for internet routing");
@@ -320,8 +326,6 @@ impl PacketProcessor {
                 // Packet was dropped (no route, TTL expired, etc.)
             }
         }
-
-        None
     }
 }
 
@@ -486,7 +490,22 @@ fn run_worker(
             config.router.clone(),
             config.tun_tx.clone(),
         );
-        backend.set_packet_handler(Box::new(move |packet| processor.process(packet)));
+
+        // Clone backend for use in packet handler (for injecting protocol responses)
+        let backend_for_handler = backend.clone();
+        backend.set_packet_handler(Box::new(move |buffer: PoolBuffer| {
+            // First try protocol handlers (ARP, DHCP, ICMP, etc.)
+            // These just read the data and may return a response
+            if let Some(response) = processor.try_protocols(buffer.data()) {
+                // Protocol generated a response - inject it as Vec (small local packet)
+                backend_for_handler.inject_vec(response);
+                // Original buffer is dropped here (returned to pool)
+                return;
+            }
+
+            // No protocol match - route the packet (zero-copy, consumes buffer)
+            processor.route(buffer);
+        }));
 
         // Spawn RX injection thread to handle routed packets from other vNICs
         let rx_channel = config.router_rx.clone();
@@ -608,14 +627,15 @@ fn run_rx_injection(
             }
         }
 
-        // Inject entire batch with single signal
+        // Inject entire batch with single signal (zero-copy!)
         if !batch.is_empty() {
             trace!(
                 nic_id = %nic_id,
                 batch_size = batch.len(),
-                "Injecting packet batch"
+                "Injecting packet batch (zero-copy)"
             );
-            backend.inject_batch(batch.iter().map(|p| p.buffer.data()));
+            // Extract PoolBuffers from RoutedPackets and inject directly
+            backend.inject_buffer_batch(batch.into_iter().map(|p| p.buffer));
         }
     }
 }
@@ -748,12 +768,11 @@ impl WorkerManager {
         }
 
         // Get or create router for this network
-        let pool = self.pool.clone();
         let router = {
             let mut routers = self.routers.write().unwrap();
             routers
                 .entry(network.id.clone())
-                .or_insert_with(|| NetworkRouter::new(network.id.clone(), network.is_public, pool))
+                .or_insert_with(|| NetworkRouter::new(network.id.clone(), network.is_public))
                 .clone()
         };
 
@@ -902,8 +921,7 @@ fn run_tun_io(
 
         // 2. Then drain ALL incoming packets (Internet -> VM) without blocking
         loop {
-            let poll_fd =
-                PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
+            let poll_fd = PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
 
             match poll(&mut [poll_fd], PollTimeout::ZERO) {
                 Ok(n) if n > 0 => {
@@ -938,8 +956,7 @@ fn run_tun_io(
         // 3. If no work was done, wait briefly to avoid busy-spinning
         if !did_work {
             // Poll TUN with 1ms timeout - wake up quickly for incoming packets
-            let poll_fd =
-                PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
+            let poll_fd = PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
             let _ = poll(&mut [poll_fd], PollTimeout::from(1u16));
         }
     }
@@ -958,6 +975,7 @@ fn route_tun_packet_to_nic_buffer(
 ) {
     use super::packet::GATEWAY_MAC;
     use smoltcp::wire::{Ipv4Packet, Ipv6Packet};
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     let ip_packet = buffer.data();
     if ip_packet.is_empty() {
@@ -967,13 +985,14 @@ fn route_tun_packet_to_nic_buffer(
     // Determine IP version from first nibble
     let version = ip_packet[0] >> 4;
 
-    let (dst_addr_str, ethertype) = match version {
+    // Parse destination address and ethertype
+    let (dst_ipv4, dst_ipv6, ethertype): (Option<Ipv4Addr>, Option<Ipv6Addr>, u16) = match version {
         4 => {
             if ip_packet.len() < 20 {
                 return;
             }
             match Ipv4Packet::new_checked(ip_packet) {
-                Ok(ipv4) => (ipv4.dst_addr().to_string(), 0x0800u16),
+                Ok(ipv4) => (Some(ipv4.dst_addr()), None, 0x0800u16),
                 Err(_) => return,
             }
         }
@@ -982,44 +1001,54 @@ fn route_tun_packet_to_nic_buffer(
                 return;
             }
             match Ipv6Packet::new_checked(ip_packet) {
-                Ok(ipv6) => (ipv6.dst_addr().to_string(), 0x86DDu16),
+                Ok(ipv6) => (None, Some(ipv6.dst_addr()), 0x86DDu16),
                 Err(_) => return,
             }
         }
         _ => return,
     };
 
-    debug!(dst = %dst_addr_str, version = version, "Routing TUN packet to vNIC (zero-copy)");
-
     // Prepend Ethernet header using headroom (zero-copy!)
     // Dst MAC is placeholder - the router will overwrite it
     buffer.prepend_eth_header([0u8; 6], GATEWAY_MAC, ethertype);
 
-    // Search all public routers for a matching destination
+    // First find which router has a route for this destination (without consuming buffer)
     let routers_guard = routers.read().unwrap();
-    for router in routers_guard.values() {
+    let matching_router = routers_guard.values().find(|router| {
         if !router.is_public() {
-            continue;
+            return false;
         }
+        // Check if this router has a route for the destination
+        match (dst_ipv4, dst_ipv6) {
+            (Some(addr), _) => router.lookup_ipv4(addr).is_some(),
+            (_, Some(addr)) => router.lookup_ipv6(addr).is_some(),
+            _ => false,
+        }
+    });
 
-        // Try routing - the router will find the destination NIC and rewrite the dst MAC
-        // Note: router.route_packet takes &[u8] and allocates internally, which copies the data
-        // TODO: Add router.route_packet_buffer() that takes PoolBuffer directly
-        match router.route_packet("tun", buffer.data()) {
+    if let Some(router) = matching_router {
+        // Clone the router to release the lock before calling route_packet
+        let router = router.clone();
+        drop(routers_guard);
+
+        // Route the packet (zero-copy, consumes buffer)
+        match router.route_packet("tun", buffer) {
             RouteResult::Routed => {
-                debug!(dst = %dst_addr_str, "Routed TUN packet to local vNIC");
-                return;
+                debug!(
+                    version = version,
+                    "Routed TUN packet to local vNIC (zero-copy)"
+                );
             }
             RouteResult::ToInternet(_) => {
-                // Shouldn't happen for incoming TUN packets, but ignore
+                // Shouldn't happen for incoming TUN packets
             }
             RouteResult::Dropped => {
-                // No route in this router, try next
+                debug!(version = version, "TUN packet dropped by router");
             }
         }
+    } else {
+        debug!(version = version, "No route found for TUN packet");
     }
-
-    debug!(dst = %dst_addr_str, "No route found for TUN packet");
 }
 
 impl Drop for WorkerManager {

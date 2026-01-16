@@ -180,42 +180,54 @@ fn run_test_backend(
         server
     });
 
-    backend.set_packet_handler(Box::new(move |packet| {
+    // Clone backend for use in packet handler
+    let backend_for_handler = backend.clone();
+
+    backend.set_packet_handler(Box::new(move |buffer| {
+        let packet = buffer.data();
+
         // Try ARP first (IPv4)
         if let Some(reply) = arp_responder.process(packet) {
-            return Some(reply);
+            backend_for_handler.inject_vec(reply);
+            return;
         }
 
         // Try ICMP (ping to gateway, IPv4)
         if let Some(reply) = icmp_responder.process(packet) {
-            return Some(reply);
+            backend_for_handler.inject_vec(reply);
+            return;
         }
 
         // Try DHCPv4
         if let Some(ref server) = dhcpv4_server
             && let Some(reply) = server.process(packet, mac_bytes)
         {
-            return Some(reply);
+            backend_for_handler.inject_vec(reply);
+            return;
         }
 
         // Try NDP (IPv6)
         if let Some(reply) = ndp_responder.process(packet) {
-            return Some(reply);
+            backend_for_handler.inject_vec(reply);
+            return;
         }
 
         // Try ICMPv6 (ping to gateway)
         if let Some(reply) = icmpv6_responder.process(packet) {
-            return Some(reply);
+            backend_for_handler.inject_vec(reply);
+            return;
         }
 
         // Try DHCPv6
         if let Some(ref server) = dhcpv6_server
             && let Some(reply) = server.process(packet, mac_bytes)
         {
-            return Some(reply);
+            backend_for_handler.inject_vec(reply);
+            return;
         }
 
-        None
+        // No protocol matched - for test backend, we just drop the packet
+        // (real backend would route it)
     }));
 
     // Create listener
@@ -308,7 +320,7 @@ impl RoutingTestBackend {
         let pool = Arc::new(BufferPool::new().expect("Failed to create buffer pool"));
 
         // Create shared router for this network (non-public for tests)
-        let router = NetworkRouter::new("test-network".to_string(), false, pool.clone());
+        let router = NetworkRouter::new("test-network".to_string(), false);
 
         // Create channels for each NIC
         let (tx_a, rx_a) = crossbeam_channel::unbounded();
@@ -402,19 +414,23 @@ impl RoutingTestBackend {
         let arp_a = ArpResponder::new(mac_a);
         let icmp_a = IcmpResponder::new();
         let nic_id_a = nic_a.id.clone();
+        let backend_a_for_handler = backend_a.clone();
 
-        backend_a.set_packet_handler(Box::new(move |packet| {
+        backend_a.set_packet_handler(Box::new(move |buffer| {
+            let packet = buffer.data();
+
             // Try ARP
             if let Some(reply) = arp_a.process(packet) {
-                return Some(reply);
+                backend_a_for_handler.inject_vec(reply);
+                return;
             }
             // Try ICMP (ping to gateway)
             if let Some(reply) = icmp_a.process(packet) {
-                return Some(reply);
+                backend_a_for_handler.inject_vec(reply);
+                return;
             }
-            // Try routing to other vNIC
-            router_a.route_packet(&nic_id_a, packet);
-            None
+            // Try routing to other vNIC (consumes buffer)
+            router_a.route_packet(&nic_id_a, buffer);
         }));
 
         let router_b = router.clone();
@@ -422,19 +438,23 @@ impl RoutingTestBackend {
         let arp_b = ArpResponder::new(mac_b);
         let icmp_b = IcmpResponder::new();
         let nic_id_b = nic_b.id.clone();
+        let backend_b_for_handler = backend_b.clone();
 
-        backend_b.set_packet_handler(Box::new(move |packet| {
+        backend_b.set_packet_handler(Box::new(move |buffer| {
+            let packet = buffer.data();
+
             // Try ARP
             if let Some(reply) = arp_b.process(packet) {
-                return Some(reply);
+                backend_b_for_handler.inject_vec(reply);
+                return;
             }
             // Try ICMP (ping to gateway)
             if let Some(reply) = icmp_b.process(packet) {
-                return Some(reply);
+                backend_b_for_handler.inject_vec(reply);
+                return;
             }
-            // Try routing to other vNIC
-            router_b.route_packet(&nic_id_b, packet);
-            None
+            // Try routing to other vNIC (consumes buffer)
+            router_b.route_packet(&nic_id_b, buffer);
         }));
 
         // Spawn RX injection threads
@@ -529,7 +549,8 @@ fn run_rx_injection(
                     "[RX INJECT] Injecting packet of {} bytes",
                     packet.buffer.len
                 );
-                backend.inject_and_deliver_slice(packet.buffer.data());
+                // Zero-copy injection - pass buffer directly
+                backend.inject_buffer_and_deliver(packet.buffer);
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
