@@ -8,8 +8,9 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use crossbeam_channel::Sender;
 use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
@@ -42,6 +43,7 @@ pub struct RouteEntry {
 }
 
 /// Channel for routing packets to a NIC
+#[derive(Clone)]
 pub struct NicChannel {
     /// Channel sender for routed packets
     pub sender: Sender<RoutedPacket>,
@@ -49,23 +51,248 @@ pub struct NicChannel {
     pub mac: [u8; 6],
 }
 
-/// Per-network router with efficient LPM using prefix tries
+// ============================================================================
+// Lock-Free Routing Infrastructure
+// ============================================================================
+
+/// Route update message for propagating changes to workers
 #[derive(Clone)]
-pub struct NetworkRouter {
-    inner: Arc<RwLock<NetworkRouterInner>>,
-    #[allow(dead_code)]
-    network_id: String,
+pub enum RouteUpdate {
+    /// Add an IPv4 route
+    AddIpv4Route {
+        network_id: String,
+        prefix: Ipv4Net,
+        nic_id: String,
+        direct: bool,
+    },
+    /// Add an IPv6 route
+    AddIpv6Route {
+        network_id: String,
+        prefix: Ipv6Net,
+        nic_id: String,
+        direct: bool,
+    },
+    /// Remove an IPv4 route
+    RemoveIpv4Route { network_id: String, prefix: Ipv4Net },
+    /// Remove an IPv6 route
+    RemoveIpv6Route { network_id: String, prefix: Ipv6Net },
+    /// Register a NIC channel
+    RegisterNic {
+        network_id: String,
+        nic_id: String,
+        channel: NicChannel,
+    },
+    /// Unregister a NIC (removes routes and channel)
+    UnregisterNic { network_id: String, nic_id: String },
 }
 
-struct NetworkRouterInner {
+impl std::fmt::Debug for RouteUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RouteUpdate::AddIpv4Route {
+                network_id,
+                prefix,
+                nic_id,
+                direct,
+            } => f
+                .debug_struct("AddIpv4Route")
+                .field("network_id", network_id)
+                .field("prefix", prefix)
+                .field("nic_id", nic_id)
+                .field("direct", direct)
+                .finish(),
+            RouteUpdate::AddIpv6Route {
+                network_id,
+                prefix,
+                nic_id,
+                direct,
+            } => f
+                .debug_struct("AddIpv6Route")
+                .field("network_id", network_id)
+                .field("prefix", prefix)
+                .field("nic_id", nic_id)
+                .field("direct", direct)
+                .finish(),
+            RouteUpdate::RemoveIpv4Route { network_id, prefix } => f
+                .debug_struct("RemoveIpv4Route")
+                .field("network_id", network_id)
+                .field("prefix", prefix)
+                .finish(),
+            RouteUpdate::RemoveIpv6Route { network_id, prefix } => f
+                .debug_struct("RemoveIpv6Route")
+                .field("network_id", network_id)
+                .field("prefix", prefix)
+                .finish(),
+            RouteUpdate::RegisterNic {
+                network_id, nic_id, ..
+            } => f
+                .debug_struct("RegisterNic")
+                .field("network_id", network_id)
+                .field("nic_id", nic_id)
+                .finish_non_exhaustive(),
+            RouteUpdate::UnregisterNic { network_id, nic_id } => f
+                .debug_struct("UnregisterNic")
+                .field("network_id", network_id)
+                .field("nic_id", nic_id)
+                .finish(),
+        }
+    }
+}
+
+/// Local routing state - owned by each worker, no locks needed for reads
+///
+/// This is the read-side of the routing tables. Workers receive updates via
+/// channels and rebuild their local state. Lookups are lock-free.
+#[derive(Clone)]
+pub struct LocalRouting {
     /// IPv4 routes with O(log n) LPM
-    ipv4_routes: PrefixMap<Ipv4Net, RouteEntry>,
+    pub ipv4_routes: PrefixMap<Ipv4Net, RouteEntry>,
     /// IPv6 routes with O(log n) LPM
-    ipv6_routes: PrefixMap<Ipv6Net, RouteEntry>,
+    pub ipv6_routes: PrefixMap<Ipv6Net, RouteEntry>,
     /// Channel senders per NIC for packet forwarding
-    nic_channels: HashMap<String, NicChannel>,
+    pub nic_channels: HashMap<String, NicChannel>,
     /// Whether this is a public network (allows internet access via TUN)
-    is_public: bool,
+    pub is_public: bool,
+}
+
+impl LocalRouting {
+    /// Create a new empty local routing state
+    pub fn new(is_public: bool) -> Self {
+        Self {
+            ipv4_routes: PrefixMap::new(),
+            ipv6_routes: PrefixMap::new(),
+            nic_channels: HashMap::new(),
+            is_public,
+        }
+    }
+
+    /// Look up an IPv4 address using LPM - O(log n), lock-free
+    #[inline]
+    pub fn lookup_ipv4(&self, addr: Ipv4Addr) -> Option<&RouteEntry> {
+        let key = Ipv4Net::new(addr, 32).ok()?;
+        self.ipv4_routes.get_lpm(&key).map(|(_, entry)| entry)
+    }
+
+    /// Look up an IPv6 address using LPM - O(log n), lock-free
+    #[inline]
+    pub fn lookup_ipv6(&self, addr: Ipv6Addr) -> Option<&RouteEntry> {
+        let key = Ipv6Net::new(addr, 128).ok()?;
+        self.ipv6_routes.get_lpm(&key).map(|(_, entry)| entry)
+    }
+
+    /// Get the NIC channel for a given NIC ID
+    #[inline]
+    pub fn get_nic_channel(&self, nic_id: &str) -> Option<&NicChannel> {
+        self.nic_channels.get(nic_id)
+    }
+
+    /// Apply a route update, returning a new LocalRouting with the change
+    ///
+    /// This is used for copy-on-write updates via ArcSwap.
+    pub fn apply_update(&self, update: &RouteUpdate) -> Self {
+        let mut new = self.clone();
+        match update {
+            RouteUpdate::AddIpv4Route {
+                prefix,
+                nic_id,
+                direct,
+                ..
+            } => {
+                new.ipv4_routes.insert(
+                    *prefix,
+                    RouteEntry {
+                        nic_id: nic_id.clone(),
+                        direct: *direct,
+                    },
+                );
+            }
+            RouteUpdate::AddIpv6Route {
+                prefix,
+                nic_id,
+                direct,
+                ..
+            } => {
+                new.ipv6_routes.insert(
+                    *prefix,
+                    RouteEntry {
+                        nic_id: nic_id.clone(),
+                        direct: *direct,
+                    },
+                );
+            }
+            RouteUpdate::RemoveIpv4Route { prefix, .. } => {
+                new.ipv4_routes.remove(prefix);
+            }
+            RouteUpdate::RemoveIpv6Route { prefix, .. } => {
+                new.ipv6_routes.remove(prefix);
+            }
+            RouteUpdate::RegisterNic {
+                nic_id, channel, ..
+            } => {
+                new.nic_channels.insert(nic_id.clone(), channel.clone());
+            }
+            RouteUpdate::UnregisterNic { nic_id, .. } => {
+                new.nic_channels.remove(nic_id);
+                new.ipv4_routes.retain(|_, v| v.nic_id != *nic_id);
+                new.ipv6_routes.retain(|_, v| v.nic_id != *nic_id);
+            }
+        }
+        new
+    }
+}
+
+/// Handle for lock-free routing lookups using ArcSwap
+///
+/// Multiple readers can access the routing tables concurrently without locks.
+/// Updates are applied via copy-on-write: a new LocalRouting is created and
+/// swapped in atomically.
+#[derive(Clone)]
+pub struct RoutingHandle {
+    routing: Arc<ArcSwap<LocalRouting>>,
+}
+
+impl RoutingHandle {
+    /// Create a new routing handle with the given initial state
+    pub fn new(routing: LocalRouting) -> Self {
+        Self {
+            routing: Arc::new(ArcSwap::from_pointee(routing)),
+        }
+    }
+
+    /// Get a guard to the current routing state (lock-free read)
+    #[inline]
+    pub fn load(&self) -> arc_swap::Guard<Arc<LocalRouting>> {
+        self.routing.load()
+    }
+
+    /// Update the routing state atomically (copy-on-write)
+    pub fn update(&self, update: &RouteUpdate) {
+        // Load current, apply update, store new
+        let current = self.routing.load();
+        let new = current.apply_update(update);
+        self.routing.store(Arc::new(new));
+    }
+
+    /// Replace the entire routing state
+    pub fn store(&self, routing: LocalRouting) {
+        self.routing.store(Arc::new(routing));
+    }
+}
+
+// ============================================================================
+// NetworkRouter - Lock-Free Implementation using ArcSwap
+// ============================================================================
+
+/// Per-network router with efficient LPM using prefix tries
+///
+/// Now uses ArcSwap internally for lock-free lookups. Write operations
+/// use copy-on-write semantics.
+#[derive(Clone)]
+pub struct NetworkRouter {
+    /// Lock-free routing state
+    routing: RoutingHandle,
+    /// Network ID (for route updates)
+    network_id: String,
 }
 
 impl NetworkRouter {
@@ -77,87 +304,83 @@ impl NetworkRouter {
     ///   If false, such packets are dropped (network isolation).
     pub fn new(network_id: String, is_public: bool) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(NetworkRouterInner {
-                ipv4_routes: PrefixMap::new(),
-                ipv6_routes: PrefixMap::new(),
-                nic_channels: HashMap::new(),
-                is_public,
-            })),
+            routing: RoutingHandle::new(LocalRouting::new(is_public)),
             network_id,
         }
     }
 
-    /// Check if this router is for a public network
+    /// Check if this router is for a public network (lock-free read)
+    #[inline]
     pub fn is_public(&self) -> bool {
-        self.inner.read().unwrap().is_public
+        self.routing.load().is_public
     }
 
-    /// Register a NIC's channel for receiving routed packets
+    /// Register a NIC's channel for receiving routed packets (copy-on-write)
     pub fn register_nic(&self, nic_id: String, channel: NicChannel) {
-        let mut inner = self.inner.write().unwrap();
-        inner.nic_channels.insert(nic_id, channel);
+        self.routing.update(&RouteUpdate::RegisterNic {
+            network_id: self.network_id.clone(),
+            nic_id,
+            channel,
+        });
     }
 
-    /// Unregister a NIC and remove its routes
+    /// Unregister a NIC and remove its routes (copy-on-write)
     pub fn unregister_nic(&self, nic_id: &str) {
-        let mut inner = self.inner.write().unwrap();
-        inner.nic_channels.remove(nic_id);
-        // Remove routes for this NIC
-        inner.ipv4_routes.retain(|_, v| v.nic_id != nic_id);
-        inner.ipv6_routes.retain(|_, v| v.nic_id != nic_id);
+        self.routing.update(&RouteUpdate::UnregisterNic {
+            network_id: self.network_id.clone(),
+            nic_id: nic_id.to_string(),
+        });
     }
 
-    /// Add an IPv4 route
+    /// Add an IPv4 route (copy-on-write)
     pub fn add_ipv4_route(&self, prefix: Ipv4Net, nic_id: String, direct: bool) {
-        let mut inner = self.inner.write().unwrap();
-        inner
-            .ipv4_routes
-            .insert(prefix, RouteEntry { nic_id, direct });
+        self.routing.update(&RouteUpdate::AddIpv4Route {
+            network_id: self.network_id.clone(),
+            prefix,
+            nic_id,
+            direct,
+        });
     }
 
-    /// Add an IPv6 route
+    /// Add an IPv6 route (copy-on-write)
     pub fn add_ipv6_route(&self, prefix: Ipv6Net, nic_id: String, direct: bool) {
-        let mut inner = self.inner.write().unwrap();
-        inner
-            .ipv6_routes
-            .insert(prefix, RouteEntry { nic_id, direct });
+        self.routing.update(&RouteUpdate::AddIpv6Route {
+            network_id: self.network_id.clone(),
+            prefix,
+            nic_id,
+            direct,
+        });
     }
 
-    /// Remove an IPv4 route
+    /// Remove an IPv4 route (copy-on-write)
     pub fn remove_ipv4_route(&self, prefix: &Ipv4Net) {
-        let mut inner = self.inner.write().unwrap();
-        inner.ipv4_routes.remove(prefix);
+        self.routing.update(&RouteUpdate::RemoveIpv4Route {
+            network_id: self.network_id.clone(),
+            prefix: *prefix,
+        });
     }
 
-    /// Remove an IPv6 route
+    /// Remove an IPv6 route (copy-on-write)
     pub fn remove_ipv6_route(&self, prefix: &Ipv6Net) {
-        let mut inner = self.inner.write().unwrap();
-        inner.ipv6_routes.remove(prefix);
+        self.routing.update(&RouteUpdate::RemoveIpv6Route {
+            network_id: self.network_id.clone(),
+            prefix: *prefix,
+        });
     }
 
-    /// Look up an IPv4 address using LPM - O(log n)
+    /// Look up an IPv4 address using LPM - O(log n), LOCK-FREE
+    #[inline]
     pub fn lookup_ipv4(&self, addr: Ipv4Addr) -> Option<RouteEntry> {
-        let inner = self.inner.read().unwrap();
-        // Create a /32 prefix for the lookup address
-        let key = Ipv4Net::new(addr, 32).ok()?;
-        inner
-            .ipv4_routes
-            .get_lpm(&key)
-            .map(|(_, entry)| entry.clone())
+        self.routing.load().lookup_ipv4(addr).cloned()
     }
 
-    /// Look up an IPv6 address using LPM - O(log n)
+    /// Look up an IPv6 address using LPM - O(log n), LOCK-FREE
+    #[inline]
     pub fn lookup_ipv6(&self, addr: Ipv6Addr) -> Option<RouteEntry> {
-        let inner = self.inner.read().unwrap();
-        // Create a /128 prefix for the lookup address
-        let key = Ipv6Net::new(addr, 128).ok()?;
-        inner
-            .ipv6_routes
-            .get_lpm(&key)
-            .map(|(_, entry)| entry.clone())
+        self.routing.load().lookup_ipv6(addr).cloned()
     }
 
-    /// Route a packet to its destination (TRUE zero-copy path)
+    /// Route a packet to its destination (TRUE zero-copy path, LOCK-FREE lookups)
     ///
     /// Consumes the buffer. No allocation, no copy (except in-place header modifications).
     ///
@@ -174,6 +397,9 @@ impl NetworkRouter {
         // Ethernet header is 14 bytes
         const ETH_HEADER_LEN: usize = 14;
 
+        // Load routing state once for the entire operation (lock-free!)
+        let routing = self.routing.load();
+
         let target_nic_id = match frame.ethertype() {
             EthernetProtocol::Ipv4 => {
                 let Ok(ipv4) = Ipv4Packet::new_checked(frame.payload()) else {
@@ -188,7 +414,7 @@ impl NetworkRouter {
                 }
 
                 let dst = ipv4.dst_addr();
-                let target = self.lookup_ipv4(dst).map(|e| e.nic_id);
+                let target = routing.lookup_ipv4(dst).map(|e| e.nic_id.clone());
 
                 // Decrement TTL IN-PLACE
                 decrement_ipv4_ttl(&mut buffer.data_mut()[ETH_HEADER_LEN..]);
@@ -214,7 +440,7 @@ impl NetworkRouter {
                     return RouteResult::Dropped;
                 }
 
-                let target = self.lookup_ipv6(dst).map(|e| e.nic_id);
+                let target = routing.lookup_ipv6(dst).map(|e| e.nic_id.clone());
 
                 // Decrement Hop Limit IN-PLACE
                 decrement_ipv6_hop_limit(&mut buffer.data_mut()[ETH_HEADER_LEN..]);
@@ -227,8 +453,7 @@ impl NetworkRouter {
         // No local target found
         let Some(target) = target_nic_id else {
             // Check if this is a public network - if so, forward to internet via TUN
-            let inner = self.inner.read().unwrap();
-            if inner.is_public {
+            if routing.is_public {
                 // Strip Ethernet header IN-PLACE for TUN (no copy!)
                 buffer.strip_eth_header();
                 debug!(
@@ -251,9 +476,8 @@ impl NetworkRouter {
             return RouteResult::Dropped;
         }
 
-        // Send to target NIC
-        let inner = self.inner.read().unwrap();
-        if let Some(channel) = inner.nic_channels.get(&target) {
+        // Send to target NIC (still using the same routing guard)
+        if let Some(channel) = routing.nic_channels.get(&target) {
             // Rewrite Ethernet header IN-PLACE for L3 routing:
             // - Dst MAC = target NIC's MAC
             // - Src MAC = gateway MAC (we are the router)
@@ -278,7 +502,7 @@ impl NetworkRouter {
         RouteResult::Dropped
     }
 
-    /// Inject a packet directly to a NIC with a specific virtio header
+    /// Inject a packet directly to a NIC with a specific virtio header (LOCK-FREE)
     ///
     /// Used for TUN->VM packets where we want to preserve GSO metadata.
     /// Unlike route_packet, this does NOT decrement TTL (already done by kernel).
@@ -288,8 +512,9 @@ impl NetworkRouter {
         mut buffer: PoolBuffer,
         virtio_hdr: VirtioNetHdr,
     ) -> bool {
-        let inner = self.inner.read().unwrap();
-        if let Some(channel) = inner.nic_channels.get(target_nic_id) {
+        // Lock-free load of routing state
+        let routing = self.routing.load();
+        if let Some(channel) = routing.nic_channels.get(target_nic_id) {
             // Rewrite Ethernet header: dst MAC = target NIC's MAC, src MAC = gateway
             rewrite_ethernet_header(buffer.data_mut(), channel.mac, GATEWAY_MAC);
 

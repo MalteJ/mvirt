@@ -713,8 +713,8 @@ impl TunReaderHandle {
     }
 }
 
-/// Shared routers accessible from TUN IO thread
-type SharedRouters = Arc<std::sync::RwLock<HashMap<String, NetworkRouter>>>;
+/// Shared routers accessible from TUN IO thread (lock-free reads via ArcSwap)
+type SharedRouters = Arc<arc_swap::ArcSwap<HashMap<String, NetworkRouter>>>;
 
 /// Worker manager that tracks all active workers with per-network routing
 pub struct WorkerManager {
@@ -754,8 +754,8 @@ impl WorkerManager {
         // Create channel for outgoing packets (workers -> TUN)
         let (tun_tx, tun_rx) = crossbeam_channel::unbounded::<TunPacket>();
 
-        // Shared routers accessible from TUN thread
-        let routers: SharedRouters = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        // Shared routers accessible from TUN thread (lock-free via ArcSwap)
+        let routers: SharedRouters = Arc::new(arc_swap::ArcSwap::from_pointee(HashMap::new()));
         let routers_for_tun = routers.clone();
         let pool_for_tun = pool.clone();
 
@@ -785,13 +785,19 @@ impl WorkerManager {
             return Err(format!("Worker for NIC {} already running", nic.id));
         }
 
-        // Get or create router for this network
+        // Get or create router for this network (copy-on-write update)
         let router = {
-            let mut routers = self.routers.write().unwrap();
-            routers
-                .entry(network.id.clone())
-                .or_insert_with(|| NetworkRouter::new(network.id.clone(), network.is_public))
-                .clone()
+            let current = self.routers.load();
+            if let Some(existing) = current.get(&network.id) {
+                existing.clone()
+            } else {
+                // Need to insert new router - copy-on-write
+                let new_router = NetworkRouter::new(network.id.clone(), network.is_public);
+                let mut new_map = (**current).clone();
+                new_map.insert(network.id.clone(), new_router.clone());
+                self.routers.store(Arc::new(new_map));
+                new_router
+            }
         };
 
         // For public networks, pass TUN sender
@@ -835,8 +841,8 @@ impl WorkerManager {
     pub fn stop(&mut self, nic_id: &str) -> Result<(), String> {
         if let Some(handle) = self.workers.remove(nic_id) {
             handle.stop();
-            // Unregister from the network's router
-            let routers = self.routers.read().unwrap();
+            // Unregister from the network's router (lock-free read)
+            let routers = self.routers.load();
             if let Some(router) = routers.get(&handle.network_id) {
                 router.unregister_nic(nic_id);
             }
@@ -848,7 +854,7 @@ impl WorkerManager {
 
     /// Stop all workers
     pub fn stop_all(&mut self) {
-        let routers = self.routers.read().unwrap();
+        let routers = self.routers.load();
         for (nic_id, handle) in self.workers.drain() {
             handle.stop();
             if let Some(router) = routers.get(&handle.network_id) {
@@ -864,9 +870,12 @@ impl WorkerManager {
         }
     }
 
-    /// Remove a network's router (call when network is deleted)
+    /// Remove a network's router (call when network is deleted, copy-on-write)
     pub fn remove_network(&mut self, network_id: &str) {
-        self.routers.write().unwrap().remove(network_id);
+        let current = self.routers.load();
+        let mut new_map = (**current).clone();
+        new_map.remove(network_id);
+        self.routers.store(Arc::new(new_map));
     }
 
     /// Check if a worker is running
@@ -879,9 +888,9 @@ impl WorkerManager {
         self.workers.keys().cloned().collect()
     }
 
-    /// Get router for a network (if it exists)
+    /// Get router for a network (if it exists, lock-free read)
     pub fn router(&self, network_id: &str) -> Option<NetworkRouter> {
-        self.routers.read().unwrap().get(network_id).cloned()
+        self.routers.load().get(network_id).cloned()
     }
 }
 
@@ -902,6 +911,8 @@ fn run_tun_io(
     use nix::sys::uio::writev;
     use std::os::fd::BorrowedFd;
 
+    const BATCH_LIMIT: usize = 64;
+
     info!("TUN IO thread started");
 
     let tun_fd = tun.as_raw_fd();
@@ -913,10 +924,12 @@ fn run_tun_io(
 
         let mut did_work = false;
 
-        // 1. First drain ALL outgoing packets (VM -> TUN) without blocking
-        loop {
+        // 1. Drain outgoing packets (VM -> TUN) with batch limit
+        let mut tx_count = 0;
+        while tx_count < BATCH_LIMIT {
             match tun_rx.try_recv() {
                 Ok(packet) => {
+                    tx_count += 1;
                     did_work = true;
                     // Adjust virtio header offsets: VM sends offsets relative to
                     // Ethernet frame, but TUN operates on raw IP packets (no Ethernet).
@@ -962,61 +975,45 @@ fn run_tun_io(
             }
         }
 
-        // 2. Then drain ALL incoming packets (Internet -> VM) without blocking
-        loop {
-            let poll_fd = PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
-
-            match poll(&mut [poll_fd], PollTimeout::ZERO) {
-                Ok(n) if n > 0 => {
-                    did_work = true;
-                    let Some(mut buffer) = pool.alloc() else {
-                        warn!("Buffer pool exhausted, dropping incoming TUN packet");
-                        let mut tmp = [0u8; 1500];
-                        let _ = tun.read_packet(&mut tmp);
-                        continue;
-                    };
-
-                    match tun.read_packet(buffer.write_area()) {
-                        Ok(len) => {
-                            // With IFF_VNET_HDR, kernel prepends 12-byte virtio_net_hdr
-                            if len > VIRTIO_HDR_SIZE {
-                                // A. Read virtio header BEFORE skipping it
-                                let hdr_bytes = &buffer.write_area()[..VIRTIO_HDR_SIZE];
-                                let mut virtio_hdr = *VirtioNetHdr::from_slice(hdr_bytes).unwrap();
-
-                                // B. Adjust offsets: TUN provides offsets relative to IP packet,
-                                //    but VM expects offsets relative to Ethernet frame (+14)
-                                let eth_offset = ETH_HEADROOM as u16;
-                                if virtio_hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
-                                    let csum = virtio_hdr.csum_start.to_native();
-                                    virtio_hdr.csum_start = (csum + eth_offset).into();
-                                }
-                                if virtio_hdr.gso_type != VIRTIO_NET_HDR_GSO_NONE {
-                                    let hdr_len = virtio_hdr.hdr_len.to_native();
-                                    virtio_hdr.hdr_len = (hdr_len + eth_offset).into();
-                                }
-
-                                // C. Skip virtio header to get raw IP packet
-                                buffer.start += VIRTIO_HDR_SIZE;
-                                buffer.len = len - VIRTIO_HDR_SIZE;
-
-                                // D. Route with virtio header for GSO support
-                                route_tun_packet_to_nic_buffer(buffer, virtio_hdr, &routers, &pool);
-                            } else {
-                                trace!(len, "TUN packet too small, dropping");
-                            }
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(e) => {
-                            warn!(error = %e, "Failed to read from TUN");
-                            break;
-                        }
-                    }
-                }
-                Ok(_) => break, // No data available
-                Err(e) => {
-                    warn!(error = %e, "Poll on TUN fd failed");
+        // 2. Drain incoming packets (Internet -> VM) - poll once, then batch read
+        let poll_fd = PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
+        if let Ok(n) = poll(&mut [poll_fd], PollTimeout::ZERO)
+            && n > 0
+        {
+            did_work = true;
+            let mut rx_count = 0;
+            while rx_count < BATCH_LIMIT {
+                let Some(mut buffer) = pool.alloc() else {
+                    warn!("Buffer pool exhausted");
+                    let mut tmp = [0u8; 1500];
+                    let _ = tun.read_packet(&mut tmp);
                     break;
+                };
+
+                match tun.read_packet(buffer.write_area()) {
+                    Ok(len) if len > VIRTIO_HDR_SIZE => {
+                        rx_count += 1;
+                        let hdr_bytes = &buffer.write_area()[..VIRTIO_HDR_SIZE];
+                        let mut virtio_hdr = *VirtioNetHdr::from_slice(hdr_bytes).unwrap();
+
+                        let eth_offset = ETH_HEADROOM as u16;
+                        if virtio_hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+                            let csum = virtio_hdr.csum_start.to_native();
+                            virtio_hdr.csum_start = (csum + eth_offset).into();
+                        }
+                        if virtio_hdr.gso_type != VIRTIO_NET_HDR_GSO_NONE {
+                            let hdr_len = virtio_hdr.hdr_len.to_native();
+                            virtio_hdr.hdr_len = (hdr_len + eth_offset).into();
+                        }
+
+                        buffer.start += VIRTIO_HDR_SIZE;
+                        buffer.len = len - VIRTIO_HDR_SIZE;
+
+                        route_tun_packet_to_nic_buffer(buffer, virtio_hdr, &routers, &pool);
+                    }
+                    Ok(_) => {} // too small
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => break,
                 }
             }
         }
@@ -1081,14 +1078,14 @@ fn route_tun_packet_to_nic_buffer(
     // Dst MAC is placeholder - inject_to_nic will overwrite it
     buffer.prepend_eth_header([0u8; 6], GATEWAY_MAC, ethertype);
 
-    // Find which router has a route for this destination and get target NIC
-    let routers_guard = routers.read().unwrap();
+    // Find which router has a route for this destination and get target NIC (lock-free!)
+    let routers_guard = routers.load();
     for router in routers_guard.values() {
         if !router.is_public() {
             continue;
         }
 
-        // Look up target NIC for destination
+        // Look up target NIC for destination (lock-free lookup in router too!)
         let target_nic_id = match (dst_ipv4, dst_ipv6) {
             (Some(addr), _) => router.lookup_ipv4(addr).map(|e| e.nic_id),
             (_, Some(addr)) => router.lookup_ipv6(addr).map(|e| e.nic_id),
@@ -1096,7 +1093,7 @@ fn route_tun_packet_to_nic_buffer(
         };
 
         if let Some(target_nic_id) = target_nic_id {
-            // Clone router and target_nic_id, release lock, then inject
+            // Clone router and target_nic_id for injection
             let router = router.clone();
             let target_nic_id = target_nic_id.clone();
             drop(routers_guard);
