@@ -44,5 +44,5 @@ pub use router::{
 pub use tun::{TunDevice, add_route, get_routes, remove_route};
 pub use vhost::{
     VIRTIO_NET_HDR_F_DATA_VALID, VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE,
-    VIRTIO_NET_HDR_GSO_TCPV4, VIRTIO_NET_HDR_GSO_TCPV6, VhostNetBackend, VirtioNetHdr,
+    VIRTIO_NET_HDR_GSO_TCPV4, VIRTIO_NET_HDR_GSO_TCPV6, VhostNetBackend, VirtioNetHdr, parse_mac,
 };

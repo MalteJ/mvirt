@@ -638,7 +638,7 @@ impl VhostUserBackend for VhostNetBackend {
 }
 
 /// Parse MAC address string to bytes
-fn parse_mac(mac: &str) -> Option<[u8; 6]> {
+pub fn parse_mac(mac: &str) -> Option<[u8; 6]> {
     let parts: Vec<&str> = mac.split(':').collect();
     if parts.len() != 6 {
         return None;

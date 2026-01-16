@@ -3,27 +3,40 @@
 //! Manages the lifecycle of vNIC and TUN reactors.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use tracing::{info, warn};
+use ipnet::{Ipv4Net, Ipv6Net};
+use nix::libc;
+use tracing::{debug, info, warn};
+use vhost::vhost_user::Listener;
+use vhost_user_backend::VhostUserDaemon;
+use vm_memory::GuestMemoryAtomic;
 
 use crate::config::{NetworkEntry, NicEntry};
 
-use super::backend::TunBackend;
+use super::backend::{TunBackend, VhostBackend};
 use super::buffer::BufferPool;
 use super::reactor::{Reactor, ReactorConfig, ReactorRegistry};
 use super::router::NetworkRouter;
 use super::tun::TunDevice;
+use super::vhost::{VhostNetBackend, parse_mac};
 
 /// Handle to a running reactor
 pub struct ReactorHandle {
-    /// Shutdown signal sender
+    /// Shutdown signal sender (for Reactor thread)
     shutdown: crossbeam_channel::Sender<()>,
-    /// Thread handle
-    thread: Option<JoinHandle<()>>,
+    /// Shutdown flag (for VhostUserDaemon thread)
+    shutdown_flag: Arc<AtomicBool>,
+    /// Reactor thread handle
+    reactor_thread: Option<JoinHandle<()>>,
+    /// VhostUserDaemon thread handle
+    daemon_thread: Option<JoinHandle<()>>,
     /// Reactor ID (NIC ID)
     pub id: String,
     /// Socket path
@@ -36,18 +49,29 @@ impl ReactorHandle {
     /// Signal the reactor to stop
     pub fn stop(&self) {
         let _ = self.shutdown.send(());
+        self.shutdown_flag.store(true, Ordering::SeqCst);
     }
 
     /// Check if still running
     pub fn is_running(&self) -> bool {
-        self.thread.as_ref().is_some_and(|h| !h.is_finished())
+        self.reactor_thread
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
+            || self
+                .daemon_thread
+                .as_ref()
+                .is_some_and(|h| !h.is_finished())
     }
 }
 
 impl Drop for ReactorHandle {
     fn drop(&mut self) {
         self.stop();
-        if let Some(handle) = self.thread.take() {
+        // Join both threads
+        if let Some(handle) = self.reactor_thread.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.daemon_thread.take() {
             let _ = handle.join();
         }
         // Clean up socket
@@ -166,20 +190,128 @@ impl ReactorManager {
             self.registry.register_tun(network.id.clone(), tun_sender);
         }
 
-        // TODO: Create VhostBackend and spawn vNIC reactor
-        // For now, just create a placeholder handle
-        let (shutdown_tx, _shutdown_rx) = crossbeam_channel::bounded(1);
+        // 1. Parse MAC address
+        let mac = parse_mac(&nic.mac_address)
+            .ok_or_else(|| format!("Invalid MAC address: {}", nic.mac_address))?;
 
+        // 2. Parse IP addresses (optional)
+        let ipv4_addr = nic
+            .ipv4_address
+            .as_ref()
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e| format!("Invalid IPv4 address: {e}"))?
+            .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+        let ipv6_addr = nic
+            .ipv6_address
+            .as_ref()
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e| format!("Invalid IPv6 address: {e}"))?
+            .unwrap_or(std::net::Ipv6Addr::UNSPECIFIED);
+
+        // 3. Create shutdown mechanisms
+        let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+        // 4. Create VhostNetBackend
+        let vhost_net_backend = Arc::new(
+            VhostNetBackend::new(nic.clone(), shutdown_flag.clone(), self.pool.clone())
+                .map_err(|e| format!("Failed to create VhostNetBackend: {e}"))?,
+        );
+
+        // 5. Create VhostBackend wrapper + packet channel
+        let (vhost_backend, packet_sender) = VhostBackend::new(vhost_net_backend.clone());
+
+        // 6. Set packet handler to forward guest TX to VhostBackend channel
+        vhost_net_backend.set_packet_handler(Box::new(move |buffer, virtio_hdr| {
+            let _ = packet_sender.try_send((buffer, virtio_hdr));
+        }));
+
+        // 7. Create ReactorConfig
+        let reactor_config = ReactorConfig::vnic(
+            nic.id.clone(),
+            network.id.clone(),
+            mac,
+            ipv4_addr,
+            ipv6_addr,
+            network.is_public,
+        );
+
+        // 8. Use router from earlier (rename _router to router)
+        let router = _router;
+
+        // 9. Create Reactor
+        let (mut reactor, reactor_sender) = Reactor::new(
+            vhost_backend,
+            reactor_config,
+            self.pool.clone(),
+            self.registry.clone(),
+            router.clone(),
+            shutdown_rx,
+        );
+
+        // 10. Register NIC with registry
+        self.registry
+            .register_nic(mac, nic.id.clone(), reactor_sender);
+
+        // 11. Add routes for NIC's IPs
+        if !ipv4_addr.is_unspecified() {
+            router.add_ipv4_route(
+                Ipv4Net::new(ipv4_addr, 32).expect("Valid /32 prefix"),
+                nic.id.clone(),
+                true,
+            );
+        }
+        if !ipv6_addr.is_unspecified() {
+            router.add_ipv6_route(
+                Ipv6Net::new(ipv6_addr, 128).expect("Valid /128 prefix"),
+                nic.id.clone(),
+                true,
+            );
+        }
+
+        // 12. Spawn VhostUserDaemon thread
+        let socket_path = PathBuf::from(&nic.socket_path);
+        let vhost_for_daemon = vhost_net_backend;
+        let shutdown_for_daemon = shutdown_flag.clone();
+        let nic_id_daemon = nic.id.clone();
+
+        let daemon_thread = std::thread::Builder::new()
+            .name(format!("vhost-{}", nic.id))
+            .spawn(move || {
+                run_vhost_daemon(
+                    &socket_path,
+                    vhost_for_daemon,
+                    shutdown_for_daemon,
+                    &nic_id_daemon,
+                );
+            })
+            .map_err(|e| format!("Failed to spawn vhost daemon: {e}"))?;
+
+        // 13. Spawn Reactor thread
+        let nic_id_reactor = nic.id.clone();
+        let reactor_thread = std::thread::Builder::new()
+            .name(format!("reactor-{}", nic.id))
+            .spawn(move || {
+                reactor.run();
+                debug!(nic_id = %nic_id_reactor, "Reactor thread stopped");
+            })
+            .map_err(|e| format!("Failed to spawn reactor: {e}"))?;
+
+        // 14. Create ReactorHandle
         let handle = ReactorHandle {
             shutdown: shutdown_tx,
-            thread: None, // TODO: spawn actual reactor
+            shutdown_flag,
+            reactor_thread: Some(reactor_thread),
+            daemon_thread: Some(daemon_thread),
             id: nic.id.clone(),
             socket_path: PathBuf::from(&nic.socket_path),
             network_id: network.id,
         };
 
         self.reactors.insert(nic.id.clone(), handle);
-        warn!(nic_id = %nic.id, "VhostBackend not yet implemented - vNIC reactor placeholder only");
+        info!(nic_id = %nic.id, "vNIC reactor started");
         Ok(())
     }
 
@@ -247,4 +379,67 @@ impl Drop for ReactorManager {
     fn drop(&mut self) {
         self.stop_all();
     }
+}
+
+/// Run the vhost-user daemon for a vNIC
+///
+/// This function handles the vhost-user protocol with the guest VM.
+/// It runs until the shutdown flag is set.
+fn run_vhost_daemon(
+    socket_path: &Path,
+    backend: Arc<VhostNetBackend>,
+    shutdown: Arc<AtomicBool>,
+    nic_id: &str,
+) {
+    let mut listener = match Listener::new(socket_path.to_string_lossy().as_ref(), true) {
+        Ok(l) => l,
+        Err(e) => {
+            warn!(nic_id, path = %socket_path.display(), error = %e, "Failed to create vhost listener");
+            return;
+        }
+    };
+
+    let mut daemon = match VhostUserDaemon::new(
+        format!("mvirt-{}", nic_id),
+        backend,
+        GuestMemoryAtomic::new(vm_memory::GuestMemoryMmap::new()),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(nic_id, error = %e, "Failed to create VhostUserDaemon");
+            return;
+        }
+    };
+
+    info!(nic_id, path = %socket_path.display(), "vhost-user daemon listening");
+
+    // Poll for connections with periodic shutdown checks
+    while !shutdown.load(Ordering::SeqCst) {
+        let mut pollfd = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        // Poll with 500ms timeout to allow checking shutdown flag
+        let ret = unsafe { libc::poll(&mut pollfd, 1, 500) };
+        if ret <= 0 {
+            continue;
+        }
+
+        debug!(nic_id, "Accepting vhost-user connection");
+
+        if let Err(e) = daemon.start(&mut listener) {
+            warn!(nic_id, error = %e, "VhostUserDaemon start error");
+            break;
+        }
+
+        // Wait for shutdown or disconnect
+        while !shutdown.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        break;
+    }
+
+    debug!(nic_id, "vhost-user daemon stopped");
 }
