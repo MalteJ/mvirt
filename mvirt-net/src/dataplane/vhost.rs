@@ -273,10 +273,11 @@ impl VhostNetBackend {
         let mem = mem_guard.memory();
         let mut processed_count = 0u32;
 
-        loop {
-            let mut vring_state = vring.get_mut();
-            let queue = vring_state.get_queue_mut();
+        // Acquire vring lock ONCE for the entire batch (avoids lock contention)
+        let mut vring_state = vring.get_mut();
+        let queue = vring_state.get_queue_mut();
 
+        loop {
             let avail_desc = match queue.pop_descriptor_chain(mem.clone()) {
                 Some(desc) => desc,
                 None => break,
@@ -335,6 +336,7 @@ impl VhostNetBackend {
                 // Handler decides whether to finalize checksum based on destination:
                 // - TUN (internet): Keep header, kernel does GSO/checksum
                 // - Local routing: Finalize checksum before forwarding
+                // NOTE: Handler uses separate resources (channels), safe to call while holding vring lock
                 {
                     let handler_guard = self.packet_handler.lock().unwrap();
                     if let Some(ref handler) = *handler_guard {
@@ -367,9 +369,8 @@ impl VhostNetBackend {
             return Ok(false);
         }
 
-        let mut vring_state = vring.get_mut();
-        let needs_notification = vring_state
-            .get_queue_mut()
+        // Use the same queue reference for needs_notification check
+        let needs_notification = queue
             .needs_notification(&*mem)
             .map_err(|e| io::Error::other(format!("Failed to check needs_notification: {e}")))?;
 
@@ -383,12 +384,12 @@ impl VhostNetBackend {
         let mem = mem_guard.memory();
         let mut processed_count = 0u32;
 
-        // Process packets from lock-free queue
-        // Pop packet FIRST to avoid losing descriptors on race
-        while let Some(packet) = self.rx_queue.pop() {
-            let mut vring_state = vring.get_mut();
-            let queue = vring_state.get_queue_mut();
+        // Acquire vring lock ONCE for the entire batch (avoids lock contention)
+        let mut vring_state = vring.get_mut();
+        let queue = vring_state.get_queue_mut();
 
+        // Process packets from lock-free queue
+        while let Some(packet) = self.rx_queue.pop() {
             let avail_desc = match queue.pop_descriptor_chain(mem.clone()) {
                 Some(desc) => desc,
                 None => {
@@ -483,9 +484,8 @@ impl VhostNetBackend {
             "Delivered RX packets"
         );
 
-        let mut vring_state = vring.get_mut();
-        let needs_notification = vring_state
-            .get_queue_mut()
+        // Use the same queue reference for needs_notification check
+        let needs_notification = queue
             .needs_notification(&*mem)
             .map_err(|e| io::Error::other(format!("Failed to check needs_notification: {e}")))?;
 
