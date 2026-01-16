@@ -1528,4 +1528,139 @@ mod tests {
             "IPv6 packet to external address should be routed to TUN"
         );
     }
+
+    // ========================================================================
+    // VhostBackend Integration Tests
+    // ========================================================================
+
+    /// Test end-to-end routing between two Reactors using VhostBackend-style flow
+    ///
+    /// This simulates the full architecture:
+    /// 1. VM A sends packet → VhostNetBackend.packet_handler → Reactor A inbox
+    /// 2. Reactor A processes → routes to Reactor B
+    /// 3. Reactor B receives in inbox → sends to backend (VM B)
+    #[test]
+    fn test_two_reactor_routing_via_vhost_flow() {
+        // Create shared infrastructure
+        let pool = Arc::new(BufferPool::new().unwrap());
+        let registry = Arc::new(ReactorRegistry::new());
+        let router = NetworkRouter::new("test-network".to_string(), false);
+
+        // NIC A config
+        let mac_a = [0x52, 0x54, 0x00, 0x00, 0x00, 0xAA];
+        let ip_a: std::net::Ipv4Addr = "10.0.0.10".parse().unwrap();
+        let config_a = ReactorConfig::vnic(
+            "nic-a".to_string(),
+            "test-network".to_string(),
+            mac_a,
+            ip_a,
+            "fd00::a".parse().unwrap(),
+            false,
+        );
+
+        // NIC B config
+        let mac_b = [0x52, 0x54, 0x00, 0x00, 0x00, 0xBB];
+        let ip_b: std::net::Ipv4Addr = "10.0.0.20".parse().unwrap();
+        let config_b = ReactorConfig::vnic(
+            "nic-b".to_string(),
+            "test-network".to_string(),
+            mac_b,
+            ip_b,
+            "fd00::b".parse().unwrap(),
+            false,
+        );
+
+        // Create backends
+        let backend_a = MockBackend::new();
+        let backend_b = MockBackend::new();
+
+        // Create reactors
+        let (_shutdown_tx_a, shutdown_rx_a) = crossbeam_channel::bounded(1);
+        let (_shutdown_tx_b, shutdown_rx_b) = crossbeam_channel::bounded(1);
+
+        let (mut reactor_a, sender_a) = Reactor::new(
+            backend_a,
+            config_a,
+            pool.clone(),
+            registry.clone(),
+            router.clone(),
+            shutdown_rx_a,
+        );
+
+        let (mut reactor_b, sender_b) = Reactor::new(
+            backend_b,
+            config_b,
+            pool.clone(),
+            registry.clone(),
+            router.clone(),
+            shutdown_rx_b,
+        );
+
+        // Register NICs with registry (MAC + NIC ID → sender)
+        registry.register_nic(mac_a, "nic-a".to_string(), sender_a);
+        registry.register_nic(mac_b, "nic-b".to_string(), sender_b);
+
+        // Add routes
+        use ipnet::Ipv4Net;
+        router.add_ipv4_route(Ipv4Net::new(ip_a, 32).unwrap(), "nic-a".to_string(), true);
+        router.add_ipv4_route(Ipv4Net::new(ip_b, 32).unwrap(), "nic-b".to_string(), true);
+
+        // === Simulate packet flow: A sends ICMP to B ===
+
+        // Create an ICMP echo request from A to B
+        // The packet is addressed to gateway MAC (for routing) with B's IP as destination
+        let gateway_mac = crate::dataplane::packet::GATEWAY_MAC;
+
+        // Build IPv4 ICMP echo request
+        let ip_payload = vec![
+            0x45, 0x00, 0x00, 0x1c, // IPv4 header: ver+IHL, DSCP, total length
+            0x00, 0x00, 0x00, 0x00, // identification, flags, fragment offset
+            0x40, 0x01, 0x00,
+            0x00, // TTL=64, protocol=ICMP, checksum (will be wrong but ok for test)
+            10, 0, 0, 10, // src IP (A)
+            10, 0, 0, 20, // dst IP (B)
+            // ICMP echo request
+            0x08, 0x00, 0x00, 0x00, // type=echo request, code, checksum
+            0x12, 0x34, 0x00, 0x01, // identifier, sequence
+        ];
+
+        let frame_a_to_b = make_eth_frame(gateway_mac, mac_a, 0x0800, &ip_payload);
+
+        // Inject packet to Reactor A's backend (simulating guest TX via VhostBackend flow)
+        reactor_a.backend.inject_rx(frame_a_to_b);
+
+        // Reactor A processes the packet from its backend
+        // This should: parse, skip protocol handlers (not for gateway), route to B
+        let did_work_a = reactor_a.process_backend_rx();
+        assert!(did_work_a, "Reactor A should have processed a packet");
+
+        // Reactor B should now have a packet in its inbox (from A's routing)
+        let did_work_b = reactor_b.process_inbox();
+        assert!(did_work_b, "Reactor B should have received routed packet");
+
+        // Verify the packet was sent to B's backend (mock stores sent packets)
+        let sent_to_b = reactor_b.backend.get_sent_packets();
+        assert_eq!(
+            sent_to_b.len(),
+            1,
+            "Reactor B should have sent 1 packet to backend"
+        );
+
+        // Verify the packet has correct structure
+        let received_packet = &sent_to_b[0];
+        assert!(
+            received_packet.len() >= 34,
+            "Packet should have eth + IP headers"
+        );
+
+        // Check IP addresses preserved through routing
+        let src_ip = &received_packet[26..30];
+        let dst_ip = &received_packet[30..34];
+        assert_eq!(src_ip, &[10, 0, 0, 10], "Src IP should be A");
+        assert_eq!(dst_ip, &[10, 0, 0, 20], "Dst IP should be B");
+
+        // Check ethertype preserved
+        let ethertype = u16::from_be_bytes([received_packet[12], received_packet[13]]);
+        assert_eq!(ethertype, 0x0800, "Ethertype should be IPv4");
+    }
 }
