@@ -15,7 +15,6 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 use ipnet::{Ipv4Net, Ipv6Net};
 use nix::libc;
-use nix::sys::eventfd::{EfdFlags, EventFd as NixEventFd};
 use tempfile::TempDir;
 use vhost::vhost_user::Listener;
 use vhost_user_backend::VhostUserDaemon;
@@ -315,12 +314,6 @@ impl RoutingTestBackend {
         let (tx_a, rx_a) = crossbeam_channel::unbounded();
         let (tx_b, rx_b) = crossbeam_channel::unbounded();
 
-        // Create wakeup eventfds
-        let wakeup_a =
-            NixEventFd::from_flags(EfdFlags::EFD_NONBLOCK).expect("Failed to create eventfd");
-        let wakeup_b =
-            NixEventFd::from_flags(EfdFlags::EFD_NONBLOCK).expect("Failed to create eventfd");
-
         // Parse MAC addresses
         let mac_a = parse_mac(&nic_a.mac).expect("Invalid MAC for NIC A");
         let mac_b = parse_mac(&nic_b.mac).expect("Invalid MAC for NIC B");
@@ -330,7 +323,6 @@ impl RoutingTestBackend {
             nic_a.id.clone(),
             NicChannel {
                 sender: tx_a,
-                wakeup: Arc::new(wakeup_a),
                 mac: mac_a,
             },
         );
@@ -338,7 +330,6 @@ impl RoutingTestBackend {
             nic_b.id.clone(),
             NicChannel {
                 sender: tx_b,
-                wakeup: Arc::new(wakeup_b),
                 mac: mac_b,
             },
         );

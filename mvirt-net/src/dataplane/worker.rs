@@ -12,13 +12,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nix::libc;
-use nix::sys::eventfd::{EfdFlags, EventFd as NixEventFd};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use vhost::vhost_user::Listener;
 use vhost_user_backend::VhostUserDaemon;
 use vm_memory::GuestMemoryAtomic;
@@ -562,6 +561,7 @@ fn run_worker(
 }
 
 /// RX injection thread - reads routed packets from channel and injects them into the VM
+/// Uses batch processing to amortize syscall overhead across multiple packets
 fn run_rx_injection(
     rx_channel: Receiver<RoutedPacket>,
     backend: Arc<VhostNetBackend>,
@@ -570,27 +570,52 @@ fn run_rx_injection(
 ) {
     debug!(nic_id = %nic_id, "RX injection thread started");
 
+    // Batch parameters: collect up to BATCH_SIZE packets or until BATCH_TIMEOUT
+    const BATCH_SIZE: usize = 32;
+    const BATCH_TIMEOUT: Duration = Duration::from_micros(100);
+
     loop {
         if shutdown.load(Ordering::SeqCst) {
             debug!(nic_id = %nic_id, "RX injection thread shutting down");
             break;
         }
 
+        // Collect a batch of packets
+        let mut batch: Vec<RoutedPacket> = Vec::with_capacity(BATCH_SIZE);
+        let deadline = Instant::now() + BATCH_TIMEOUT;
+
+        // First packet: use longer timeout to avoid busy-waiting when idle
         match rx_channel.recv_timeout(Duration::from_millis(100)) {
-            Ok(packet) => {
-                debug!(
-                    nic_id = %nic_id,
-                    len = packet.buffer.len,
-                    "Injecting routed packet"
-                );
-                // Use slice-based injection (copy happens inside vhost.rs)
-                backend.inject_and_deliver_slice(packet.buffer.data());
-            }
+            Ok(packet) => batch.push(packet),
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
                 debug!(nic_id = %nic_id, "RX channel disconnected");
                 break;
             }
+        }
+
+        // Collect more packets until batch full or timeout
+        while batch.len() < BATCH_SIZE {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            match rx_channel.recv_timeout(remaining) {
+                Ok(packet) => batch.push(packet),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        // Inject entire batch with single signal
+        if !batch.is_empty() {
+            trace!(
+                nic_id = %nic_id,
+                batch_size = batch.len(),
+                "Injecting packet batch"
+            );
+            backend.inject_batch(batch.iter().map(|p| p.buffer.data()));
         }
     }
 }
@@ -742,20 +767,15 @@ impl WorkerManager {
         // Create dedicated channel for this worker
         let (worker_tx, worker_rx) = crossbeam_channel::unbounded();
 
-        // Create wakeup EventFd for RX injection signaling
-        let wakeup_eventfd = NixEventFd::from_flags(EfdFlags::EFD_NONBLOCK)
-            .map_err(|e| format!("Failed to create wakeup eventfd: {e}"))?;
-
         // Parse NIC MAC address for Ethernet header rewriting
         let mac = parse_mac(&nic.mac_address)
             .ok_or_else(|| format!("Invalid MAC address: {}", nic.mac_address))?;
 
-        // Register with router including wakeup signal and MAC
+        // Register with router
         router.register_nic(
             nic.id.clone(),
             NicChannel {
                 sender: worker_tx,
-                wakeup: Arc::new(wakeup_eventfd),
                 mac,
             },
         );
@@ -840,71 +860,87 @@ fn run_tun_io(
     shutdown: Arc<AtomicBool>,
     pool: Arc<BufferPool>,
 ) {
+    use crossbeam_channel::TryRecvError;
     use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
     use nix::sys::uio::writev;
     use std::os::fd::BorrowedFd;
 
     info!("TUN IO thread started");
 
+    let tun_fd = tun.as_raw_fd();
+
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
 
-        // Check for outgoing packets (VM -> TUN) with a short timeout
-        match tun_rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(packet) => {
-                // Write to TUN device using writev (zero-copy from PoolBuffer)
-                let io_slice = packet.buffer.as_io_slice();
-                let fd = unsafe { BorrowedFd::borrow_raw(tun.as_raw_fd()) };
-                match writev(fd, &[std::io::IoSlice::new(io_slice.as_ref())]) {
-                    Ok(written) => {
-                        debug!(len = written, "Wrote packet to TUN (writev)");
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to write packet to TUN");
+        let mut did_work = false;
+
+        // 1. First drain ALL outgoing packets (VM -> TUN) without blocking
+        loop {
+            match tun_rx.try_recv() {
+                Ok(packet) => {
+                    did_work = true;
+                    let io_slice = packet.buffer.as_io_slice();
+                    let fd = unsafe { BorrowedFd::borrow_raw(tun_fd) };
+                    match writev(fd, &[std::io::IoSlice::new(io_slice.as_ref())]) {
+                        Ok(written) => {
+                            trace!(len = written, "Wrote packet to TUN");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to write packet to TUN");
+                        }
                     }
                 }
-                // packet.buffer is dropped here, returning to pool
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                info!("TUN channel disconnected, exiting");
-                break;
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    info!("TUN channel disconnected, exiting");
+                    return;
+                }
             }
         }
 
-        // Poll TUN fd for incoming packets (Internet -> VM)
-        let tun_fd = tun.as_raw_fd();
-        let poll_fd = PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
+        // 2. Then drain ALL incoming packets (Internet -> VM) without blocking
+        loop {
+            let poll_fd =
+                PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
 
-        match poll(&mut [poll_fd], PollTimeout::ZERO) {
-            Ok(n) if n > 0 => {
-                // Allocate buffer from pool for reading
-                let Some(mut buffer) = pool.alloc() else {
-                    warn!("Buffer pool exhausted, dropping incoming TUN packet");
-                    // Still need to read to drain the socket
-                    let mut tmp = [0u8; 1500];
-                    let _ = tun.read_packet(&mut tmp);
-                    continue;
-                };
+            match poll(&mut [poll_fd], PollTimeout::ZERO) {
+                Ok(n) if n > 0 => {
+                    did_work = true;
+                    let Some(mut buffer) = pool.alloc() else {
+                        warn!("Buffer pool exhausted, dropping incoming TUN packet");
+                        let mut tmp = [0u8; 1500];
+                        let _ = tun.read_packet(&mut tmp);
+                        continue;
+                    };
 
-                // Read from TUN directly into pool buffer
-                match tun.read_packet(buffer.write_area()) {
-                    Ok(len) => {
-                        buffer.len = len;
-                        route_tun_packet_to_nic_buffer(buffer, &routers, &pool);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(e) => {
-                        warn!(error = %e, "Failed to read from TUN");
+                    match tun.read_packet(buffer.write_area()) {
+                        Ok(len) => {
+                            buffer.len = len;
+                            route_tun_packet_to_nic_buffer(buffer, &routers, &pool);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) => {
+                            warn!(error = %e, "Failed to read from TUN");
+                            break;
+                        }
                     }
                 }
+                Ok(_) => break, // No data available
+                Err(e) => {
+                    warn!(error = %e, "Poll on TUN fd failed");
+                    break;
+                }
             }
-            Ok(_) => {} // No data available
-            Err(e) => {
-                warn!(error = %e, "Poll on TUN fd failed");
-            }
+        }
+
+        // 3. If no work was done, wait briefly to avoid busy-spinning
+        if !did_work {
+            // Poll TUN with 1ms timeout - wake up quickly for incoming packets
+            let poll_fd =
+                PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN);
+            let _ = poll(&mut [poll_fd], PollTimeout::from(1u16));
         }
     }
 

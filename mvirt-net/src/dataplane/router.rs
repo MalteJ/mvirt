@@ -12,7 +12,6 @@ use std::sync::{Arc, RwLock};
 
 use crossbeam_channel::Sender;
 use ipnet::{Ipv4Net, Ipv6Net};
-use nix::sys::eventfd::EventFd;
 use prefix_trie::PrefixMap;
 use smoltcp::wire::{EthernetProtocol, Ipv4Packet, Ipv6Packet};
 use tracing::debug;
@@ -41,12 +40,10 @@ pub struct RouteEntry {
     pub direct: bool,
 }
 
-/// Channel and wakeup signal for a NIC
+/// Channel for routing packets to a NIC
 pub struct NicChannel {
     /// Channel sender for routed packets
     pub sender: Sender<RoutedPacket>,
-    /// EventFd to wake up the worker's RX injection thread
-    pub wakeup: Arc<EventFd>,
     /// NIC's MAC address for Ethernet header rewriting
     pub mac: [u8; 6],
 }
@@ -284,9 +281,6 @@ impl NetworkRouter {
             };
 
             if channel.sender.send(routed).is_ok() {
-                // Signal the target worker to wake up and process RX
-                let _ = channel.wakeup.write(1);
-
                 debug!(
                     source = %source_nic_id,
                     target = %target,

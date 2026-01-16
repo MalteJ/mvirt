@@ -7,6 +7,8 @@ use std::io;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
+use crossbeam_queue::SegQueue;
+
 use tracing::{debug, trace};
 use vhost::vhost_user::message::VhostUserProtocolFeatures;
 use vhost_user_backend::{VhostUserBackend, VringRwLock, VringT};
@@ -93,8 +95,8 @@ pub struct VhostNetBackend {
     /// Packet handler (processes TX packets, returns response packets)
     packet_handler: Mutex<Option<PacketHandler>>,
 
-    /// Pending RX packets to inject into guest
-    rx_queue: Mutex<Vec<Vec<u8>>>,
+    /// Pending RX packets to inject into guest (lock-free queue)
+    rx_queue: SegQueue<Vec<u8>>,
 
     /// Stored vrings for external RX injection (set on first handle_event)
     vrings: RwLock<Option<Vec<VringRwLock>>>,
@@ -121,7 +123,7 @@ impl VhostNetBackend {
             event_idx: RwLock::new(false),
             shutdown,
             packet_handler: Mutex::new(None),
-            rx_queue: Mutex::new(Vec::new()),
+            rx_queue: SegQueue::new(),
             vrings: RwLock::new(None),
             exit_event,
             pool,
@@ -140,29 +142,23 @@ impl VhostNetBackend {
             packet_len = packet.len(),
             "inject_packet: queuing packet for RX"
         );
-        let mut rx = self.rx_queue.lock().unwrap();
-        rx.push(packet);
+        self.rx_queue.push(packet);
     }
 
     /// Inject a packet from a slice and immediately deliver it to the guest
     /// This is used for routed packets from other vNICs (zero-copy friendly)
     pub fn inject_and_deliver_slice(&self, packet: &[u8]) {
         trace!(packet_len = packet.len(), "Injecting packet to RX queue");
-        // Add to queue (copy is needed since rx_queue stores Vec<u8>)
-        {
-            let mut rx = self.rx_queue.lock().unwrap();
-            rx.push(packet.to_vec());
-        }
+        // Add to lock-free queue
+        self.rx_queue.push(packet.to_vec());
 
         // Try to deliver immediately if vrings are available
         let vrings_guard = self.vrings.read().unwrap();
         if let Some(ref vrings) = *vrings_guard
             && let Some(rx_vring) = vrings.get(RX_QUEUE as usize)
         {
-            // Process RX queue
             let _ = self.process_rx(rx_vring);
-            // Always signal for externally injected packets - EVENT_IDX suppression
-            // can cause missed notifications when guest is idle waiting for packets
+            // Always signal for external packets - guest may be idle
             let _ = rx_vring.signal_used_queue();
         }
     }
@@ -170,11 +166,8 @@ impl VhostNetBackend {
     /// Inject a packet and immediately deliver it to the guest
     /// This is used for routed packets from other vNICs
     pub fn inject_and_deliver(&self, packet: Vec<u8>) {
-        // Add to queue
-        {
-            let mut rx = self.rx_queue.lock().unwrap();
-            rx.push(packet);
-        }
+        // Add to lock-free queue
+        self.rx_queue.push(packet);
 
         // Try to deliver immediately if vrings are available
         let vrings_guard = self.vrings.read().unwrap();
@@ -182,7 +175,35 @@ impl VhostNetBackend {
             && let Some(rx_vring) = vrings.get(RX_QUEUE as usize)
         {
             let _ = self.process_rx(rx_vring);
-            // Always signal - EVENT_IDX suppression can miss notifications
+            // Always signal for external packets - guest may be idle
+            let _ = rx_vring.signal_used_queue();
+        }
+    }
+
+    /// Inject a batch of packets and deliver them all to the guest with a single signal
+    /// This amortizes the eventfd syscall overhead across multiple packets
+    pub fn inject_batch<'a>(&self, packets: impl Iterator<Item = &'a [u8]>) {
+        let mut count = 0;
+
+        // Add all packets to lock-free queue
+        for packet in packets {
+            self.rx_queue.push(packet.to_vec());
+            count += 1;
+        }
+
+        if count == 0 {
+            return;
+        }
+
+        trace!(packet_count = count, "Injecting batch to RX queue");
+
+        // Try to deliver all and signal once
+        let vrings_guard = self.vrings.read().unwrap();
+        if let Some(ref vrings) = *vrings_guard
+            && let Some(rx_vring) = vrings.get(RX_QUEUE as usize)
+        {
+            let _ = self.process_rx(rx_vring);
+            // Signal once for the whole batch
             let _ = rx_vring.signal_used_queue();
         }
     }
@@ -339,28 +360,24 @@ impl VhostNetBackend {
     /// Process RX queue (inject packets to guest)
     /// Returns whether the guest needs to be notified (for EVENT_IDX)
     fn process_rx(&self, vring: &VringRwLock) -> io::Result<bool> {
-        let mut rx_queue = self.rx_queue.lock().unwrap();
-        if rx_queue.is_empty() {
-            return Ok(false);
-        }
-
         let mem_guard = self.mem.read().unwrap();
         let mem = mem_guard.memory();
         let mut processed_count = 0u32;
 
-        while !rx_queue.is_empty() {
+        // Process packets from lock-free queue
+        // Pop packet FIRST to avoid losing descriptors on race
+        while let Some(packet) = self.rx_queue.pop() {
             let mut vring_state = vring.get_mut();
             let queue = vring_state.get_queue_mut();
 
             let avail_desc = match queue.pop_descriptor_chain(mem.clone()) {
                 Some(desc) => desc,
                 None => {
-                    // Guest hasn't provided enough RX buffers
+                    // Guest hasn't provided enough RX buffers - put packet back
+                    self.rx_queue.push(packet);
                     break;
                 }
             };
-
-            let packet = rx_queue.remove(0);
 
             // Build virtio-net header + packet
             // IMPORTANT: With MRG_RXBUF, num_buffers must be set to 1 for single-buffer packets
@@ -433,7 +450,7 @@ impl VhostNetBackend {
 
         trace!(
             processed_count = processed_count,
-            remaining = rx_queue.len(),
+            remaining = self.rx_queue.len(),
             "Delivered RX packets"
         );
 
@@ -507,11 +524,27 @@ impl VhostUserBackend for VhostNetBackend {
         trace!(device_event, ?evset, "Handling vring event");
 
         // Store vrings on first call for external RX injection
-        {
+        let first_time = {
             let mut stored = self.vrings.write().unwrap();
             if stored.is_none() {
                 debug!("Storing vrings for external RX injection");
                 *stored = Some(vrings.to_vec());
+                true
+            } else {
+                false
+            }
+        };
+
+        // On first call, immediately process any packets that were queued before vrings were ready
+        if first_time && !self.rx_queue.is_empty() {
+            debug!(
+                queued_packets = self.rx_queue.len(),
+                "Processing packets queued before vrings were ready"
+            );
+            if self.process_rx(&vrings[RX_QUEUE as usize])? {
+                vrings[RX_QUEUE as usize]
+                    .signal_used_queue()
+                    .map_err(|e| io::Error::other(format!("Failed to signal: {e}")))?;
             }
         }
 
