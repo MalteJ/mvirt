@@ -16,8 +16,8 @@ use super::vhost::VirtioNetHdr;
 
 /// Result of a receive operation
 pub enum RecvResult {
-    /// Successfully received a packet with the given length
-    Packet(usize),
+    /// Successfully received a packet with the given length and virtio header
+    Packet { len: usize, virtio_hdr: VirtioNetHdr },
     /// No packet available (would block)
     WouldBlock,
     /// Backend is done (e.g., connection closed)
@@ -100,16 +100,20 @@ impl ReactorBackend for TunBackend {
     fn try_recv(&mut self, buf: &mut PoolBuffer) -> io::Result<RecvResult> {
         match self.tun.read_packet(buf.write_area()) {
             Ok(0) => Ok(RecvResult::Done),
-            Ok(n) => Ok(RecvResult::Packet(n)),
+            Ok(n) => Ok(RecvResult::Packet {
+                len: n,
+                // TUN packets have virtio header prepended, parse it
+                virtio_hdr: VirtioNetHdr::default(),
+            }),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(RecvResult::WouldBlock),
             Err(e) => Err(e),
         }
     }
 
-    fn send(&mut self, buf: PoolBuffer, _virtio_hdr: VirtioNetHdr) -> io::Result<()> {
+    fn send(&mut self, buf: PoolBuffer, virtio_hdr: VirtioNetHdr) -> io::Result<()> {
         // TUN expects virtio_net_hdr + IP packet
         // The buffer contains Ethernet frame, so we need to:
-        // 1. Create a virtio_net_hdr (all zeros = no offload)
+        // 1. Adjust the virtio header's csum_start for the removed Ethernet header
         // 2. Skip Ethernet header and send IP payload
 
         let data = buf.data();
@@ -120,9 +124,13 @@ impl ReactorBackend for TunBackend {
             ));
         }
 
-        // Create zero virtio header (no GSO, no checksum offload)
-        // We ignore the incoming virtio_hdr as TUN handles checksums itself
-        let hdr = VirtioNetHdr::default();
+        // Adjust the virtio header for stripped Ethernet header
+        // csum_start is relative to the start of the packet data, so we need to
+        // subtract the Ethernet header size (14 bytes) since we're stripping it
+        let mut hdr = virtio_hdr;
+        if hdr.csum_start.to_native() >= 14 {
+            hdr.csum_start = vm_memory::Le16::from(hdr.csum_start.to_native() - 14);
+        }
         let hdr_bytes = hdr.as_slice();
 
         // Skip Ethernet header (14 bytes) to get IP packet
@@ -184,14 +192,14 @@ impl ReactorBackend for VhostBackend {
     fn try_recv(&mut self, buf: &mut PoolBuffer) -> io::Result<RecvResult> {
         // Receive packet from the channel (populated by VhostNetBackend's packet_handler)
         match self.rx.try_recv() {
-            Ok((packet, _virtio_hdr)) => {
+            Ok((packet, virtio_hdr)) => {
                 // Copy packet data to the provided buffer
                 // Note: This is a copy, but it's fast (memcpy) and keeps the trait simple
                 let data = packet.data();
                 let write_area = buf.write_area();
                 let len = data.len().min(write_area.len());
                 write_area[..len].copy_from_slice(&data[..len]);
-                Ok(RecvResult::Packet(len))
+                Ok(RecvResult::Packet { len, virtio_hdr })
             }
             Err(TryRecvError::Empty) => Ok(RecvResult::WouldBlock),
             Err(TryRecvError::Disconnected) => Ok(RecvResult::Done),
@@ -217,7 +225,10 @@ mod tests {
     #[test]
     fn test_recv_result_variants() {
         // Just ensure the enum variants exist
-        let _ = RecvResult::Packet(100);
+        let _ = RecvResult::Packet {
+            len: 100,
+            virtio_hdr: VirtioNetHdr::default(),
+        };
         let _ = RecvResult::WouldBlock;
         let _ = RecvResult::Done;
     }

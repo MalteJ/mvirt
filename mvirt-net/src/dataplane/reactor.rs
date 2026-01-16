@@ -378,10 +378,10 @@ impl<B: ReactorBackend> Reactor<B> {
 
             // Try to receive
             match self.backend.try_recv(&mut buffer) {
-                Ok(RecvResult::Packet(len)) => {
+                Ok(RecvResult::Packet { len, virtio_hdr }) => {
                     count += 1;
                     buffer.len = len;
-                    self.handle_rx_packet(buffer);
+                    self.handle_rx_packet(buffer, virtio_hdr);
                 }
                 Ok(RecvResult::WouldBlock) => break,
                 Ok(RecvResult::Done) => {
@@ -399,7 +399,7 @@ impl<B: ReactorBackend> Reactor<B> {
     }
 
     /// Handle a received packet from the backend
-    fn handle_rx_packet(&mut self, buffer: PoolBuffer) {
+    fn handle_rx_packet(&mut self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
         // TUN reactor receives raw IP packets with virtio header prepended
         // vNIC reactors receive Ethernet frames
         if self.handlers.is_none() {
@@ -443,8 +443,8 @@ impl<B: ReactorBackend> Reactor<B> {
             _ => {}
         }
 
-        // Route the packet
-        self.route_packet(buffer);
+        // Route the packet (with virtio_hdr for checksum offload)
+        self.route_packet(buffer, virtio_hdr);
     }
 
     /// Handle a packet received from the TUN device (Layer 3, raw IP)
@@ -701,7 +701,10 @@ impl<B: ReactorBackend> Reactor<B> {
     }
 
     /// Route a packet to another reactor or TUN
-    fn route_packet(&self, buffer: PoolBuffer) {
+    ///
+    /// The virtio_hdr carries checksum offload info from the guest.
+    /// For packets to TUN, we pass this through so TUN can compute the checksum.
+    fn route_packet(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
         let data = buffer.data();
         if data.len() < 14 {
             return;
@@ -728,8 +731,8 @@ impl<B: ReactorBackend> Reactor<B> {
         // Try L3 routing
         let ethertype = u16::from_be_bytes([data[12], data[13]]);
         match ethertype {
-            0x0800 => self.route_ipv4(buffer),
-            0x86DD => self.route_ipv6(buffer),
+            0x0800 => self.route_ipv4(buffer, virtio_hdr),
+            0x86DD => self.route_ipv6(buffer, virtio_hdr),
             _ => {
                 debug!(reactor_id = %self.config.id, ethertype, "Unknown ethertype, dropping");
             }
@@ -737,7 +740,7 @@ impl<B: ReactorBackend> Reactor<B> {
     }
 
     /// Route an IPv4 packet
-    fn route_ipv4(&self, buffer: PoolBuffer) {
+    fn route_ipv4(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
         let data = buffer.data();
         if data.len() < 34 {
             return;
@@ -758,10 +761,11 @@ impl<B: ReactorBackend> Reactor<B> {
             }
         } else if self.router.is_public() {
             // No local route, send to TUN for internet
+            // Pass through virtio_hdr so TUN can compute checksum if needed
             if let Some(sender) = self.registry.get_tun(&self.config.network_id) {
                 let _ = sender.try_send(InboundPacket {
                     buffer,
-                    virtio_hdr: VirtioNetHdr::default(),
+                    virtio_hdr,
                 });
             }
         } else {
@@ -770,7 +774,7 @@ impl<B: ReactorBackend> Reactor<B> {
     }
 
     /// Route an IPv6 packet
-    fn route_ipv6(&self, buffer: PoolBuffer) {
+    fn route_ipv6(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
         let data = buffer.data();
         if data.len() < 54 {
             return;
@@ -792,10 +796,11 @@ impl<B: ReactorBackend> Reactor<B> {
             }
         } else if self.router.is_public() {
             // No local route, send to TUN for internet
+            // Pass through virtio_hdr so TUN can compute checksum if needed
             if let Some(sender) = self.registry.get_tun(&self.config.network_id) {
                 let _ = sender.try_send(InboundPacket {
                     buffer,
-                    virtio_hdr: VirtioNetHdr::default(),
+                    virtio_hdr,
                 });
             }
         } else {
@@ -872,7 +877,10 @@ mod tests {
                 let write_area = buf.write_area();
                 let len = packet.len().min(write_area.len());
                 write_area[..len].copy_from_slice(&packet[..len]);
-                Ok(RecvResult::Packet(len))
+                Ok(RecvResult::Packet {
+                    len,
+                    virtio_hdr: VirtioNetHdr::default(),
+                })
             } else {
                 Ok(RecvResult::WouldBlock)
             }
@@ -1390,7 +1398,7 @@ mod tests {
         // Receive it
         let mut buf = pool.alloc().unwrap();
         match backend.try_recv(&mut buf) {
-            Ok(RecvResult::Packet(len)) => {
+            Ok(RecvResult::Packet { len, .. }) => {
                 assert_eq!(len, test_data.len());
                 buf.len = len;
                 assert_eq!(buf.data(), &test_data[..]);
