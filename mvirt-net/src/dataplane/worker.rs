@@ -34,7 +34,7 @@ use super::ndp::NdpResponder;
 use super::router::{NetworkRouter, NicChannel, RouteResult};
 use super::tun::TunDevice;
 use super::vhost::{
-    VhostNetBackend, VirtioNetHdr, VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE,
+    VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VhostNetBackend, VirtioNetHdr,
 };
 
 use super::buffer::{BufferPool, ETH_HEADROOM, PoolBuffer, VIRTIO_HDR_SIZE};
@@ -508,20 +508,22 @@ fn run_worker(
 
         // Clone backend for use in packet handler (for injecting protocol responses)
         let backend_for_handler = backend.clone();
-        backend.set_packet_handler(Box::new(move |buffer: PoolBuffer, virtio_hdr: VirtioNetHdr| {
-            // First try protocol handlers (ARP, DHCP, ICMP, etc.)
-            // These just read the data and may return a response
-            if let Some(response) = processor.try_protocols(buffer.data()) {
-                // Protocol generated a response - inject it as Vec (small local packet)
-                backend_for_handler.inject_vec(response);
-                // Original buffer is dropped here (returned to pool)
-                return;
-            }
+        backend.set_packet_handler(Box::new(
+            move |buffer: PoolBuffer, virtio_hdr: VirtioNetHdr| {
+                // First try protocol handlers (ARP, DHCP, ICMP, etc.)
+                // These just read the data and may return a response
+                if let Some(response) = processor.try_protocols(buffer.data()) {
+                    // Protocol generated a response - inject it as Vec (small local packet)
+                    backend_for_handler.inject_vec(response);
+                    // Original buffer is dropped here (returned to pool)
+                    return;
+                }
 
-            // No protocol match - route the packet (zero-copy, consumes buffer)
-            // Pass virtio_hdr for GSO/checksum offload to TUN
-            processor.route(buffer, virtio_hdr);
-        }));
+                // No protocol match - route the packet (zero-copy, consumes buffer)
+                // Pass virtio_hdr for GSO/checksum offload to TUN
+                processor.route(buffer, virtio_hdr);
+            },
+        ));
 
         // Spawn RX injection thread to handle routed packets from other vNICs
         let rx_channel = config.router_rx.clone();
@@ -980,8 +982,7 @@ fn run_tun_io(
                             if len > VIRTIO_HDR_SIZE {
                                 // A. Read virtio header BEFORE skipping it
                                 let hdr_bytes = &buffer.write_area()[..VIRTIO_HDR_SIZE];
-                                let mut virtio_hdr =
-                                    *VirtioNetHdr::from_slice(hdr_bytes).unwrap();
+                                let mut virtio_hdr = *VirtioNetHdr::from_slice(hdr_bytes).unwrap();
 
                                 // B. Adjust offsets: TUN provides offsets relative to IP packet,
                                 //    but VM expects offsets relative to Ethernet frame (+14)
@@ -1000,9 +1001,7 @@ fn run_tun_io(
                                 buffer.len = len - VIRTIO_HDR_SIZE;
 
                                 // D. Route with virtio header for GSO support
-                                route_tun_packet_to_nic_buffer(
-                                    buffer, virtio_hdr, &routers, &pool,
-                                );
+                                route_tun_packet_to_nic_buffer(buffer, virtio_hdr, &routers, &pool);
                             } else {
                                 trace!(len, "TUN packet too small, dropping");
                             }

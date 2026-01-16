@@ -30,8 +30,7 @@ const VNET_HDR_SIZE: libc::c_int = 12;
 
 /// TUN offload flags (from linux/if_tun.h)
 const TUN_F_CSUM: libc::c_uint = 0x01; // Checksum offload
-const TUN_F_TSO4: libc::c_uint = 0x02; // TCP segmentation offload IPv4
-const TUN_F_TSO6: libc::c_uint = 0x04; // TCP segmentation offload IPv6
+// TSO flags intentionally omitted - would cause packet truncation
 
 /// ifreq structure for TUN device configuration
 #[repr(C)]
@@ -168,13 +167,14 @@ impl TunDevice {
         Ok(())
     }
 
-    /// Enable TSO and checksum offload on the TUN device
+    /// Enable checksum offload on the TUN device
     ///
-    /// This enables the kernel to handle TCP segmentation and checksum
-    /// computation for large packets (up to 64KB), reducing CPU overhead.
-    /// Must be called after the device is created.
+    /// Only checksum offload is enabled. TSO is disabled because process_rx
+    /// cannot handle packets larger than a single descriptor chain (~MTU).
+    /// With TSO disabled, the kernel segments packets to MTU size.
     pub fn enable_offload(&self) -> io::Result<()> {
-        let offload = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
+        // Only CSUM, no TSO - prevents 64KB packets that would be truncated
+        let offload = TUN_F_CSUM;
 
         // SAFETY: ioctl on valid fd with valid flags
         let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), TUNSETOFFLOAD as _, offload) };
@@ -182,7 +182,7 @@ impl TunDevice {
             return Err(io::Error::last_os_error());
         }
 
-        tracing::info!("TUN device offload enabled (CSUM, TSO4, TSO6)");
+        tracing::info!("TUN device offload enabled (CSUM only, TSO disabled)");
         Ok(())
     }
 }

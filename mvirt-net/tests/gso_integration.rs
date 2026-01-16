@@ -27,34 +27,34 @@ const VIRTIO_NET_F_MRG_RXBUF: u64 = 1 << 15;
 // ============================================================================
 
 #[test]
-fn test_tso_features_advertised() {
+fn test_tso_features_not_advertised() {
+    // TSO is intentionally disabled because process_rx cannot handle packets
+    // larger than a single descriptor chain (~MTU). Only CSUM is enabled.
     let backend = TestBackend::new("52:54:00:12:34:56", None);
     let client = backend.connect().expect("connect failed");
 
-    // Check that checksum offload is advertised
+    // Check that checksum offload IS advertised
     assert!(
         client.has_feature(VIRTIO_NET_F_CSUM),
         "Should advertise CSUM feature"
     );
 
-    // Check that TSO IPv4 features are advertised
+    // Check that TSO features are NOT advertised (disabled to prevent truncation)
     assert!(
-        client.has_feature(VIRTIO_NET_F_GUEST_TSO4),
-        "Should advertise GUEST_TSO4 feature"
+        !client.has_feature(VIRTIO_NET_F_GUEST_TSO4),
+        "Should NOT advertise GUEST_TSO4 feature"
     );
     assert!(
-        client.has_feature(VIRTIO_NET_F_HOST_TSO4),
-        "Should advertise HOST_TSO4 feature"
-    );
-
-    // Check that TSO IPv6 features are advertised
-    assert!(
-        client.has_feature(VIRTIO_NET_F_GUEST_TSO6),
-        "Should advertise GUEST_TSO6 feature"
+        !client.has_feature(VIRTIO_NET_F_HOST_TSO4),
+        "Should NOT advertise HOST_TSO4 feature"
     );
     assert!(
-        client.has_feature(VIRTIO_NET_F_HOST_TSO6),
-        "Should advertise HOST_TSO6 feature"
+        !client.has_feature(VIRTIO_NET_F_GUEST_TSO6),
+        "Should NOT advertise GUEST_TSO6 feature"
+    );
+    assert!(
+        !client.has_feature(VIRTIO_NET_F_HOST_TSO6),
+        "Should NOT advertise HOST_TSO6 feature"
     );
 }
 
@@ -71,30 +71,34 @@ fn test_mergeable_rx_buffers_advertised() {
 }
 
 #[test]
-fn test_feature_negotiation_with_tso() {
+fn test_feature_negotiation_with_tun() {
+    // Even with TUN configured, TSO should NOT be advertised
+    // (disabled to prevent packet truncation in process_rx)
     let backend = TestBackend::new("52:54:00:12:34:56", Some("10.0.0.5"));
     let client = backend.connect().expect("connect failed");
 
-    // Verify all TSO-related features are present using has_feature
+    // CSUM should still be negotiated
     assert!(
         client.has_feature(VIRTIO_NET_F_CSUM),
         "CSUM should be negotiated"
     );
+
+    // TSO should NOT be negotiated even with TUN
     assert!(
-        client.has_feature(VIRTIO_NET_F_GUEST_TSO4),
-        "GUEST_TSO4 should be negotiated"
+        !client.has_feature(VIRTIO_NET_F_GUEST_TSO4),
+        "GUEST_TSO4 should NOT be negotiated"
     );
     assert!(
-        client.has_feature(VIRTIO_NET_F_GUEST_TSO6),
-        "GUEST_TSO6 should be negotiated"
+        !client.has_feature(VIRTIO_NET_F_GUEST_TSO6),
+        "GUEST_TSO6 should NOT be negotiated"
     );
     assert!(
-        client.has_feature(VIRTIO_NET_F_HOST_TSO4),
-        "HOST_TSO4 should be negotiated"
+        !client.has_feature(VIRTIO_NET_F_HOST_TSO4),
+        "HOST_TSO4 should NOT be negotiated"
     );
     assert!(
-        client.has_feature(VIRTIO_NET_F_HOST_TSO6),
-        "HOST_TSO6 should be negotiated"
+        !client.has_feature(VIRTIO_NET_F_HOST_TSO6),
+        "HOST_TSO6 should NOT be negotiated"
     );
 }
 

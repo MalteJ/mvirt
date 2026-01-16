@@ -35,11 +35,8 @@ const TX_QUEUE: u16 = 1;
 /// Virtio net features we support
 const VIRTIO_NET_F_CSUM: u64 = 1 << 0; // Checksum offload
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
-const VIRTIO_NET_F_GUEST_TSO4: u64 = 1 << 7; // Guest can receive TSO IPv4
-const VIRTIO_NET_F_GUEST_TSO6: u64 = 1 << 8; // Guest can receive TSO IPv6
-const VIRTIO_NET_F_HOST_TSO4: u64 = 1 << 11; // Host can receive TSO IPv4
-const VIRTIO_NET_F_HOST_TSO6: u64 = 1 << 12; // Host can receive TSO IPv6
-const VIRTIO_NET_F_MRG_RXBUF: u64 = 1 << 15; // Mergeable RX buffers (for GRO)
+// TSO disabled - process_rx cannot handle packets > MTU (would truncate 64KB GSO packets)
+const VIRTIO_NET_F_MRG_RXBUF: u64 = 1 << 15; // Mergeable RX buffers (for 12-byte header)
 const VIRTIO_NET_F_STATUS: u64 = 1 << 16;
 const VIRTIO_RING_F_EVENT_IDX: u64 = 1 << 29;
 const VIRTIO_F_RING_INDIRECT_DESC: u64 = 1 << 28;
@@ -217,10 +214,7 @@ impl VhostNetBackend {
 
     /// Inject a batch of zero-copy buffers and deliver them with a single signal
     /// This amortizes the eventfd syscall overhead across multiple packets
-    pub fn inject_buffer_batch(
-        &self,
-        items: impl Iterator<Item = (PoolBuffer, VirtioNetHdr)>,
-    ) {
+    pub fn inject_buffer_batch(&self, items: impl Iterator<Item = (PoolBuffer, VirtioNetHdr)>) {
         let mut count = 0;
 
         // Add all buffers to lock-free queue (zero-copy!)
@@ -389,7 +383,7 @@ impl VhostNetBackend {
             let hdr = match &packet {
                 RxItem::Buffer(_, virtio_hdr) => VirtioNetHdr {
                     num_buffers: Le16::from(1), // Always 1 for single-buffer packets
-                    ..*virtio_hdr // Copy GSO type, csum_start, etc. from TUN
+                    ..*virtio_hdr               // Copy GSO type, csum_start, etc. from TUN
                 },
                 RxItem::Vec(_) => VirtioNetHdr {
                     num_buffers: Le16::from(1),
@@ -493,14 +487,19 @@ impl VhostUserBackend for VhostNetBackend {
     fn features(&self) -> u64 {
         // VHOST_USER_F_PROTOCOL_FEATURES is required by cloud-hypervisor
         // When set, vrings must be enabled via SET_VRING_ENABLE messages
+        //
+        // TSO features are disabled because process_rx cannot handle packets
+        // larger than a single descriptor chain. With TSO disabled, the kernel
+        // segments packets to MTU size before delivery.
         let f = VIRTIO_F_VERSION_1
             | VIRTIO_NET_F_CSUM
             | VIRTIO_NET_F_MAC
-            | VIRTIO_NET_F_GUEST_TSO4
-            | VIRTIO_NET_F_GUEST_TSO6
-            | VIRTIO_NET_F_HOST_TSO4
-            | VIRTIO_NET_F_HOST_TSO6
-            | VIRTIO_NET_F_MRG_RXBUF
+            // TSO disabled - process_rx would truncate packets > MTU:
+            // | VIRTIO_NET_F_GUEST_TSO4
+            // | VIRTIO_NET_F_GUEST_TSO6
+            // | VIRTIO_NET_F_HOST_TSO4
+            // | VIRTIO_NET_F_HOST_TSO6
+            | VIRTIO_NET_F_MRG_RXBUF // Keep for 12-byte header consistency
             | VIRTIO_NET_F_STATUS
             | VIRTIO_RING_F_EVENT_IDX
             | VIRTIO_F_RING_INDIRECT_DESC
