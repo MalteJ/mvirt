@@ -33,7 +33,9 @@ use super::icmpv6::Icmpv6Responder;
 use super::ndp::NdpResponder;
 use super::router::{NetworkRouter, NicChannel, RouteResult};
 use super::tun::TunDevice;
-use super::vhost::{VhostNetBackend, VirtioNetHdr};
+use super::vhost::{
+    VhostNetBackend, VirtioNetHdr, VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE,
+};
 
 use super::buffer::{BufferPool, ETH_HEADROOM, PoolBuffer, VIRTIO_HDR_SIZE};
 
@@ -43,6 +45,8 @@ pub struct RoutedPacket {
     pub target_nic_id: String,
     /// Raw Ethernet frame in PoolBuffer
     pub buffer: PoolBuffer,
+    /// Virtio-net header with GSO/checksum offload metadata (for RX from TUN)
+    pub virtio_hdr: VirtioNetHdr,
 }
 
 /// Packet to send to internet via TUN device (zero-copy)
@@ -646,8 +650,8 @@ fn run_rx_injection(
                 batch_size = batch.len(),
                 "Injecting packet batch (zero-copy)"
             );
-            // Extract PoolBuffers from RoutedPackets and inject directly
-            backend.inject_buffer_batch(batch.into_iter().map(|p| p.buffer));
+            // Extract PoolBuffers and virtio headers from RoutedPackets and inject directly
+            backend.inject_buffer_batch(batch.into_iter().map(|p| (p.buffer, p.virtio_hdr)));
         }
     }
 }
@@ -926,20 +930,6 @@ fn run_tun_io(
                         hdr.hdr_len = (orig_hdr_len - eth_offset).into();
                     }
 
-                    let payload_len = packet.buffer.len;
-                    debug!(
-                        flags = hdr.flags,
-                        gso_type = hdr.gso_type,
-                        orig_hdr_len,
-                        orig_csum_start,
-                        csum_offset = hdr.csum_offset.to_native(),
-                        gso_size = hdr.gso_size.to_native(),
-                        adj_hdr_len = hdr.hdr_len.to_native(),
-                        adj_csum_start = hdr.csum_start.to_native(),
-                        payload_len,
-                        "TUN write virtio header"
-                    );
-
                     // Use scatter-gather I/O: virtio header + payload
                     // With IFF_VNET_HDR, kernel expects virtio_net_hdr prepended
                     let hdr_bytes = hdr.as_slice();
@@ -958,17 +948,7 @@ fn run_tun_io(
                             );
                         }
                         Err(e) => {
-                            warn!(
-                                error = %e,
-                                flags = hdr.flags,
-                                gso_type = hdr.gso_type,
-                                hdr_len = hdr.hdr_len.to_native(),
-                                csum_start = hdr.csum_start.to_native(),
-                                csum_offset = hdr.csum_offset.to_native(),
-                                gso_size = hdr.gso_size.to_native(),
-                                payload_len,
-                                "Failed to write packet to TUN"
-                            );
+                            warn!(error = %e, "Failed to write packet to TUN");
                         }
                     }
                 }
@@ -997,11 +977,32 @@ fn run_tun_io(
                     match tun.read_packet(buffer.write_area()) {
                         Ok(len) => {
                             // With IFF_VNET_HDR, kernel prepends 12-byte virtio_net_hdr
-                            // Skip it to get the raw IP packet
                             if len > VIRTIO_HDR_SIZE {
+                                // A. Read virtio header BEFORE skipping it
+                                let hdr_bytes = &buffer.write_area()[..VIRTIO_HDR_SIZE];
+                                let mut virtio_hdr =
+                                    *VirtioNetHdr::from_slice(hdr_bytes).unwrap();
+
+                                // B. Adjust offsets: TUN provides offsets relative to IP packet,
+                                //    but VM expects offsets relative to Ethernet frame (+14)
+                                let eth_offset = ETH_HEADROOM as u16;
+                                if virtio_hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+                                    let csum = virtio_hdr.csum_start.to_native();
+                                    virtio_hdr.csum_start = (csum + eth_offset).into();
+                                }
+                                if virtio_hdr.gso_type != VIRTIO_NET_HDR_GSO_NONE {
+                                    let hdr_len = virtio_hdr.hdr_len.to_native();
+                                    virtio_hdr.hdr_len = (hdr_len + eth_offset).into();
+                                }
+
+                                // C. Skip virtio header to get raw IP packet
                                 buffer.start += VIRTIO_HDR_SIZE;
                                 buffer.len = len - VIRTIO_HDR_SIZE;
-                                route_tun_packet_to_nic_buffer(buffer, &routers, &pool);
+
+                                // D. Route with virtio header for GSO support
+                                route_tun_packet_to_nic_buffer(
+                                    buffer, virtio_hdr, &routers, &pool,
+                                );
                             } else {
                                 trace!(len, "TUN packet too small, dropping");
                             }
@@ -1035,9 +1036,10 @@ fn run_tun_io(
 /// Route a packet from TUN to the correct vNIC (zero-copy version using PoolBuffer)
 ///
 /// The buffer contains a raw IP packet. We prepend an Ethernet header using headroom
-/// and route it to the correct vNIC.
+/// and inject it directly to the target vNIC with the virtio GSO header.
 fn route_tun_packet_to_nic_buffer(
     mut buffer: PoolBuffer,
+    virtio_hdr: VirtioNetHdr,
     routers: &SharedRouters,
     _pool: &Arc<BufferPool>,
 ) {
@@ -1077,46 +1079,44 @@ fn route_tun_packet_to_nic_buffer(
     };
 
     // Prepend Ethernet header using headroom (zero-copy!)
-    // Dst MAC is placeholder - the router will overwrite it
+    // Dst MAC is placeholder - inject_to_nic will overwrite it
     buffer.prepend_eth_header([0u8; 6], GATEWAY_MAC, ethertype);
 
-    // First find which router has a route for this destination (without consuming buffer)
+    // Find which router has a route for this destination and get target NIC
     let routers_guard = routers.read().unwrap();
-    let matching_router = routers_guard.values().find(|router| {
+    for router in routers_guard.values() {
         if !router.is_public() {
-            return false;
+            continue;
         }
-        // Check if this router has a route for the destination
-        match (dst_ipv4, dst_ipv6) {
-            (Some(addr), _) => router.lookup_ipv4(addr).is_some(),
-            (_, Some(addr)) => router.lookup_ipv6(addr).is_some(),
-            _ => false,
-        }
-    });
 
-    if let Some(router) = matching_router {
-        // Clone the router to release the lock before calling route_packet
-        let router = router.clone();
-        drop(routers_guard);
+        // Look up target NIC for destination
+        let target_nic_id = match (dst_ipv4, dst_ipv6) {
+            (Some(addr), _) => router.lookup_ipv4(addr).map(|e| e.nic_id),
+            (_, Some(addr)) => router.lookup_ipv6(addr).map(|e| e.nic_id),
+            _ => None,
+        };
 
-        // Route the packet (zero-copy, consumes buffer)
-        match router.route_packet("tun", buffer) {
-            RouteResult::Routed => {
-                debug!(
+        if let Some(target_nic_id) = target_nic_id {
+            // Clone router and target_nic_id, release lock, then inject
+            let router = router.clone();
+            let target_nic_id = target_nic_id.clone();
+            drop(routers_guard);
+
+            // Inject directly with virtio GSO header (no TTL decrement - kernel did it)
+            if router.inject_to_nic(&target_nic_id, buffer, virtio_hdr) {
+                trace!(
                     version = version,
-                    "Routed TUN packet to local vNIC (zero-copy)"
+                    gso_type = virtio_hdr.gso_type,
+                    "Injected TUN packet to vNIC with GSO header"
                 );
+            } else {
+                debug!(version = version, "Failed to inject TUN packet to vNIC");
             }
-            RouteResult::ToInternet(_) => {
-                // Shouldn't happen for incoming TUN packets
-            }
-            RouteResult::Dropped => {
-                debug!(version = version, "TUN packet dropped by router");
-            }
+            return;
         }
-    } else {
-        debug!(version = version, "No route found for TUN packet");
     }
+
+    debug!(version = version, "No route found for TUN packet");
 }
 
 impl Drop for WorkerManager {

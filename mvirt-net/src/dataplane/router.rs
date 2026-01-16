@@ -18,6 +18,7 @@ use tracing::debug;
 
 use super::buffer::PoolBuffer;
 use super::packet::{GATEWAY_MAC, parse_ethernet};
+use super::vhost::VirtioNetHdr;
 use super::worker::RoutedPacket;
 
 /// Result of routing a packet
@@ -261,6 +262,7 @@ impl NetworkRouter {
             let routed = RoutedPacket {
                 target_nic_id: target.clone(),
                 buffer,
+                virtio_hdr: VirtioNetHdr::default(), // No GSO for inter-vNIC routing
             };
 
             if channel.sender.send(routed).is_ok() {
@@ -274,6 +276,33 @@ impl NetworkRouter {
         }
 
         RouteResult::Dropped
+    }
+
+    /// Inject a packet directly to a NIC with a specific virtio header
+    ///
+    /// Used for TUN->VM packets where we want to preserve GSO metadata.
+    /// Unlike route_packet, this does NOT decrement TTL (already done by kernel).
+    pub fn inject_to_nic(
+        &self,
+        target_nic_id: &str,
+        mut buffer: PoolBuffer,
+        virtio_hdr: VirtioNetHdr,
+    ) -> bool {
+        let inner = self.inner.read().unwrap();
+        if let Some(channel) = inner.nic_channels.get(target_nic_id) {
+            // Rewrite Ethernet header: dst MAC = target NIC's MAC, src MAC = gateway
+            rewrite_ethernet_header(buffer.data_mut(), channel.mac, GATEWAY_MAC);
+
+            let routed = RoutedPacket {
+                target_nic_id: target_nic_id.to_string(),
+                buffer,
+                virtio_hdr,
+            };
+
+            channel.sender.send(routed).is_ok()
+        } else {
+            false
+        }
     }
 }
 

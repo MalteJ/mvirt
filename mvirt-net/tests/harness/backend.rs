@@ -549,8 +549,8 @@ fn run_rx_injection(
                     "[RX INJECT] Injecting packet of {} bytes",
                     packet.buffer.len
                 );
-                // Zero-copy injection - pass buffer directly
-                backend.inject_buffer_and_deliver(packet.buffer);
+                // Zero-copy injection - pass buffer and virtio header directly
+                backend.inject_buffer_and_deliver(packet.buffer, packet.virtio_hdr);
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,

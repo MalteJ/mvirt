@@ -76,9 +76,9 @@ unsafe impl ByteValued for VirtioNetHdr {}
 
 /// Item in the RX queue - either a zero-copy buffer or a Vec for local protocol responses
 pub enum RxItem {
-    /// Zero-copy buffer from pool (for routed packets)
-    Buffer(PoolBuffer),
-    /// Heap-allocated Vec (for small local protocol responses like ARP, DHCP)
+    /// Zero-copy buffer from pool with GSO/checksum metadata (for routed packets from TUN)
+    Buffer(PoolBuffer, VirtioNetHdr),
+    /// Heap-allocated Vec (for small local protocol responses like ARP, DHCP - no GSO)
     Vec(Vec<u8>),
 }
 
@@ -87,7 +87,7 @@ impl RxItem {
     #[inline]
     pub fn data(&self) -> &[u8] {
         match self {
-            RxItem::Buffer(b) => b.data(),
+            RxItem::Buffer(b, _) => b.data(),
             RxItem::Vec(v) => v.as_slice(),
         }
     }
@@ -96,7 +96,7 @@ impl RxItem {
     #[inline]
     pub fn len(&self) -> usize {
         match self {
-            RxItem::Buffer(b) => b.len,
+            RxItem::Buffer(b, _) => b.len,
             RxItem::Vec(v) => v.len(),
         }
     }
@@ -185,19 +185,24 @@ impl VhostNetBackend {
 
     /// Inject a zero-copy PoolBuffer into the guest's RX queue
     /// Use this for routed packets that are already in a PoolBuffer
-    pub fn inject_buffer(&self, buffer: PoolBuffer) {
+    pub fn inject_buffer(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
         trace!(
             packet_len = buffer.len,
+            gso_type = virtio_hdr.gso_type,
             "inject_buffer: queuing packet for RX"
         );
-        self.rx_queue.push(RxItem::Buffer(buffer));
+        self.rx_queue.push(RxItem::Buffer(buffer, virtio_hdr));
     }
 
     /// Inject a zero-copy buffer and immediately deliver it to the guest
     /// This is the main entry point for routed packets from other vNICs
-    pub fn inject_buffer_and_deliver(&self, buffer: PoolBuffer) {
-        trace!(packet_len = buffer.len, "Injecting buffer to RX queue");
-        self.rx_queue.push(RxItem::Buffer(buffer));
+    pub fn inject_buffer_and_deliver(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
+        trace!(
+            packet_len = buffer.len,
+            gso_type = virtio_hdr.gso_type,
+            "Injecting buffer to RX queue"
+        );
+        self.rx_queue.push(RxItem::Buffer(buffer, virtio_hdr));
 
         // Try to deliver immediately if vrings are available
         let vrings_guard = self.vrings.read().unwrap();
@@ -212,12 +217,15 @@ impl VhostNetBackend {
 
     /// Inject a batch of zero-copy buffers and deliver them with a single signal
     /// This amortizes the eventfd syscall overhead across multiple packets
-    pub fn inject_buffer_batch(&self, buffers: impl Iterator<Item = PoolBuffer>) {
+    pub fn inject_buffer_batch(
+        &self,
+        items: impl Iterator<Item = (PoolBuffer, VirtioNetHdr)>,
+    ) {
         let mut count = 0;
 
         // Add all buffers to lock-free queue (zero-copy!)
-        for buffer in buffers {
-            self.rx_queue.push(RxItem::Buffer(buffer));
+        for (buffer, virtio_hdr) in items {
+            self.rx_queue.push(RxItem::Buffer(buffer, virtio_hdr));
             count += 1;
         }
 
@@ -377,9 +385,16 @@ impl VhostNetBackend {
 
             // Build virtio-net header + packet
             // IMPORTANT: With MRG_RXBUF, num_buffers must be set to 1 for single-buffer packets
-            let hdr = VirtioNetHdr {
-                num_buffers: Le16::from(1),
-                ..Default::default()
+            // For Buffer items (from TUN), use the actual GSO header; for Vec items, use default
+            let hdr = match &packet {
+                RxItem::Buffer(_, virtio_hdr) => VirtioNetHdr {
+                    num_buffers: Le16::from(1), // Always 1 for single-buffer packets
+                    ..*virtio_hdr // Copy GSO type, csum_start, etc. from TUN
+                },
+                RxItem::Vec(_) => VirtioNetHdr {
+                    num_buffers: Le16::from(1),
+                    ..Default::default() // No GSO for local protocol responses
+                },
             };
             let hdr_bytes = hdr.as_slice();
             let total_len = hdr_bytes.len() + packet.len();
