@@ -410,12 +410,24 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 debug!(?decision, "route_ipv4: route found");
                 return decision;
             }
-            debug!(dst = %dst_v4, "route_ipv4: no matching route");
+            warn!(
+                reactor_id = %self.reactor_id,
+                dst = %dst_v4,
+                "route_ipv4: no matching route in table"
+            );
         } else {
-            debug!("route_ipv4: no default routing table");
+            warn!(
+                reactor_id = %self.reactor_id,
+                "route_ipv4: no default routing table configured!"
+            );
         }
 
-        debug!("route_ipv4: dropping packet (no route)");
+        warn!(
+            reactor_id = %self.reactor_id,
+            src = %src_addr,
+            dst = %dst_addr,
+            "route_ipv4: DROPPING packet (no route)"
+        );
         RoutingDecision::Drop
     }
 
@@ -625,11 +637,23 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                                     {
                                         match prefix {
                                             IpPrefix::V4(p) => {
-                                                debug!(%table_id, %p, "Adding IPv4 route");
+                                                info!(
+                                                    reactor_id = %self.reactor_id,
+                                                    %table_id,
+                                                    %p,
+                                                    ?target,
+                                                    "Adding IPv4 route"
+                                                );
                                                 table.insert_v4(p, target);
                                             }
                                             IpPrefix::V6(p) => {
-                                                debug!(%table_id, %p, "Adding IPv6 route");
+                                                info!(
+                                                    reactor_id = %self.reactor_id,
+                                                    %table_id,
+                                                    %p,
+                                                    ?target,
+                                                    "Adding IPv6 route"
+                                                );
                                                 table.insert_v6(p, target);
                                             }
                                         }
@@ -749,7 +773,12 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             error!(error = -result, "incoming-to-TUN write error");
                             result
                         } else {
-                            debug!(len = result, "incoming-to-TUN write complete");
+                            info!(
+                                len = result,
+                                packet_id = %in_flight.packet_id,
+                                src = %in_flight.source.source_reactor(),
+                                "TUN reactor: write to TUN complete, sending completion"
+                            );
                             result
                         };
 
@@ -1312,7 +1341,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 RoutingDecision::ToVhost {
                     reactor_id: target_reactor_id,
                 } => {
-                    // Route to another VM - send via registry
+                    // Route to another VM (or TUN reactor) - send via registry
                     // Clone registry to avoid borrow conflicts
                     let registry_opt = self.registry.clone();
                     if let Some(registry) = registry_opt {
@@ -1328,6 +1357,15 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             in_flight.iovecs.clone(),
                             source,
                             in_flight.keep_alive.clone(),
+                        );
+
+                        info!(
+                            packet_id = %packet_id,
+                            len = in_flight.total_len,
+                            src = %self.reactor_id,
+                            dst = %target_reactor_id,
+                            head_idx = in_flight.head_index,
+                            "Sending packet to target reactor"
                         );
 
                         if registry.send_packet_to(&target_reactor_id, packet) {
@@ -1589,11 +1627,11 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         };
 
         while let Ok(packet) = packet_rx.try_recv() {
-            debug!(
+            info!(
                 id = %packet.id,
                 len = packet.total_len(),
                 src = %packet.source.source_reactor(),
-                "Processing incoming packet for TUN (L3 forwarding)"
+                "TUN reactor: received packet for L3 forwarding"
             );
 
             // Read packet data from iovecs
@@ -1714,7 +1752,12 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         let tx_vring = &state.vrings[VHOST_TX_QUEUE];
 
         while let Ok(completion) = completion_rx.try_recv() {
-            debug!(id = %completion.packet_id(), result = completion.result(), "Processing completion");
+            info!(
+                id = %completion.packet_id(),
+                result = completion.result(),
+                reactor_id = %self.reactor_id,
+                "NIC reactor: received completion notification"
+            );
 
             match completion {
                 CompletionNotify::VhostToVhostComplete {
@@ -1725,6 +1768,13 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 } => {
                     // Remove from in-flight tracking
                     if let Some(_in_flight) = vhost_to_vhost_in_flight.remove(&packet_id.raw()) {
+                        info!(
+                            packet_id = %packet_id,
+                            head_index,
+                            total_len,
+                            result,
+                            "Returning TX descriptor to guest"
+                        );
                         // Return descriptor to guest
                         let mut vring_state = tx_vring.get_mut();
                         let queue = vring_state.get_queue_mut();
@@ -1737,7 +1787,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             warn!(error = -result, "VM-to-VM delivery failed");
                         }
                     } else {
-                        warn!(id = %packet_id, "Completion for unknown packet");
+                        warn!(id = %packet_id, in_flight_count = vhost_to_vhost_in_flight.len(), "Completion for unknown packet");
                     }
                 }
                 CompletionNotify::VhostTxComplete { .. }
