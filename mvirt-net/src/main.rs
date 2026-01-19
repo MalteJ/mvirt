@@ -1,94 +1,157 @@
-use std::sync::Arc;
-
-use clap::Parser;
-use tonic::transport::Server;
-use tracing::{debug, info};
-use tracing_subscriber::EnvFilter;
-
 use mvirt_net::audit::create_audit_logger;
-use mvirt_net::grpc::{NetServiceImpl, reconcile_routes};
-use mvirt_net::proto::net_service_server::NetServiceServer;
-use mvirt_net::store::Store;
+use mvirt_net::grpc::proto::net_service_server::NetServiceServer;
+use mvirt_net::grpc::{NetServiceImpl, NetworkManager, Storage};
+use mvirt_net::{ping, router};
+use std::net::Ipv4Addr;
+use std::path::Path;
+use std::sync::Arc;
+use tokio::signal::unix::{SignalKind, signal};
+use tonic::transport::Server;
+use tracing::{error, info};
 
-#[derive(Parser)]
-#[command(name = "mvirt-net")]
-#[command(about = "mvirt virtual network daemon")]
-struct Args {
-    /// gRPC listen address
-    #[arg(short, long, default_value = "[::1]:50054")]
-    listen: String,
+/// Default gRPC listen address.
+const GRPC_ADDR: &str = "[::1]:50054";
 
-    /// Directory for vhost-user sockets
-    #[arg(long, default_value = "/run/mvirt/net")]
-    socket_dir: String,
+/// Default database path.
+const DB_PATH: &str = "/var/lib/mvirt/net/networks.db";
 
-    /// Directory for metadata storage (SQLite)
-    #[arg(long, default_value = "/var/lib/mvirt/net")]
-    metadata_dir: String,
+/// Default log service endpoint.
+const LOG_ENDPOINT: &str = "http://[::1]:50052";
 
-    /// mvirt-log endpoint for audit logging
-    #[arg(long, default_value = "http://[::1]:50052")]
-    log_endpoint: String,
+/// Default TUN device name.
+const TUN_NAME: &str = "mvirt0";
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    tracing_subscriber::fmt::init();
+
+    // Parse command line args
+    let args: Vec<String> = std::env::args().collect();
+    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("grpc");
+
+    match mode {
+        "grpc" => run_grpc_server().await,
+        "ping" => run_ping_mode().await,
+        _ => {
+            eprintln!("Usage: {} [grpc|ping]", args[0]);
+            eprintln!("  grpc  - Run gRPC server (default)");
+            eprintln!("  ping  - Run ping test mode");
+            std::process::exit(1);
+        }
+    }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Use RUST_LOG if set, otherwise default to info for mvirt_net
-    // Always suppress noisy h2 codec logs
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mvirt_net=info"));
-    let env_filter = env_filter.add_directive("h2::codec=info".parse().unwrap());
+async fn run_grpc_server() {
+    info!("Starting mvirt-net gRPC server");
 
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    // Ensure database directory exists
+    if let Some(parent) = Path::new(DB_PATH).parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        error!(error = %e, path = %parent.display(), "Failed to create database directory");
+        std::process::exit(1);
+    }
 
-    let args = Args::parse();
-
-    info!("Initializing mvirt-net");
-    debug!("DEBUG logging enabled");
-
-    // Ensure directories exist
-    tokio::fs::create_dir_all(&args.socket_dir).await?;
-    tokio::fs::create_dir_all(&args.metadata_dir).await?;
-
-    // Initialize store
-    let store = Arc::new(Store::new(&args.metadata_dir).await?);
-
-    // Initialize audit logger (connects lazily to mvirt-log)
-    let audit = create_audit_logger(&args.log_endpoint);
-
-    // Create gRPC service (also creates TUN device)
-    let service = NetServiceImpl::new(args.socket_dir.clone(), store.clone(), audit)
-        .map_err(|e| format!("Failed to create service: {e}"))?;
-
-    // Recover workers for existing NICs
-    service.recover_nics().await;
-
-    // Initial route reconciliation
-    info!("Reconciling routes for public networks");
-    reconcile_routes(&store).await;
-
-    // Spawn background route reconciliation loop (every 10 seconds)
-    let store_for_reconcile = store.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-            reconcile_routes(&store_for_reconcile).await;
+    // Initialize storage
+    let storage = match Storage::new(Path::new(DB_PATH)) {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            error!(error = %e, "Failed to initialize storage");
+            std::process::exit(1);
         }
-    });
+    };
 
-    let addr = args.listen.parse()?;
-    info!(
-        addr = %addr,
-        socket_dir = %args.socket_dir,
-        metadata_dir = %args.metadata_dir,
-        "Starting gRPC server"
-    );
+    // Initialize network manager
+    let manager = Arc::new(NetworkManager::new(Arc::clone(&storage)));
 
-    Server::builder()
+    // Initialize global TUN device
+    if let Err(e) = manager.init_tun(TUN_NAME).await {
+        error!(error = %e, "Failed to initialize TUN device");
+        error!("Do you have root privileges? Try running with 'sudo'.");
+        std::process::exit(1);
+    }
+
+    // Create audit logger
+    let audit = create_audit_logger(LOG_ENDPOINT);
+
+    // Create gRPC service
+    let service = NetServiceImpl::new(Arc::clone(&storage), Arc::clone(&manager), audit);
+
+    // Parse listen address
+    let addr = GRPC_ADDR.parse().expect("Invalid listen address");
+
+    info!(addr = %addr, "Starting gRPC server");
+
+    // Set up signal handlers
+    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to set up SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to set up SIGTERM handler");
+
+    // Run server with graceful shutdown
+    let server = Server::builder()
         .add_service(NetServiceServer::new(service))
-        .serve(addr)
-        .await?;
+        .serve_with_shutdown(addr, async {
+            tokio::select! {
+                _ = sigint.recv() => {
+                    info!("Received SIGINT, shutting down...");
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, shutting down...");
+                }
+            }
+        });
 
-    Ok(())
+    if let Err(e) = server.await {
+        error!(error = %e, "gRPC server error");
+    }
+
+    // Shutdown manager
+    if let Err(e) = manager.shutdown().await {
+        error!(error = %e, "Failed to shutdown network manager");
+    }
+
+    info!("Server stopped");
+}
+
+async fn run_ping_mode() {
+    let local_ip = Ipv4Addr::new(192, 168, 1, 1);
+
+    let router = match router::Router::with_config("tun0", local_ip, 24, 4096, 4096, 4096).await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to start router: {}", e);
+            error!("Do you have root privileges? Try running with 'sudo'.");
+            std::process::exit(1);
+        }
+    };
+
+    // Set up signal handlers
+    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to set up SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to set up SIGTERM handler");
+
+    info!("Starting ping loop to TUN IP... (Ctrl+C to stop)");
+    let mut seq = 0u16;
+
+    loop {
+        tokio::select! {
+            _ = sigint.recv() => {
+                info!("Received SIGINT, shutting down...");
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down...");
+                break;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                match ping::send(local_ip, seq) {
+                    Ok(rtt) => info!(seq, rtt_ms = rtt.as_secs_f64() * 1000.0, "ping OK"),
+                    Err(e) => error!(seq, error = %e, "ping FAILED"),
+                }
+                seq = seq.wrapping_add(1);
+            }
+        }
+    }
+
+    if let Err(e) = router.shutdown().await {
+        error!(error = %e, "Failed to shutdown router");
+    }
 }

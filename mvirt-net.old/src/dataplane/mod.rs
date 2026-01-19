@@ -35,11 +35,11 @@ pub use manager::ReactorManager;
 pub use ndp::NdpResponder;
 pub use packet::{GATEWAY_IPV4, GATEWAY_MAC};
 pub use reactor::{
-    InboundPacket, Layer2Config, Reactor, ReactorConfig, ReactorReceiver, ReactorRegistry,
-    ReactorSender, reactor_channel,
+    Layer2Config, Reactor, ReactorConfig, ReactorReceiver, ReactorRegistry, ReactorSender,
+    reactor_channel,
 };
 pub use router::{
-    LocalRouting, NetworkRouter, NicChannel, RouteResult, RouteUpdate, RoutedPacket, RoutingHandle,
+    InboundPacket, LocalRouting, NetworkRouter, NicChannel, RouteResult, RouteUpdate, RoutingHandle,
 };
 pub use tun::{TunDevice, add_route, get_routes, remove_route};
 pub use vhost::{

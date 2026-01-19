@@ -160,6 +160,14 @@ enum Commands {
     /// Template operations
     #[command(subcommand)]
     Template(TemplateCommands),
+
+    /// Network operations
+    #[command(subcommand)]
+    Network(NetworkCommands),
+
+    /// NIC operations
+    #[command(subcommand)]
+    Nic(NicCommands),
 }
 
 #[derive(Subcommand)]
@@ -264,6 +272,94 @@ enum TemplateCommands {
         /// Size in GB (optional, defaults to template size)
         #[arg(short, long)]
         size: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetworkCommands {
+    /// List all networks
+    List,
+
+    /// Create a new network
+    Create {
+        /// Network name
+        name: String,
+
+        /// IPv4 subnet (CIDR notation, e.g., "10.0.0.0/24")
+        #[arg(long)]
+        ipv4_subnet: Option<String>,
+
+        /// IPv6 prefix (CIDR notation, e.g., "fd00::/64")
+        #[arg(long)]
+        ipv6_prefix: Option<String>,
+
+        /// DNS servers (comma-separated)
+        #[arg(long)]
+        dns: Option<String>,
+
+        /// Make this a public network (enables internet access)
+        #[arg(long)]
+        public: bool,
+    },
+
+    /// Get network details
+    Get {
+        /// Network ID or name
+        id: String,
+    },
+
+    /// Delete a network
+    Delete {
+        /// Network ID or name
+        id: String,
+
+        /// Force delete even if NICs exist
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum NicCommands {
+    /// List all NICs
+    List {
+        /// Filter by network ID or name
+        #[arg(short, long)]
+        network: Option<String>,
+    },
+
+    /// Create a new NIC
+    Create {
+        /// Network ID or name
+        network: String,
+
+        /// NIC name (optional)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// MAC address (auto-generated if not specified)
+        #[arg(long)]
+        mac: Option<String>,
+
+        /// IPv4 address (auto-allocated if not specified)
+        #[arg(long)]
+        ipv4: Option<String>,
+
+        /// IPv6 address (auto-allocated if not specified)
+        #[arg(long)]
+        ipv6: Option<String>,
+    },
+
+    /// Get NIC details
+    Get {
+        /// NIC ID or name
+        id: String,
+    },
+
+    /// Delete a NIC
+    Delete {
+        /// NIC ID or name
+        id: String,
     },
 }
 
@@ -449,6 +545,241 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tui::run(vm_client, zfs_client, log_client, net_client).await?;
         return Ok(());
     };
+
+    // Handle network commands (require net_client)
+    let is_network_command = matches!(&command, Commands::Network(_) | Commands::Nic(_));
+
+    if is_network_command {
+        let Some(mut net_client) = net_client else {
+            eprintln!("Error: Cannot connect to mvirt-net at {}", cli.net_server);
+            std::process::exit(1);
+        };
+
+        match &command {
+            Commands::Network(cmd) => match cmd {
+                NetworkCommands::List => {
+                    let response = net_client
+                        .list_networks(net_proto::ListNetworksRequest {})
+                        .await?;
+                    let networks = response.into_inner().networks;
+                    if networks.is_empty() {
+                        println!("No networks found");
+                    } else {
+                        println!(
+                            "{:<36} {:<15} {:<18} {:>5} {:<6}",
+                            "ID", "NAME", "SUBNET", "NICS", "PUBLIC"
+                        );
+                        for net in networks {
+                            let subnet = if !net.ipv4_subnet.is_empty() {
+                                net.ipv4_subnet.clone()
+                            } else if !net.ipv6_prefix.is_empty() {
+                                net.ipv6_prefix.clone()
+                            } else {
+                                "-".to_string()
+                            };
+                            println!(
+                                "{:<36} {:<15} {:<18} {:>5} {:<6}",
+                                net.id,
+                                net.name,
+                                subnet,
+                                net.nic_count,
+                                if net.is_public { "yes" } else { "no" }
+                            );
+                        }
+                    }
+                }
+                NetworkCommands::Create {
+                    name,
+                    ipv4_subnet,
+                    ipv6_prefix,
+                    dns,
+                    public,
+                } => {
+                    let ipv4_enabled = ipv4_subnet.is_some();
+                    let ipv6_enabled = ipv6_prefix.is_some();
+
+                    if !ipv4_enabled && !ipv6_enabled {
+                        eprintln!(
+                            "Error: At least one of --ipv4-subnet or --ipv6-prefix is required"
+                        );
+                        std::process::exit(1);
+                    }
+
+                    let dns_servers: Vec<String> = dns
+                        .as_ref()
+                        .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+                        .unwrap_or_default();
+
+                    let response = net_client
+                        .create_network(net_proto::CreateNetworkRequest {
+                            name: name.clone(),
+                            ipv4_enabled,
+                            ipv4_subnet: ipv4_subnet.clone().unwrap_or_default(),
+                            ipv6_enabled,
+                            ipv6_prefix: ipv6_prefix.clone().unwrap_or_default(),
+                            dns_servers,
+                            ntp_servers: vec![],
+                            is_public: *public,
+                        })
+                        .await?;
+                    let net = response.into_inner();
+                    println!("Created network: {} ({})", net.name, net.id);
+                }
+                NetworkCommands::Get { id } => {
+                    let response = net_client
+                        .get_network(net_proto::GetNetworkRequest {
+                            identifier: Some(net_proto::get_network_request::Identifier::Name(
+                                id.clone(),
+                            )),
+                        })
+                        .await?;
+                    let net = response.into_inner();
+                    println!("ID:       {}", net.id);
+                    println!("Name:     {}", net.name);
+                    println!("Public:   {}", if net.is_public { "yes" } else { "no" });
+                    if net.ipv4_enabled {
+                        println!("IPv4:     {}", net.ipv4_subnet);
+                    }
+                    if net.ipv6_enabled {
+                        println!("IPv6:     {}", net.ipv6_prefix);
+                    }
+                    if !net.dns_servers.is_empty() {
+                        println!("DNS:      {}", net.dns_servers.join(", "));
+                    }
+                    println!("NICs:     {}", net.nic_count);
+                    println!("Created:  {}", net.created_at);
+                }
+                NetworkCommands::Delete { id, force } => {
+                    let response = net_client
+                        .delete_network(net_proto::DeleteNetworkRequest {
+                            id: id.clone(),
+                            force: *force,
+                        })
+                        .await?;
+                    let resp = response.into_inner();
+                    if resp.deleted {
+                        if resp.nics_deleted > 0 {
+                            println!(
+                                "Deleted network {} ({} NICs also deleted)",
+                                id, resp.nics_deleted
+                            );
+                        } else {
+                            println!("Deleted network: {}", id);
+                        }
+                    }
+                }
+            },
+
+            Commands::Nic(cmd) => match cmd {
+                NicCommands::List { network } => {
+                    let response = net_client
+                        .list_nics(net_proto::ListNicsRequest {
+                            network_id: network.clone().unwrap_or_default(),
+                        })
+                        .await?;
+                    let nics = response.into_inner().nics;
+                    if nics.is_empty() {
+                        println!("No NICs found");
+                    } else {
+                        println!(
+                            "{:<36} {:<15} {:<17} {:<15} {:<8}",
+                            "ID", "NAME", "MAC", "IPv4", "STATE"
+                        );
+                        for nic in nics {
+                            let state = match net_proto::NicState::try_from(nic.state) {
+                                Ok(net_proto::NicState::Created) => "created",
+                                Ok(net_proto::NicState::Active) => "active",
+                                Ok(net_proto::NicState::Error) => "error",
+                                _ => "unknown",
+                            };
+                            println!(
+                                "{:<36} {:<15} {:<17} {:<15} {:<8}",
+                                nic.id,
+                                if nic.name.is_empty() { "-" } else { &nic.name },
+                                nic.mac_address,
+                                if nic.ipv4_address.is_empty() {
+                                    "-"
+                                } else {
+                                    &nic.ipv4_address
+                                },
+                                state
+                            );
+                        }
+                    }
+                }
+                NicCommands::Create {
+                    network,
+                    name,
+                    mac,
+                    ipv4,
+                    ipv6,
+                } => {
+                    let response = net_client
+                        .create_nic(net_proto::CreateNicRequest {
+                            network_id: network.clone(),
+                            name: name.clone().unwrap_or_default(),
+                            mac_address: mac.clone().unwrap_or_default(),
+                            ipv4_address: ipv4.clone().unwrap_or_default(),
+                            ipv6_address: ipv6.clone().unwrap_or_default(),
+                            routed_ipv4_prefixes: vec![],
+                            routed_ipv6_prefixes: vec![],
+                        })
+                        .await?;
+                    let nic = response.into_inner();
+                    println!("Created NIC: {} ({})", nic.id, nic.mac_address);
+                    println!("  Socket: {}", nic.socket_path);
+                    if !nic.ipv4_address.is_empty() {
+                        println!("  IPv4:   {}", nic.ipv4_address);
+                    }
+                    if !nic.ipv6_address.is_empty() {
+                        println!("  IPv6:   {}", nic.ipv6_address);
+                    }
+                }
+                NicCommands::Get { id } => {
+                    let response = net_client
+                        .get_nic(net_proto::GetNicRequest {
+                            identifier: Some(net_proto::get_nic_request::Identifier::Name(
+                                id.clone(),
+                            )),
+                        })
+                        .await?;
+                    let nic = response.into_inner();
+                    let state = match net_proto::NicState::try_from(nic.state) {
+                        Ok(net_proto::NicState::Created) => "created",
+                        Ok(net_proto::NicState::Active) => "active",
+                        Ok(net_proto::NicState::Error) => "error",
+                        _ => "unknown",
+                    };
+                    println!("ID:       {}", nic.id);
+                    println!(
+                        "Name:     {}",
+                        if nic.name.is_empty() { "-" } else { &nic.name }
+                    );
+                    println!("Network:  {}", nic.network_id);
+                    println!("MAC:      {}", nic.mac_address);
+                    println!("State:    {}", state);
+                    println!("Socket:   {}", nic.socket_path);
+                    if !nic.ipv4_address.is_empty() {
+                        println!("IPv4:     {}", nic.ipv4_address);
+                    }
+                    if !nic.ipv6_address.is_empty() {
+                        println!("IPv6:     {}", nic.ipv6_address);
+                    }
+                    println!("Created:  {}", nic.created_at);
+                }
+                NicCommands::Delete { id } => {
+                    net_client
+                        .delete_nic(net_proto::DeleteNicRequest { id: id.clone() })
+                        .await?;
+                    println!("Deleted NIC: {}", id);
+                }
+            },
+
+            _ => unreachable!(),
+        }
+
+        return Ok(());
+    }
 
     // Handle storage commands (require zfs_client, not vm_client)
     let is_storage_command = matches!(
@@ -892,7 +1223,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Commands::Pool
         | Commands::Volume(_)
         | Commands::Snapshot(_)
-        | Commands::Template(_) => {
+        | Commands::Template(_)
+        | Commands::Network(_)
+        | Commands::Nic(_) => {
             // Handled above
             unreachable!()
         }

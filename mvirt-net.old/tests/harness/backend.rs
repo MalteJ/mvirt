@@ -24,7 +24,7 @@ use vm_memory::GuestMemoryAtomic;
 use mvirt_net::config::NicEntry;
 use mvirt_net::dataplane::{
     ArpResponder, BufferPool, Dhcpv4Server, Dhcpv6Server, IcmpResponder, Icmpv6Responder,
-    NdpResponder, NetworkRouter, NicChannel, VhostNetBackend,
+    InboundPacket, NdpResponder, NetworkRouter, NicChannel, VhostNetBackend,
 };
 
 use super::VhostTestClient;
@@ -416,7 +416,7 @@ impl RoutingTestBackend {
         let nic_id_a = nic_a.id.clone();
         let backend_a_for_handler = backend_a.clone();
 
-        backend_a.set_packet_handler(Box::new(move |buffer, _virtio_hdr| {
+        backend_a.set_packet_handler(Box::new(move |buffer, virtio_hdr| {
             let packet = buffer.data();
 
             // Try ARP
@@ -430,7 +430,7 @@ impl RoutingTestBackend {
                 return;
             }
             // Try routing to other vNIC (consumes buffer)
-            router_a.route_packet(&nic_id_a, buffer);
+            router_a.route_packet(&nic_id_a, buffer, virtio_hdr);
         }));
 
         let router_b = router.clone();
@@ -440,7 +440,7 @@ impl RoutingTestBackend {
         let nic_id_b = nic_b.id.clone();
         let backend_b_for_handler = backend_b.clone();
 
-        backend_b.set_packet_handler(Box::new(move |buffer, _virtio_hdr| {
+        backend_b.set_packet_handler(Box::new(move |buffer, virtio_hdr| {
             let packet = buffer.data();
 
             // Try ARP
@@ -454,7 +454,7 @@ impl RoutingTestBackend {
                 return;
             }
             // Try routing to other vNIC (consumes buffer)
-            router_b.route_packet(&nic_id_b, buffer);
+            router_b.route_packet(&nic_id_b, buffer, virtio_hdr);
         }));
 
         // Spawn RX injection threads
@@ -534,7 +534,7 @@ impl Drop for RoutingTestBackend {
 
 /// RX injection thread for routing tests
 fn run_rx_injection(
-    rx_channel: Receiver<mvirt_net::dataplane::RoutedPacket>,
+    rx_channel: Receiver<InboundPacket>,
     backend: Arc<VhostNetBackend>,
     shutdown: Arc<AtomicBool>,
 ) {

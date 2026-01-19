@@ -21,7 +21,7 @@ use tracing::{debug, info, trace, warn};
 use super::backend::{ReactorBackend, RecvResult};
 use super::buffer::{BufferPool, PoolBuffer, VIRTIO_HDR_SIZE};
 use super::packet::GATEWAY_MAC;
-use super::router::NetworkRouter;
+use super::router::{InboundPacket, NetworkRouter, NicChannel, RouteResult};
 use super::vhost::VirtioNetHdr;
 use super::{
     ArpResponder, Dhcpv4Server, Dhcpv6Server, IcmpResponder, Icmpv6Responder, NdpResponder,
@@ -32,12 +32,6 @@ const INBOX_CAPACITY: usize = 1024;
 
 /// Maximum packets to process per iteration (batching)
 const BATCH_LIMIT: usize = 64;
-
-/// A packet routed from another reactor
-pub struct InboundPacket {
-    pub buffer: PoolBuffer,
-    pub virtio_hdr: VirtioNetHdr,
-}
 
 /// Sender half for routing packets to a reactor
 pub type ReactorSender = Sender<InboundPacket>;
@@ -295,6 +289,15 @@ impl<B: ReactorBackend> Reactor<B> {
         // Create protocol handlers only for Layer 2 (vNIC) reactors
         let handlers = config.layer2.as_ref().map(ProtocolHandlers::new);
 
+        // Register this reactor's inbox with the NetworkRouter for L3 routing
+        if let Some(l2) = &config.layer2 {
+            let nic_channel = NicChannel {
+                sender: outbox.clone(),
+                mac: l2.mac,
+            };
+            router.register_nic(config.id.clone(), nic_channel);
+        }
+
         let reactor = Self {
             backend,
             inbox,
@@ -470,8 +473,29 @@ impl<B: ReactorBackend> Reactor<B> {
             _ => {}
         }
 
-        // Route the packet (with virtio_hdr for checksum offload)
-        self.route_packet(buffer, virtio_hdr);
+        // L2 forwarding by MAC first (stays in Reactor, uses registry)
+        let dst_mac: [u8; 6] = data[0..6].try_into().unwrap();
+        if dst_mac[0] & 0x01 == 0 {
+            // Not broadcast/multicast - try L2 forwarding
+            if let Some(sender) = self.registry.get_by_mac(&dst_mac) {
+                let _ = sender.try_send(InboundPacket { buffer, virtio_hdr });
+                return;
+            }
+        }
+
+        // L3 routing via NetworkRouter
+        match self
+            .router
+            .route_packet(&self.config.id, buffer, virtio_hdr)
+        {
+            RouteResult::Dropped => {}
+            RouteResult::Routed => {} // Already sent by NetworkRouter
+            RouteResult::ToInternet { buffer, virtio_hdr } => {
+                if let Some(sender) = self.registry.get_tun(&self.config.network_id) {
+                    let _ = sender.try_send(InboundPacket { buffer, virtio_hdr });
+                }
+            }
+        }
     }
 
     /// Handle a packet received from the TUN device (Layer 3, raw IP)
@@ -745,142 +769,6 @@ impl<B: ReactorBackend> Reactor<B> {
         }
 
         false
-    }
-
-    /// Route a packet to another reactor or TUN
-    ///
-    /// The virtio_hdr carries checksum offload info from the guest.
-    /// For packets to TUN, we pass this through so TUN can compute the checksum.
-    fn route_packet(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
-        let data = buffer.data();
-        if data.len() < 14 {
-            return;
-        }
-
-        // Check destination MAC
-        let dst_mac: [u8; 6] = data[0..6].try_into().unwrap();
-
-        // Broadcast/multicast - drop (handled by protocol handlers)
-        if dst_mac[0] & 0x01 != 0 {
-            debug!(reactor_id = %self.config.id, "Dropping broadcast/multicast");
-            return;
-        }
-
-        // Try L2 forwarding by MAC
-        if let Some(sender) = self.registry.get_by_mac(&dst_mac) {
-            if sender
-                .try_send(InboundPacket { buffer, virtio_hdr })
-                .is_err()
-            {
-                warn!(
-                    reactor_id = %self.config.id,
-                    dst_mac = ?dst_mac,
-                    "L2 destination inbox full, dropping packet"
-                );
-            }
-            return;
-        }
-
-        // Try L3 routing
-        let ethertype = u16::from_be_bytes([data[12], data[13]]);
-        match ethertype {
-            0x0800 => self.route_ipv4(buffer, virtio_hdr),
-            0x86DD => self.route_ipv6(buffer, virtio_hdr),
-            _ => {
-                debug!(reactor_id = %self.config.id, ethertype, "Unknown ethertype, dropping");
-            }
-        }
-    }
-
-    /// Route an IPv4 packet
-    fn route_ipv4(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
-        let data = buffer.data();
-        if data.len() < 34 {
-            return;
-        }
-
-        // Extract destination IP
-        let dst_ip =
-            std::net::Ipv4Addr::new(data[14 + 16], data[14 + 17], data[14 + 18], data[14 + 19]);
-
-        // Lookup in routing table
-        if let Some(entry) = self.router.lookup_ipv4(dst_ip) {
-            // Route to local NIC
-            if let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id)
-                && sender
-                    .try_send(InboundPacket { buffer, virtio_hdr })
-                    .is_err()
-            {
-                warn!(
-                    reactor_id = %self.config.id,
-                    %dst_ip,
-                    dst_nic = %entry.nic_id,
-                    "Destination NIC inbox full, dropping IPv4 packet"
-                );
-            }
-        } else if self.router.is_public() {
-            // No local route, send to TUN for internet
-            // Pass through virtio_hdr so TUN can compute checksum if needed
-            if let Some(sender) = self.registry.get_tun(&self.config.network_id)
-                && sender
-                    .try_send(InboundPacket { buffer, virtio_hdr })
-                    .is_err()
-            {
-                warn!(
-                    reactor_id = %self.config.id,
-                    %dst_ip,
-                    "TUN inbox full, dropping IPv4 packet"
-                );
-            }
-        } else {
-            debug!(reactor_id = %self.config.id, %dst_ip, "No route for IPv4 (non-public network)");
-        }
-    }
-
-    /// Route an IPv6 packet
-    fn route_ipv6(&self, buffer: PoolBuffer, virtio_hdr: VirtioNetHdr) {
-        let data = buffer.data();
-        if data.len() < 54 {
-            return;
-        }
-
-        // Extract destination IP
-        let mut dst_bytes = [0u8; 16];
-        dst_bytes.copy_from_slice(&data[14 + 24..14 + 40]);
-        let dst_ip = std::net::Ipv6Addr::from(dst_bytes);
-
-        // Lookup in routing table
-        if let Some(entry) = self.router.lookup_ipv6(dst_ip) {
-            // Route to local NIC
-            if let Some(sender) = self.registry.get_by_nic_id(&entry.nic_id)
-                && sender
-                    .try_send(InboundPacket { buffer, virtio_hdr })
-                    .is_err()
-            {
-                warn!(
-                    reactor_id = %self.config.id,
-                    %dst_ip,
-                    dst_nic = %entry.nic_id,
-                    "Destination NIC inbox full, dropping IPv6 packet"
-                );
-            }
-        } else if self.router.is_public() {
-            // No local route, send to TUN for internet
-            // Pass through virtio_hdr so TUN can compute checksum if needed
-            if let Some(sender) = self.registry.get_tun(&self.config.network_id)
-                && sender
-                    .try_send(InboundPacket { buffer, virtio_hdr })
-                    .is_err()
-            {
-                warn!(
-                    reactor_id = %self.config.id,
-                    %dst_ip,
-                    "TUN inbox full, dropping IPv6 packet"
-                );
-            }
-        } else {
-            debug!(reactor_id = %self.config.id, %dst_ip, "No route for IPv6 (non-public network)");
-        }
     }
 
     /// Poll with timeout when idle

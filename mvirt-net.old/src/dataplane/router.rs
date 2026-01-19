@@ -21,10 +21,8 @@ use super::buffer::PoolBuffer;
 use super::packet::{GATEWAY_MAC, parse_ethernet};
 use super::vhost::VirtioNetHdr;
 
-/// A packet routed to a target NIC (zero-copy via PoolBuffer)
-pub struct RoutedPacket {
-    /// Target NIC ID
-    pub target_nic_id: String,
+/// A packet for delivery to a NIC (zero-copy via PoolBuffer)
+pub struct InboundPacket {
     /// Raw Ethernet frame in PoolBuffer
     pub buffer: PoolBuffer,
     /// Virtio-net header with GSO/checksum offload metadata
@@ -39,7 +37,10 @@ pub enum RouteResult {
     Routed,
     /// Packet should be sent to internet via TUN (public network, no local route)
     /// Contains the IP packet without Ethernet header in a PoolBuffer
-    ToInternet(PoolBuffer),
+    ToInternet {
+        buffer: PoolBuffer,
+        virtio_hdr: VirtioNetHdr,
+    },
 }
 
 /// Route entry in the routing table
@@ -54,8 +55,8 @@ pub struct RouteEntry {
 /// Channel for routing packets to a NIC
 #[derive(Clone)]
 pub struct NicChannel {
-    /// Channel sender for routed packets
-    pub sender: Sender<RoutedPacket>,
+    /// Channel sender for inbound packets
+    pub sender: Sender<InboundPacket>,
     /// NIC's MAC address for Ethernet header rewriting
     pub mac: [u8; 6],
 }
@@ -401,9 +402,14 @@ impl NetworkRouter {
     ///
     /// Returns:
     /// - `RouteResult::Routed` if packet was sent to a local NIC
-    /// - `RouteResult::ToInternet(buffer)` if packet should go to TUN (public networks only)
+    /// - `RouteResult::ToInternet { buffer, virtio_hdr }` if packet should go to TUN (public networks only)
     /// - `RouteResult::Dropped` if packet was dropped (TTL expired, parse error, or no route in non-public network)
-    pub fn route_packet(&self, source_nic_id: &str, mut buffer: PoolBuffer) -> RouteResult {
+    pub fn route_packet(
+        &self,
+        source_nic_id: &str,
+        mut buffer: PoolBuffer,
+        virtio_hdr: VirtioNetHdr,
+    ) -> RouteResult {
         // Parse the packet to determine destination
         let Some(frame) = parse_ethernet(buffer.data()) else {
             return RouteResult::Dropped;
@@ -476,7 +482,7 @@ impl NetworkRouter {
                     len = buffer.len,
                     "Forwarding to internet (TUN)"
                 );
-                return RouteResult::ToInternet(buffer);
+                return RouteResult::ToInternet { buffer, virtio_hdr };
             }
             // Non-public network: DROP - complete network isolation
             debug!(
@@ -498,13 +504,9 @@ impl NetworkRouter {
             // - Src MAC = gateway MAC (we are the router)
             rewrite_ethernet_header(buffer.data_mut(), channel.mac, GATEWAY_MAC);
 
-            let routed = RoutedPacket {
-                target_nic_id: target.clone(),
-                buffer,
-                virtio_hdr: VirtioNetHdr::default(), // No GSO for inter-vNIC routing
-            };
+            let packet = InboundPacket { buffer, virtio_hdr };
 
-            if channel.sender.send(routed).is_ok() {
+            if channel.sender.send(packet).is_ok() {
                 debug!(
                     source = %source_nic_id,
                     target = %target,
@@ -533,13 +535,9 @@ impl NetworkRouter {
             // Rewrite Ethernet header: dst MAC = target NIC's MAC, src MAC = gateway
             rewrite_ethernet_header(buffer.data_mut(), channel.mac, GATEWAY_MAC);
 
-            let routed = RoutedPacket {
-                target_nic_id: target_nic_id.to_string(),
-                buffer,
-                virtio_hdr,
-            };
+            let packet = InboundPacket { buffer, virtio_hdr };
 
-            channel.sender.send(routed).is_ok()
+            channel.sender.send(packet).is_ok()
         } else {
             false
         }
