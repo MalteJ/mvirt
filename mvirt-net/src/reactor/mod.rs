@@ -17,7 +17,7 @@ use nix::libc;
 use nix::sys::eventfd::{EfdFlags, EventFd};
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, Icmpv4Message, Icmpv4Packet,
-    Icmpv4Repr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv4Repr, Ipv6Address, Ipv6Packet,
+    Icmpv4Repr, IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6Packet,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -60,6 +60,7 @@ pub struct NicConfig {
 const USER_DATA_RX_FLAG: u64 = 1 << 63;
 const USER_DATA_EVENT_FLAG: u64 = 1 << 62;
 const USER_DATA_VHOST_TX_FLAG: u64 = 1 << 61;
+const USER_DATA_INCOMING_TUN_FLAG: u64 = 1 << 60;
 
 /// virtio-net header size for vhost (without VIRTIO_NET_F_MRG_RXBUF)
 const VIRTIO_NET_HDR_SIZE: usize = 12;
@@ -69,6 +70,83 @@ const ETHERNET_HDR_SIZE: usize = 14;
 
 /// Size of buffer for peeking at packet headers (Virtio + IP + ICMP headers)
 const PEEK_BUF_SIZE: usize = 128;
+
+/// Strip Ethernet header from iovecs for L3 TUN transmission.
+///
+/// Input:  iovecs containing [virtio_net_hdr (12)][ethernet (14)][IP packet...]
+/// Output: new iovecs containing [virtio_net_hdr (12)][IP packet...]
+///
+/// Returns None if the packet is too short or malformed.
+fn strip_ethernet_header(iovecs: &[libc::iovec]) -> Option<Vec<libc::iovec>> {
+    const SKIP_START: usize = VIRTIO_NET_HDR_SIZE; // 12
+    const SKIP_END: usize = VIRTIO_NET_HDR_SIZE + ETHERNET_HDR_SIZE; // 26
+
+    let mut result: Vec<libc::iovec> = Vec::with_capacity(iovecs.len());
+    let mut pos = 0usize;
+
+    for iov in iovecs {
+        let iov_start = pos;
+        let iov_end = pos + iov.iov_len;
+
+        // Region before the skip zone (virtio_net_hdr: bytes 0-12)
+        if iov_start < SKIP_START && iov_end > iov_start {
+            let start_in_iov = 0;
+            let end_in_iov = (SKIP_START - iov_start).min(iov.iov_len);
+            if end_in_iov > start_in_iov {
+                result.push(libc::iovec {
+                    iov_base: iov.iov_base,
+                    iov_len: end_in_iov - start_in_iov,
+                });
+            }
+        }
+
+        // Region after the skip zone (IP packet: bytes 26+)
+        if iov_end > SKIP_END {
+            let start_in_iov = SKIP_END.saturating_sub(iov_start);
+            let end_in_iov = iov.iov_len;
+            if end_in_iov > start_in_iov {
+                result.push(libc::iovec {
+                    iov_base: unsafe { (iov.iov_base as *mut u8).add(start_in_iov) as *mut _ },
+                    iov_len: end_in_iov - start_in_iov,
+                });
+            }
+        }
+
+        pos = iov_end;
+    }
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Prepend Ethernet header to L3 packet for vhost injection.
+///
+/// Input:  L3 packet data [virtio_net_hdr (12)][IP packet...]
+/// Output: L2 frame [virtio_net_hdr (12)][Ethernet (14)][IP packet...]
+///
+/// Uses GATEWAY_MAC as source and the provided dst_mac as destination.
+fn prepend_ethernet_header(data: &[u8], dst_mac: &[u8; 6], ethertype: u16) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len() + ETHERNET_HDR_SIZE);
+
+    // Copy virtio_net_hdr (first 12 bytes)
+    let hdr_len = VIRTIO_NET_HDR_SIZE.min(data.len());
+    result.extend_from_slice(&data[..hdr_len]);
+
+    // Add Ethernet header (14 bytes): dst_mac (6) + src_mac (6) + ethertype (2)
+    result.extend_from_slice(dst_mac); // Destination MAC
+    result.extend_from_slice(&GATEWAY_MAC); // Source MAC (gateway)
+    result.extend_from_slice(&ethertype.to_be_bytes()); // EtherType
+
+    // Copy IP packet (skip virtio_net_hdr)
+    if data.len() > VIRTIO_NET_HDR_SIZE {
+        result.extend_from_slice(&data[VIRTIO_NET_HDR_SIZE..]);
+    }
+
+    result
+}
 
 /// vhost-user queue indices
 const VHOST_RX_QUEUE: usize = 0;
@@ -89,9 +167,21 @@ struct VhostTxInFlight {
 }
 
 /// Tracks an in-flight VM-to-VM packet awaiting completion
+#[allow(dead_code)]
 struct VhostToVhostInFlight {
     head_index: u16,
     total_len: u32,
+}
+
+/// Tracks an in-flight incoming packet being written to TUN
+struct IncomingToTunInFlight {
+    /// Packet ID for completion notification
+    packet_id: PacketId,
+    /// Source information for completion notification
+    source: PacketSource,
+    /// Buffer containing the L3 packet data (owned to keep alive during async I/O)
+    #[allow(dead_code)]
+    buffer: Vec<u8>,
 }
 
 /// Commands that can be sent to the reactor
@@ -192,9 +282,6 @@ impl ReactorHandle {
 pub struct Reactor<RX, TX> {
     rx_queue: RX,
     tx_queue: TX,
-    local_ip: Ipv4Address,
-    /// Local IPv6 address (optional)
-    local_ipv6: Option<Ipv6Address>,
     event_fd: RawFd,
     command_rx: Receiver<ReactorCommand>,
     /// Receiver for vhost handshake (optional, for vhost-user integration)
@@ -217,22 +304,20 @@ pub struct Reactor<RX, TX> {
 
 impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
     /// Create a new reactor and return it along with a handle for control
-    pub fn new(rx_queue: RX, tx_queue: TX, local_ip: Ipv4Address) -> (Self, ReactorHandle) {
-        Self::with_vhost(rx_queue, tx_queue, local_ip, None, None)
+    pub fn new(rx_queue: RX, tx_queue: TX) -> (Self, ReactorHandle) {
+        Self::with_vhost(rx_queue, tx_queue, None, None)
     }
 
     /// Create a new reactor with optional vhost handshake receiver
     pub fn with_vhost(
         rx_queue: RX,
         tx_queue: TX,
-        local_ip: Ipv4Address,
         handshake_rx: Option<Receiver<VhostHandshake>>,
         nic_config: Option<NicConfig>,
     ) -> (Self, ReactorHandle) {
         Self::with_registry(
             rx_queue,
             tx_queue,
-            local_ip,
             handshake_rx,
             None,
             None,
@@ -245,7 +330,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
     pub fn with_registry(
         rx_queue: RX,
         tx_queue: TX,
-        local_ip: Ipv4Address,
         handshake_rx: Option<Receiver<VhostHandshake>>,
         registry: Option<Arc<ReactorRegistry>>,
         packet_rx: Option<Receiver<PacketRef>>,
@@ -266,8 +350,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         let reactor = Reactor {
             rx_queue,
             tx_queue,
-            local_ip,
-            local_ipv6: None, // TODO: Add IPv6 support to constructor
             event_fd: event_fd_raw,
             command_rx,
             handshake_rx,
@@ -303,36 +385,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         PacketId::new(id)
     }
 
-    /// Peek at packet headers and determine routing decision.
-    ///
-    /// Parses IP headers from the peek buffer (which should contain
-    /// virtio_net_hdr + IP headers) and performs LPM lookup.
-    /// Supports both IPv4 and IPv6.
-    fn peek_and_route(&self, peek_data: &[u8]) -> RoutingDecision {
-        // Skip virtio_net_hdr
-        if peek_data.len() <= VIRTIO_NET_HDR_SIZE {
-            debug!("peek_and_route: packet too short");
-            return RoutingDecision::Drop;
-        }
-        let ip_data = &peek_data[VIRTIO_NET_HDR_SIZE..];
-
-        // Check IP version (first nibble of IP header)
-        if ip_data.is_empty() {
-            debug!("peek_and_route: empty IP data");
-            return RoutingDecision::Drop;
-        }
-        let ip_version = ip_data[0] >> 4;
-
-        match ip_version {
-            4 => self.route_ipv4(ip_data),
-            6 => self.route_ipv6(ip_data),
-            _ => {
-                debug!(version = ip_version, "peek_and_route: unknown IP version");
-                RoutingDecision::Drop
-            }
-        }
-    }
-
     /// Route an IPv4 packet.
     fn route_ipv4(&self, ip_data: &[u8]) -> RoutingDecision {
         let Ok(ipv4) = Ipv4Packet::new_checked(ip_data) else {
@@ -346,15 +398,8 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         debug!(
             src = %src_addr,
             dst = %dst_addr,
-            local = %self.local_ip,
             "route_ipv4: processing packet"
         );
-
-        // Check if destined for our local IP (handle locally)
-        if dst_addr == self.local_ip {
-            debug!("route_ipv4: local delivery");
-            return RoutingDecision::Local;
-        }
 
         // LPM lookup in routing tables
         if let Some(table) = self.routing_tables.get_default() {
@@ -390,14 +435,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             "route_ipv6: processing packet"
         );
 
-        // Check if destined for our local IPv6 (handle locally)
-        if let Some(local_v6) = self.local_ipv6
-            && dst_addr == local_v6
-        {
-            debug!("route_ipv6: local delivery");
-            return RoutingDecision::Local;
-        }
-
         // LPM lookup in routing tables
         if let Some(table) = self.routing_tables.get_default() {
             let dst_v6 = std::net::Ipv6Addr::from(dst_addr.0);
@@ -432,7 +469,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
     }
 
     pub fn run(mut self) {
-        info!(ip = %self.local_ip, "Reactor running");
+        info!("Reactor running");
 
         // Get fd from queues (they share the same fd)
         let rx_fd = self.rx_queue.fd();
@@ -485,6 +522,11 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         // Track in-flight VM-to-VM packets (awaiting CompletionNotify)
         let mut vhost_to_vhost_in_flight: std::collections::HashMap<u64, VhostToVhostInFlight> =
             std::collections::HashMap::new();
+
+        // Track in-flight incoming packets being written to TUN (for TUN-only reactors)
+        let mut incoming_to_tun_in_flight: std::collections::HashMap<u64, IncomingToTunInFlight> =
+            std::collections::HashMap::new();
+        let mut incoming_tun_id: u64 = 0;
 
         // Pending TX packets to send
         let mut pending_tx: Vec<TxPacket> = Vec::new();
@@ -645,6 +687,14 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         // Process incoming packets from other reactors
                         if let Some(ref state) = vhost_state {
                             self.process_incoming_packets(state, &mut vhost_to_vhost_in_flight);
+                        } else {
+                            // TUN-only reactor: write incoming packets to TUN fd
+                            self.process_incoming_packets_to_tun(
+                                &mut ring,
+                                tun_fd,
+                                &mut incoming_to_tun_in_flight,
+                                &mut incoming_tun_id,
+                            );
                         }
 
                         // Process completion notifications
@@ -691,8 +741,63 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     continue;
                 }
 
+                // Check for incoming-to-TUN completion (packets from other reactors written to TUN)
+                let is_incoming_tun = (user_data & USER_DATA_INCOMING_TUN_FLAG) != 0;
+                if is_incoming_tun {
+                    if let Some(in_flight) = incoming_to_tun_in_flight.remove(&user_data) {
+                        let write_result = if result < 0 {
+                            error!(error = -result, "incoming-to-TUN write error");
+                            result
+                        } else {
+                            debug!(len = result, "incoming-to-TUN write complete");
+                            result
+                        };
+
+                        // Send completion notification back to source reactor
+                        let completion = match &in_flight.source {
+                            PacketSource::VhostToVhost {
+                                head_index,
+                                total_len,
+                                source_reactor: _,
+                            } => CompletionNotify::VhostToVhostComplete {
+                                packet_id: in_flight.packet_id,
+                                head_index: *head_index,
+                                total_len: *total_len,
+                                result: write_result,
+                            },
+                            PacketSource::TunRx {
+                                chain_id,
+                                source_reactor: _,
+                                len,
+                            } => CompletionNotify::TunRxComplete {
+                                packet_id: in_flight.packet_id,
+                                chain_id: *chain_id,
+                                result: *len as i32,
+                            },
+                            PacketSource::VhostTx {
+                                head_index,
+                                total_len,
+                                source_reactor: _,
+                            } => CompletionNotify::VhostTxComplete {
+                                packet_id: in_flight.packet_id,
+                                head_index: *head_index,
+                                total_len: *total_len,
+                                result: write_result,
+                            },
+                        };
+
+                        if let Some(ref registry) = self.registry {
+                            let source_reactor = in_flight.source.source_reactor();
+                            if !registry.send_completion_to(&source_reactor, completion) {
+                                warn!(src = %source_reactor, "Failed to send completion to source reactor");
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 if is_rx {
-                    // RX completion
+                    // RX completion - packet received from TUN (L3 packet)
                     let chain = match rx_in_flight.remove(&chain_id) {
                         Some(c) => c,
                         None => {
@@ -714,17 +819,93 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
                     let len = result as usize;
 
-                    // Process packet if it has data beyond virtio_net_hdr
+                    // Route L3 packet to appropriate VM
                     if len > VNET_HDR_SIZE {
-                        let data = unsafe {
-                            std::slice::from_raw_parts(
-                                chain.buffer.ptr.add(VNET_HDR_SIZE),
-                                len - VNET_HDR_SIZE,
-                            )
+                        let packet_data =
+                            unsafe { std::slice::from_raw_parts(chain.buffer.ptr, len) };
+                        let ip_data = &packet_data[VNET_HDR_SIZE..];
+
+                        // Determine IP version and route
+                        let ip_version = ip_data.first().map(|b| b >> 4);
+                        let routing_decision = match ip_version {
+                            Some(4) => self.route_ipv4(ip_data),
+                            Some(6) => self.route_ipv6(ip_data),
+                            _ => {
+                                debug!(len, "TUN RX: unknown IP version");
+                                RoutingDecision::Drop
+                            }
                         };
 
-                        // Handle packet locally (ICMP etc) - replies go to TUN TX
-                        self.handle_packet(data, &mut pending_tx);
+                        match routing_decision {
+                            RoutingDecision::ToVhost {
+                                reactor_id: target_reactor,
+                            } => {
+                                // Forward to VM - prepend Ethernet header
+                                // Clone registry to avoid borrow conflicts
+                                let registry_opt = self.registry.clone();
+                                if let Some(registry) = registry_opt {
+                                    // Get destination MAC from registry
+                                    let dst_mac = registry
+                                        .get_mac_for_reactor(&target_reactor)
+                                        .unwrap_or([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+
+                                    // Determine ethertype from IP version
+                                    let ethertype = match ip_version {
+                                        Some(4) => 0x0800, // IPv4
+                                        Some(6) => 0x86DD, // IPv6
+                                        _ => 0x0800,
+                                    };
+
+                                    // Prepend Ethernet header to create L2 frame
+                                    let l2_frame =
+                                        prepend_ethernet_header(packet_data, &dst_mac, ethertype);
+
+                                    // Create PacketRef with owned data
+                                    let packet_id = self.next_packet_id();
+                                    let source = PacketSource::TunRx {
+                                        chain_id,
+                                        len: l2_frame.len() as u32,
+                                        source_reactor: self.reactor_id,
+                                    };
+
+                                    // Create single iovec for the L2 frame
+                                    let l2_frame_arc: Arc<Vec<u8>> = Arc::new(l2_frame);
+                                    let l2_frame_ptr = l2_frame_arc.as_ptr();
+                                    let l2_frame_len = l2_frame_arc.len();
+                                    let iovec = libc::iovec {
+                                        iov_base: l2_frame_ptr as *mut _,
+                                        iov_len: l2_frame_len,
+                                    };
+
+                                    let packet = PacketRef::new(
+                                        packet_id,
+                                        vec![iovec],
+                                        source,
+                                        Some(l2_frame_arc as Arc<dyn std::any::Any + Send + Sync>),
+                                    );
+
+                                    if registry.send_packet_to(&target_reactor, packet) {
+                                        debug!(
+                                            len,
+                                            dst = %target_reactor,
+                                            "TUN RX -> vhost (L3 routed)"
+                                        );
+                                    } else {
+                                        debug!(dst = %target_reactor, "TUN RX: target reactor not found");
+                                    }
+                                } else {
+                                    debug!("TUN RX: no registry for routing");
+                                }
+                            }
+                            RoutingDecision::ToTun { .. } => {
+                                // Packet from TUN shouldn't route back to TUN
+                                debug!(len, "TUN RX: dropping packet (would route to TUN)");
+                            }
+                            RoutingDecision::Drop => {
+                                // No route found, drop packet
+                                debug!(len, "TUN RX: dropped (no route)");
+                            }
+                        }
                     }
 
                     // Return RX buffer
@@ -807,99 +988,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         info!("Reactor done");
     }
 
-    fn handle_packet(&mut self, data: &[u8], pending_tx: &mut Vec<TxPacket>) {
-        let Ok(ipv4) = Ipv4Packet::new_checked(data) else {
-            return;
-        };
-
-        // Only handle packets destined to our IP
-        if ipv4.dst_addr() != self.local_ip {
-            return;
-        }
-
-        if ipv4.next_header() == IpProtocol::Icmp {
-            self.handle_icmp(&ipv4, pending_tx)
-        }
-    }
-
-    fn handle_icmp(&mut self, ipv4: &Ipv4Packet<&[u8]>, pending_tx: &mut Vec<TxPacket>) {
-        let Ok(icmp) = Icmpv4Packet::new_checked(ipv4.payload()) else {
-            return;
-        };
-
-        if icmp.msg_type() != Icmpv4Message::EchoRequest {
-            return;
-        }
-
-        debug!(
-            src = %ipv4.src_addr(),
-            id = icmp.echo_ident(),
-            seq = icmp.echo_seq_no(),
-            "ICMP Echo Request"
-        );
-
-        // Build Echo Reply
-        let Some(tx_chain) = self.tx_queue.pop_available() else {
-            warn!("No TX buffer available for ICMP reply");
-            return;
-        };
-
-        let echo_data = icmp.data();
-
-        let icmp_repr = Icmpv4Repr::EchoReply {
-            ident: icmp.echo_ident(),
-            seq_no: icmp.echo_seq_no(),
-            data: echo_data,
-        };
-
-        let ip_repr = Ipv4Repr {
-            src_addr: self.local_ip,
-            dst_addr: ipv4.src_addr(),
-            next_header: IpProtocol::Icmp,
-            payload_len: icmp_repr.buffer_len(),
-            hop_limit: 64,
-        };
-
-        let total_len = VNET_HDR_SIZE + ip_repr.buffer_len() + icmp_repr.buffer_len();
-
-        if total_len > tx_chain.buffer.len as usize {
-            warn!("TX buffer too small for ICMP reply");
-            self.tx_queue.push_used(tx_chain.chain_id);
-            return;
-        }
-
-        let tx_buf = unsafe { std::slice::from_raw_parts_mut(tx_chain.buffer.ptr, total_len) };
-
-        // Zero virtio_net_hdr
-        tx_buf[..VNET_HDR_SIZE].fill(0);
-
-        // Write IP header
-        let mut ip_packet = Ipv4Packet::new_unchecked(&mut tx_buf[VNET_HDR_SIZE..]);
-        ip_repr.emit(
-            &mut ip_packet,
-            &smoltcp::phy::ChecksumCapabilities::default(),
-        );
-
-        // Write ICMP
-        let mut icmp_packet = Icmpv4Packet::new_unchecked(ip_packet.payload_mut());
-        icmp_repr.emit(
-            &mut icmp_packet,
-            &smoltcp::phy::ChecksumCapabilities::default(),
-        );
-
-        pending_tx.push(TxPacket {
-            chain: tx_chain,
-            len: total_len as u32,
-        });
-
-        debug!(
-            dst = %ipv4.src_addr(),
-            id = icmp.echo_ident(),
-            seq = icmp.echo_seq_no(),
-            "ICMP Echo Reply sent"
-        );
-    }
-
     /// Convert vhost descriptor chain to iovecs for zero-copy I/O
     fn desc_chain_to_iovecs(
         desc_chain: &virtio_queue::DescriptorChain<&vm_memory::GuestMemoryMmap>,
@@ -936,28 +1024,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             iovecs,
             keep_alive,
         })
-    }
-
-    /// Check if packet is ICMP echo request and handle it (TUN format: virtio_hdr + IP)
-    fn check_and_handle_icmp(state: &VhostState, peek_data: &[u8]) {
-        if peek_data.len() <= VIRTIO_NET_HDR_SIZE {
-            return;
-        }
-        let ip_data = &peek_data[VIRTIO_NET_HDR_SIZE..];
-        if let Ok(ipv4) = Ipv4Packet::new_checked(ip_data)
-            && ipv4.next_header() == IpProtocol::Icmp
-            && let Ok(icmp) = Icmpv4Packet::new_checked(ipv4.payload())
-            && icmp.msg_type() == Icmpv4Message::EchoRequest
-        {
-            debug!(
-                src = %ipv4.src_addr(),
-                dst = %ipv4.dst_addr(),
-                id = icmp.echo_ident(),
-                seq = icmp.echo_seq_no(),
-                "vhost TX: ICMP Echo Request"
-            );
-            Self::handle_vhost_icmp_request(state, &ipv4, &icmp);
-        }
     }
 
     /// Handle vhost Ethernet frame and check for protocol packets that need local handling.
@@ -1117,111 +1183,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         Self::inject_to_vhost_rx(state, &reply);
     }
 
-    /// Handle packets destined for local_ip (TUN IP) from vhost Ethernet frames.
-    ///
-    /// This handles ICMP echo requests sent to the TUN interface's IP address.
-    fn handle_local_ethernet_packet(&self, state: &VhostState, peek_data: &[u8]) {
-        if peek_data.len() <= VIRTIO_NET_HDR_SIZE {
-            return;
-        }
-
-        let virtio_hdr = &peek_data[..VIRTIO_NET_HDR_SIZE];
-        let ethernet_data = &peek_data[VIRTIO_NET_HDR_SIZE..];
-
-        let eth_frame = match EthernetFrame::new_checked(ethernet_data) {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-
-        if eth_frame.ethertype() != EthernetProtocol::Ipv4 {
-            return;
-        }
-
-        let ipv4 = match Ipv4Packet::new_checked(eth_frame.payload()) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        // Only handle ICMP for now
-        if ipv4.next_header() != IpProtocol::Icmp {
-            return;
-        }
-
-        let icmp = match Icmpv4Packet::new_checked(ipv4.payload()) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        if icmp.msg_type() != Icmpv4Message::EchoRequest {
-            return;
-        }
-
-        debug!(
-            src = %ipv4.src_addr(),
-            dst = %ipv4.dst_addr(),
-            id = icmp.echo_ident(),
-            seq = icmp.echo_seq_no(),
-            "ICMP Echo Request for TUN IP"
-        );
-
-        // Build ICMP reply with Ethernet framing
-        let echo_data = icmp.data();
-
-        let icmp_repr = Icmpv4Repr::EchoReply {
-            ident: icmp.echo_ident(),
-            seq_no: icmp.echo_seq_no(),
-            data: echo_data,
-        };
-
-        let ip_repr = Ipv4Repr {
-            src_addr: ipv4.dst_addr(),
-            dst_addr: ipv4.src_addr(),
-            next_header: IpProtocol::Icmp,
-            payload_len: icmp_repr.buffer_len(),
-            hop_limit: 64,
-        };
-
-        const ETHERNET_HEADER_SIZE: usize = 14;
-        let ip_len = ip_repr.buffer_len() + icmp_repr.buffer_len();
-        let total_len = virtio_hdr.len() + ETHERNET_HEADER_SIZE + ip_len;
-
-        let mut reply = vec![0u8; total_len];
-
-        // Virtio header (zeroed)
-        reply[..virtio_hdr.len()].fill(0);
-
-        // Ethernet header - use TUN's MAC (which we don't really have)
-        // Use gateway MAC as source for simplicity
-        let gateway_mac = EthernetAddress(GATEWAY_MAC);
-        let eth_repr = EthernetRepr {
-            src_addr: gateway_mac,
-            dst_addr: eth_frame.src_addr(),
-            ethertype: EthernetProtocol::Ipv4,
-        };
-        let mut out_eth = EthernetFrame::new_unchecked(&mut reply[virtio_hdr.len()..]);
-        eth_repr.emit(&mut out_eth);
-
-        // IP header
-        let mut out_ip = Ipv4Packet::new_unchecked(out_eth.payload_mut());
-        ip_repr.emit(&mut out_ip, &smoltcp::phy::ChecksumCapabilities::default());
-
-        // ICMP
-        let mut out_icmp = Icmpv4Packet::new_unchecked(out_ip.payload_mut());
-        icmp_repr.emit(
-            &mut out_icmp,
-            &smoltcp::phy::ChecksumCapabilities::default(),
-        );
-
-        debug!(
-            dst = %ipv4.src_addr(),
-            id = icmp.echo_ident(),
-            seq = icmp.echo_seq_no(),
-            "ICMP Echo Reply for TUN IP"
-        );
-
-        Self::inject_to_vhost_rx(state, &reply);
-    }
-
     /// Parse Ethernet frame and route based on IP destination.
     ///
     /// For vhost-user packets, we have: virtio_net_hdr + Ethernet frame.
@@ -1247,9 +1208,9 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             EthernetProtocol::Ipv4 => self.route_ipv4(eth_frame.payload()),
             EthernetProtocol::Ipv6 => self.route_ipv6(eth_frame.payload()),
             EthernetProtocol::Arp => {
-                // ARP should be handled by protocol handlers, not routed
-                debug!("peek_and_route_ethernet: ARP packet");
-                RoutingDecision::Local
+                // ARP is handled by protocol handlers before routing, drop here
+                debug!("peek_and_route_ethernet: ARP packet (handled by protocol handlers)");
+                RoutingDecision::Drop
             }
             _ => {
                 debug!(ethertype = ?eth_frame.ethertype(), "peek_and_route_ethernet: unknown ethertype");
@@ -1315,45 +1276,12 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             match routing_decision {
                 RoutingDecision::ToTun { if_index: _ } => {
                     // Route to TUN - strip Ethernet header for L3 TUN device
-                    // Input:  [virtio_net_hdr (12)] [ethernet (14)] [IP packet...]
-                    // Output: [virtio_net_hdr (12)] [IP packet...]
-                    let skip_start = VIRTIO_NET_HDR_SIZE;
-                    let skip_end = VIRTIO_NET_HDR_SIZE + ETHERNET_HDR_SIZE;
-
-                    // Build new iovecs that skip the Ethernet header
-                    let mut tun_iovecs: Vec<libc::iovec> = Vec::with_capacity(in_flight.iovecs.len());
-                    let mut pos = 0usize;
-
-                    for iov in &in_flight.iovecs {
-                        let iov_start = pos;
-                        let iov_end = pos + iov.iov_len;
-
-                        // Region before the skip zone (virtio_net_hdr)
-                        if iov_start < skip_start && iov_end > iov_start {
-                            let start_in_iov = 0;
-                            let end_in_iov = (skip_start - iov_start).min(iov.iov_len);
-                            if end_in_iov > start_in_iov {
-                                tun_iovecs.push(libc::iovec {
-                                    iov_base: iov.iov_base,
-                                    iov_len: end_in_iov - start_in_iov,
-                                });
-                            }
-                        }
-
-                        // Region after the skip zone (IP packet)
-                        if iov_end > skip_end {
-                            let start_in_iov = skip_end.saturating_sub(iov_start);
-                            let end_in_iov = iov.iov_len;
-                            if end_in_iov > start_in_iov {
-                                tun_iovecs.push(libc::iovec {
-                                    iov_base: unsafe { (iov.iov_base as *mut u8).add(start_in_iov) as *mut _ },
-                                    iov_len: end_in_iov - start_in_iov,
-                                });
-                            }
-                        }
-
-                        pos = iov_end;
-                    }
+                    let Some(tun_iovecs) = strip_ethernet_header(&in_flight.iovecs) else {
+                        warn!("Packet too short for Ethernet stripping");
+                        let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
+                        descriptors_returned = true;
+                        continue;
+                    };
 
                     let user_data = *vhost_tx_id | USER_DATA_VHOST_TX_FLAG;
                     *vhost_tx_id = vhost_tx_id.wrapping_add(1);
@@ -1424,15 +1352,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         warn!("No registry configured for VM-to-VM routing");
                         let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
                     }
-                }
-
-                RoutingDecision::Local => {
-                    // Handle locally (ICMP echo to TUN IP, etc.)
-                    // For Ethernet frames, check for ICMP destined to local_ip
-                    self.handle_local_ethernet_packet(state, &peek_slice);
-                    // Return descriptor immediately after local handling
-                    let _ = queue.add_used(&*mem_guard, in_flight.head_index, in_flight.total_len);
-                    descriptors_returned = true;
                 }
 
                 RoutingDecision::Drop => {
@@ -1654,6 +1573,130 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         }
     }
 
+    /// Process incoming packets from other reactors for TUN-only reactors.
+    ///
+    /// For TUN-only reactors (no vhost), packets from other reactors should be
+    /// written to the TUN device (with Ethernet header stripped since TUN is L3).
+    fn process_incoming_packets_to_tun(
+        &mut self,
+        ring: &mut IoUring,
+        tun_fd: types::Fd,
+        incoming_to_tun_in_flight: &mut std::collections::HashMap<u64, IncomingToTunInFlight>,
+        incoming_tun_id: &mut u64,
+    ) {
+        let Some(ref packet_rx) = self.packet_rx else {
+            return;
+        };
+
+        while let Ok(packet) = packet_rx.try_recv() {
+            debug!(
+                id = %packet.id,
+                len = packet.total_len(),
+                src = %packet.source.source_reactor(),
+                "Processing incoming packet for TUN (L3 forwarding)"
+            );
+
+            // Read packet data from iovecs
+            let total_len = packet.total_len();
+            let mut packet_data = Vec::with_capacity(total_len);
+
+            for iov in &packet.iovecs {
+                let slice = unsafe {
+                    std::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len)
+                };
+                packet_data.extend_from_slice(slice);
+            }
+
+            // Strip Ethernet header: [virtio_net_hdr (12)][Ethernet (14)][IP...] -> [virtio_net_hdr (12)][IP...]
+            // Keep virtio_net_hdr (first 12 bytes), skip Ethernet header (next 14 bytes)
+            if packet_data.len() < VIRTIO_NET_HDR_SIZE + ETHERNET_HDR_SIZE {
+                warn!(len = packet_data.len(), "Packet too short for Ethernet stripping");
+                // Send failure completion
+                self.send_incoming_completion(&packet, -libc::EINVAL);
+                continue;
+            }
+
+            // Build L3 packet: virtio_net_hdr + IP packet (skip Ethernet)
+            let mut l3_packet = Vec::with_capacity(packet_data.len() - ETHERNET_HDR_SIZE);
+            l3_packet.extend_from_slice(&packet_data[..VIRTIO_NET_HDR_SIZE]); // virtio_net_hdr
+            l3_packet.extend_from_slice(&packet_data[VIRTIO_NET_HDR_SIZE + ETHERNET_HDR_SIZE..]); // IP packet
+
+            // Generate unique user_data for this write
+            let user_data = USER_DATA_INCOMING_TUN_FLAG | *incoming_tun_id;
+            *incoming_tun_id = incoming_tun_id.wrapping_add(1);
+
+            // Queue write to TUN fd
+            let write_op = opcode::Write::new(tun_fd, l3_packet.as_ptr(), l3_packet.len() as u32)
+                .build()
+                .user_data(user_data);
+
+            match unsafe { ring.submission().push(&write_op) } {
+                Ok(()) => {
+                    debug!(
+                        len = l3_packet.len(),
+                        user_data,
+                        "Queued incoming packet write to TUN"
+                    );
+                    // Track in-flight for completion handling
+                    incoming_to_tun_in_flight.insert(
+                        user_data,
+                        IncomingToTunInFlight {
+                            packet_id: packet.id,
+                            source: packet.source.clone(),
+                            buffer: l3_packet, // Keep buffer alive during async I/O
+                        },
+                    );
+                }
+                Err(_) => {
+                    warn!("SQ full, dropping incoming packet to TUN");
+                    self.send_incoming_completion(&packet, -libc::ENOSPC);
+                }
+            }
+        }
+    }
+
+    /// Send a completion notification for an incoming packet.
+    fn send_incoming_completion(&self, packet: &PacketRef, result: i32) {
+        let completion = match &packet.source {
+            PacketSource::VhostToVhost {
+                head_index,
+                total_len,
+                source_reactor: _,
+            } => CompletionNotify::VhostToVhostComplete {
+                packet_id: packet.id,
+                head_index: *head_index,
+                total_len: *total_len,
+                result,
+            },
+            PacketSource::TunRx {
+                chain_id,
+                source_reactor: _,
+                len,
+            } => CompletionNotify::TunRxComplete {
+                packet_id: packet.id,
+                chain_id: *chain_id,
+                result: *len as i32,
+            },
+            PacketSource::VhostTx {
+                head_index,
+                total_len,
+                source_reactor: _,
+            } => CompletionNotify::VhostTxComplete {
+                packet_id: packet.id,
+                head_index: *head_index,
+                total_len: *total_len,
+                result,
+            },
+        };
+
+        if let Some(ref registry) = self.registry {
+            let source_reactor = packet.source.source_reactor();
+            if !registry.send_completion_to(&source_reactor, completion) {
+                warn!(src = %source_reactor, "Failed to send completion to source reactor");
+            }
+        }
+    }
+
     /// Process completion notifications from other reactors.
     ///
     /// When a VM-to-VM packet is delivered, the target reactor sends back
@@ -1704,61 +1747,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 }
             }
         }
-    }
-
-    /// Handle ICMP echo request from vhost TX and inject reply to vhost RX
-    fn handle_vhost_icmp_request(
-        state: &VhostState,
-        ipv4: &Ipv4Packet<&[u8]>,
-        icmp: &Icmpv4Packet<&[u8]>,
-    ) {
-        let echo_data = icmp.data();
-
-        let icmp_repr = Icmpv4Repr::EchoReply {
-            ident: icmp.echo_ident(),
-            seq_no: icmp.echo_seq_no(),
-            data: echo_data,
-        };
-
-        let ip_repr = Ipv4Repr {
-            src_addr: ipv4.dst_addr(), // Reply from the destination
-            dst_addr: ipv4.src_addr(), // Back to the source
-            next_header: IpProtocol::Icmp,
-            payload_len: icmp_repr.buffer_len(),
-            hop_limit: 64,
-        };
-
-        let total_len = VIRTIO_NET_HDR_SIZE + ip_repr.buffer_len() + icmp_repr.buffer_len();
-
-        // Build the reply packet
-        let mut reply_packet = vec![0u8; total_len];
-
-        // Zero virtio_net_hdr (already zeroed)
-
-        // Write IP header
-        let mut ip_packet = Ipv4Packet::new_unchecked(&mut reply_packet[VIRTIO_NET_HDR_SIZE..]);
-        ip_repr.emit(
-            &mut ip_packet,
-            &smoltcp::phy::ChecksumCapabilities::default(),
-        );
-
-        // Write ICMP
-        let mut icmp_packet = Icmpv4Packet::new_unchecked(ip_packet.payload_mut());
-        icmp_repr.emit(
-            &mut icmp_packet,
-            &smoltcp::phy::ChecksumCapabilities::default(),
-        );
-
-        debug!(
-            dst = %ipv4.src_addr(),
-            id = icmp.echo_ident(),
-            seq = icmp.echo_seq_no(),
-            len = total_len,
-            "vhost: ICMP Echo Reply generated"
-        );
-
-        // Inject to vhost RX queue
-        Self::inject_to_vhost_rx(state, &reply_packet);
     }
 
     /// Inject a packet into the vhost RX queue (network → guest)

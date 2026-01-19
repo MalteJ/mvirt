@@ -18,7 +18,7 @@ use vm_memory::{
 };
 use vmm_sys_util::eventfd::EventFd;
 
-use iou::router::{Router, VhostConfig};
+use mvirt_net::router::{Router, VhostConfig};
 
 const QUEUE_SIZE: u16 = 256;
 const MEM_SIZE: usize = 16 * 1024 * 1024; // 16 MB
@@ -553,7 +553,10 @@ fn wait_for_call(call: &EventFd, timeout_ms: u64) -> io::Result<bool> {
     }
 }
 
+// NOTE: This test is ignored because local IP handling (ICMP echo to router IP)
+// was removed as part of the L3-only routing refactor.
 #[tokio::test]
+#[ignore = "Local IP handling removed in L3-only refactor"]
 async fn test_vhost_user_ping() {
     let _ = tracing_subscriber::fmt::try_init();
 

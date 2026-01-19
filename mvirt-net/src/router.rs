@@ -6,7 +6,6 @@ use crate::reactor::{
 use crate::tun::TunDevice;
 use crate::vhost_user::{VhostHandshake, VhostUserNetDevice};
 use crate::virtqueue::SimpleRxTxQueues;
-use smoltcp::wire::Ipv4Address;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::io::IntoRawFd;
@@ -21,6 +20,8 @@ pub struct Router {
     reactor_thread: JoinHandle<()>,
     vhost_thread: Option<JoinHandle<io::Result<()>>>,
     tun_name: String,
+    /// TUN interface index for kernel route management
+    tun_if_index: u32,
     vhost_socket: Option<String>,
     /// Shared reactor registry for inter-reactor communication
     registry: Arc<ReactorRegistry>,
@@ -156,13 +157,15 @@ impl Router {
         vhost_config: Option<VhostConfig>,
         registry: Arc<ReactorRegistry>,
     ) -> io::Result<Self> {
-        // Create TUN device
+        // Create TUN device (L3 mode - no IP address, only routes)
         let tun = TunDevice::create(name).await?;
-        if let Some((addr, prefix_len)) = ip {
-            tun.add_address(addr, prefix_len).await?;
-        }
+        // Note: No IP address assigned to TUN - use kernel routes instead
+        // The ip parameter is kept for compatibility but will be removed
+        let _ = ip; // Suppress unused warning
         tun.set_up().await?;
 
+        // Store if_index before consuming TUN device
+        let tun_if_index = tun.if_index;
         let tun_file = tun.into_file();
 
         // Allocate buffers
@@ -175,14 +178,6 @@ impl Router {
         // Create queues
         let queues = SimpleRxTxQueues::new(tun_file, buffers, buf_size, rx_count, tx_count);
         let (rx_queue, tx_queue) = queues.split();
-
-        // Convert IP for smoltcp (use 0.0.0.0 if no IP configured)
-        let local_ip = if let Some((addr, _)) = ip {
-            let octets = addr.octets();
-            Ipv4Address::new(octets[0], octets[1], octets[2], octets[3])
-        } else {
-            Ipv4Address::UNSPECIFIED
-        };
 
         // Create inter-reactor communication channels
         let (packet_tx, packet_rx): (Sender<PacketRef>, Receiver<PacketRef>) = mpsc::channel();
@@ -197,7 +192,6 @@ impl Router {
                 let (reactor, handle) = Reactor::with_registry(
                     rx_queue,
                     tx_queue,
-                    local_ip,
                     Some(rx),
                     Some(Arc::clone(&registry)),
                     Some(packet_rx),
@@ -210,7 +204,6 @@ impl Router {
                 let (reactor, handle) = Reactor::with_registry(
                     rx_queue,
                     tx_queue,
-                    local_ip,
                     None,
                     Some(Arc::clone(&registry)),
                     Some(packet_rx),
@@ -232,21 +225,32 @@ impl Router {
         // Use into_raw_fd() to transfer ownership - otherwise the OwnedFd would close
         // the fd when dropped, leaving ReactorInfo with an invalid fd
         let notify_raw_fd = reactor_handle.get_notify_fd().into_raw_fd();
-        let interface_type = if let Some(ref _config) = vhost_config {
-            InterfaceType::Vhost {
+        let reactor_info = if let Some(ref config) = vhost_config {
+            // Vhost interface - register with MAC address for Ethernet header construction
+            let interface_type = InterfaceType::Vhost {
                 device_id: uuid::Uuid::new_v4(), // TODO: Use actual device UUID
-            }
+            };
+            ReactorInfo::with_mac(
+                reactor_id,
+                notify_raw_fd,
+                packet_tx,
+                completion_tx,
+                interface_type,
+                config.mac,
+            )
         } else {
-            InterfaceType::Tun { if_index: 0 } // TODO: Get actual if_index from TUN
+            // TUN interface - no MAC address needed
+            let interface_type = InterfaceType::Tun {
+                if_index: tun_if_index,
+            };
+            ReactorInfo::new(
+                reactor_id,
+                notify_raw_fd,
+                packet_tx,
+                completion_tx,
+                interface_type,
+            )
         };
-
-        let reactor_info = ReactorInfo::new(
-            reactor_id,
-            notify_raw_fd,
-            packet_tx,
-            completion_tx,
-            interface_type,
-        );
         registry.register(reactor_info);
         info!(id = %reactor_id, "Registered reactor in registry");
 
@@ -299,22 +303,24 @@ impl Router {
             (None, None)
         };
 
-        if let Some((addr, prefix)) = ip {
-            info!(name, ip = %addr, prefix_len = prefix, "Router started");
-        } else {
-            info!(name, "Router started (no IP)");
-        }
+        info!(name, tun_if_index, "Router started (L3 mode)");
 
         Ok(Router {
             reactor_handle,
             reactor_thread,
             vhost_thread,
             tun_name: name.to_string(),
+            tun_if_index,
             vhost_socket,
             registry,
             reactor_id,
             shutdown_flag,
         })
+    }
+
+    /// Get the TUN interface index for kernel route management.
+    pub fn tun_if_index(&self) -> u32 {
+        self.tun_if_index
     }
 
     /// Get the unique ID of this router's reactor.

@@ -1,12 +1,12 @@
 use futures::TryStreamExt;
-use nix::libc::{IFF_NO_PI, IFF_TUN, IFF_VNET_HDR, IFNAMSIZ, c_char, c_short, c_uint};
+use nix::libc::{self, IFF_NO_PI, IFF_TUN, IFF_VNET_HDR, IFNAMSIZ, c_char, c_short, c_uint};
 use rtnetlink::Handle;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::ManuallyDrop;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::io::AsRawFd;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const TUNSETIFF: nix::libc::Ioctl = 0x400454ca as nix::libc::Ioctl;
 const TUNSETVNETHDRSZ: nix::libc::Ioctl = 0x400454d8 as nix::libc::Ioctl;
@@ -127,6 +127,63 @@ impl TunDevice {
 
         info!(addr = %addr, prefix_len, name = %self.name, "Address added");
         Ok(())
+    }
+
+    /// Add a kernel route via this TUN device.
+    ///
+    /// This adds a route in the kernel's routing table so that traffic for the
+    /// given prefix is delivered to this TUN device.
+    pub async fn add_route_v4(&self, prefix: Ipv4Addr, prefix_len: u8) -> io::Result<()> {
+        let (connection, handle, _) = rtnetlink::new_connection().map_err(io::Error::other)?;
+        tokio::spawn(connection);
+
+        match handle
+            .route()
+            .add()
+            .v4()
+            .destination_prefix(prefix, prefix_len)
+            .output_interface(self.if_index)
+            .execute()
+            .await
+        {
+            Ok(()) => {
+                info!(prefix = %prefix, prefix_len, name = %self.name, "Kernel route added");
+                Ok(())
+            }
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::EEXIST => {
+                // Route already exists, that's fine
+                warn!(prefix = %prefix, prefix_len, name = %self.name, "Kernel route already exists");
+                Ok(())
+            }
+            Err(e) => Err(io::Error::other(e)),
+        }
+    }
+
+    /// Add an IPv6 kernel route via this TUN device.
+    pub async fn add_route_v6(&self, prefix: Ipv6Addr, prefix_len: u8) -> io::Result<()> {
+        let (connection, handle, _) = rtnetlink::new_connection().map_err(io::Error::other)?;
+        tokio::spawn(connection);
+
+        match handle
+            .route()
+            .add()
+            .v6()
+            .destination_prefix(prefix, prefix_len)
+            .output_interface(self.if_index)
+            .execute()
+            .await
+        {
+            Ok(()) => {
+                info!(prefix = %prefix, prefix_len, name = %self.name, "IPv6 kernel route added");
+                Ok(())
+            }
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::EEXIST => {
+                // Route already exists, that's fine
+                warn!(prefix = %prefix, prefix_len, name = %self.name, "IPv6 kernel route already exists");
+                Ok(())
+            }
+            Err(e) => Err(io::Error::other(e)),
+        }
     }
 }
 

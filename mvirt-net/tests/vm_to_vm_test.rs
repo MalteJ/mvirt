@@ -23,9 +23,9 @@ use vm_memory::{
 };
 use vmm_sys_util::eventfd::EventFd;
 
-use iou::reactor::ReactorRegistry;
-use iou::router::{Router, VhostConfig};
-use iou::routing::{IpPrefix, RouteTarget};
+use mvirt_net::reactor::ReactorRegistry;
+use mvirt_net::router::{Router, VhostConfig};
+use mvirt_net::routing::{IpPrefix, RouteTarget};
 
 const QUEUE_SIZE: u16 = 256;
 const MEM_SIZE: usize = 16 * 1024 * 1024; // 16 MB
@@ -489,8 +489,7 @@ async fn test_vm_to_vm_routing() {
     println!("Starting Router A...");
     let router_a = Router::with_shared_registry(
         "tun_vm_a",
-        router_a_ip,
-        24,
+        Some((router_a_ip, 24)),
         4096,
         256,
         256,
@@ -507,8 +506,7 @@ async fn test_vm_to_vm_routing() {
     println!("Starting Router B...");
     let router_b = Router::with_shared_registry(
         "tun_vm_b",
-        router_b_ip,
-        24,
+        Some((router_b_ip, 24)),
         4096,
         256,
         256,

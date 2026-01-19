@@ -73,8 +73,6 @@ pub enum RoutingDecision {
         /// Target reactor ID.
         reactor_id: ReactorId,
     },
-    /// Handle locally (ICMP echo, etc.).
-    Local,
     /// Drop the packet (blackhole route or no route found).
     Drop,
 }

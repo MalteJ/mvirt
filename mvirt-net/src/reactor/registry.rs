@@ -56,6 +56,8 @@ pub struct ReactorInfo {
     pub completion_tx: Sender<CompletionNotify>,
     /// Type of interface this reactor handles.
     pub interface_type: InterfaceType,
+    /// MAC address for vhost interfaces (used for Ethernet header construction).
+    pub mac_address: Option<[u8; 6]>,
 }
 
 impl ReactorInfo {
@@ -73,6 +75,26 @@ impl ReactorInfo {
             packet_tx,
             completion_tx,
             interface_type,
+            mac_address: None,
+        }
+    }
+
+    /// Create new reactor info with a MAC address.
+    pub fn with_mac(
+        id: ReactorId,
+        eventfd: RawFd,
+        packet_tx: Sender<PacketRef>,
+        completion_tx: Sender<CompletionNotify>,
+        interface_type: InterfaceType,
+        mac_address: [u8; 6],
+    ) -> Self {
+        ReactorInfo {
+            id,
+            eventfd,
+            packet_tx,
+            completion_tx,
+            interface_type,
+            mac_address: Some(mac_address),
         }
     }
 
@@ -218,6 +240,15 @@ impl ReactorRegistry {
         } else {
             false
         }
+    }
+
+    /// Get the MAC address for a reactor by ID.
+    ///
+    /// Returns the MAC address if the reactor exists and has one configured.
+    /// Used for Ethernet header construction when forwarding from TUN to vhost.
+    pub fn get_mac_for_reactor(&self, reactor_id: &ReactorId) -> Option<[u8; 6]> {
+        let reactors = self.reactors.read().unwrap();
+        reactors.get(reactor_id).and_then(|info| info.mac_address)
     }
 
     /// Get the number of registered reactors.

@@ -5,6 +5,7 @@ use crate::reactor::{ReactorId, ReactorRegistry};
 use crate::router::{Router, VhostConfig};
 use crate::routing::{IpPrefix, RouteTarget};
 use ipnet::{Ipv4Net, Ipv6Net};
+use nix::libc;
 use std::collections::HashMap;
 use std::io;
 use std::net::Ipv4Addr;
@@ -129,6 +130,50 @@ impl NetworkManager {
         // Add routes for existing public networks
         self.sync_public_network_routes().await?;
 
+        Ok(())
+    }
+
+    /// Recover NIC routers from database on startup.
+    ///
+    /// This recreates routers for all NICs that exist in the database,
+    /// ensuring that vhost-user sockets are available after a restart.
+    pub async fn recover_nics(&self) -> Result<()> {
+        info!("Recovering NIC routers from database...");
+
+        let nics = self.storage.list_nics()?;
+        let mut recovered = 0;
+        let mut failed = 0;
+
+        for nic in nics {
+            // Get the network for this NIC
+            let network = match self.storage.get_network_by_id(&nic.network_id) {
+                Ok(Some(n)) => n,
+                Ok(None) => {
+                    warn!(nic_id = %nic.id, network_id = %nic.network_id, "NIC's network not found, skipping");
+                    failed += 1;
+                    continue;
+                }
+                Err(e) => {
+                    warn!(nic_id = %nic.id, error = %e, "Failed to get network for NIC, skipping");
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            // Create router for this NIC
+            match self.create_nic_router(&nic, &network).await {
+                Ok(()) => {
+                    info!(nic_id = %nic.id, socket = %nic.socket_path, "Recovered NIC router");
+                    recovered += 1;
+                }
+                Err(e) => {
+                    warn!(nic_id = %nic.id, error = %e, "Failed to recover NIC router");
+                    failed += 1;
+                }
+            }
+        }
+
+        info!(recovered, failed, "NIC recovery complete");
         Ok(())
     }
 
@@ -382,27 +427,110 @@ impl NetworkManager {
     }
 
     /// Sync public network routes to TUN.
+    ///
+    /// This adds both:
+    /// - Kernel routes via rtnetlink (for return traffic from the network stack)
+    /// - Internal LPM routes (for packet routing within mvirt-net)
     async fn sync_public_network_routes(&self) -> Result<()> {
         let tun_guard = self.tun_router.lock().await;
         let table_guard = self.tun_table_id.lock().await;
 
         if let (Some(router), Some(table_id)) = (tun_guard.as_ref(), *table_guard) {
             let networks = self.storage.list_public_networks()?;
+            let tun_if_index = router.tun_if_index();
 
             for network in networks {
-                // Add subnet routes to TUN
+                // Add IPv4 subnet routes
                 if let Some(subnet) = network.ipv4_subnet {
+                    // Add kernel route via rtnetlink
+                    if let Err(e) = Self::add_kernel_route_v4(tun_if_index, subnet).await {
+                        warn!(subnet = %subnet, error = %e, "Failed to add kernel route");
+                    }
+
+                    // Add internal LPM route
                     router.reactor_handle().add_route(
                         table_id,
                         IpPrefix::V4(subnet),
-                        RouteTarget::Tun { if_index: 0 }, // Placeholder
+                        RouteTarget::Tun {
+                            if_index: tun_if_index,
+                        },
                     );
                     debug!(subnet = %subnet, "Added public network subnet to TUN");
+                }
+
+                // Add IPv6 prefix routes
+                if let Some(prefix) = network.ipv6_prefix {
+                    // Add kernel route via rtnetlink
+                    if let Err(e) = Self::add_kernel_route_v6(tun_if_index, prefix).await {
+                        warn!(prefix = %prefix, error = %e, "Failed to add IPv6 kernel route");
+                    }
+
+                    // Add internal LPM route
+                    router.reactor_handle().add_route(
+                        table_id,
+                        IpPrefix::V6(prefix),
+                        RouteTarget::Tun {
+                            if_index: tun_if_index,
+                        },
+                    );
+                    debug!(prefix = %prefix, "Added public network IPv6 prefix to TUN");
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Add a kernel route via rtnetlink.
+    async fn add_kernel_route_v4(if_index: u32, subnet: Ipv4Net) -> io::Result<()> {
+        let (connection, handle, _) = rtnetlink::new_connection().map_err(io::Error::other)?;
+        tokio::spawn(connection);
+
+        match handle
+            .route()
+            .add()
+            .v4()
+            .destination_prefix(subnet.addr(), subnet.prefix_len())
+            .output_interface(if_index)
+            .execute()
+            .await
+        {
+            Ok(()) => {
+                info!(subnet = %subnet, if_index, "Kernel route added");
+                Ok(())
+            }
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::EEXIST => {
+                debug!(subnet = %subnet, "Kernel route already exists");
+                Ok(())
+            }
+            Err(e) => Err(io::Error::other(e)),
+        }
+    }
+
+    /// Add an IPv6 kernel route via rtnetlink.
+    async fn add_kernel_route_v6(if_index: u32, prefix: Ipv6Net) -> io::Result<()> {
+        let (connection, handle, _) = rtnetlink::new_connection().map_err(io::Error::other)?;
+        tokio::spawn(connection);
+
+        match handle
+            .route()
+            .add()
+            .v6()
+            .destination_prefix(prefix.addr(), prefix.prefix_len())
+            .output_interface(if_index)
+            .execute()
+            .await
+        {
+            Ok(()) => {
+                info!(prefix = %prefix, if_index, "IPv6 kernel route added");
+                Ok(())
+            }
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::EEXIST => {
+                debug!(prefix = %prefix, "IPv6 kernel route already exists");
+                Ok(())
+            }
+            Err(e) => Err(io::Error::other(e)),
+        }
     }
 
     /// Shutdown the manager and all routers.

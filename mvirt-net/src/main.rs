@@ -71,6 +71,12 @@ async fn run_grpc_server() {
         std::process::exit(1);
     }
 
+    // Recover NIC routers from database
+    if let Err(e) = manager.recover_nics().await {
+        error!(error = %e, "Failed to recover NIC routers");
+        // Continue anyway - NICs can be recreated manually
+    }
+
     // Create audit logger
     let audit = create_audit_logger(LOG_ENDPOINT);
 

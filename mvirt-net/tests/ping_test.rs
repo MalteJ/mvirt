@@ -1,5 +1,5 @@
-use iou::ping;
-use iou::router::Router;
+use mvirt_net::ping;
+use mvirt_net::router::Router;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -7,7 +7,12 @@ const BUF_SIZE: usize = 4096;
 const RX_COUNT: usize = 256;
 const TX_COUNT: usize = 256;
 
+// NOTE: These tests are ignored because local IP handling (ICMP echo to TUN IP)
+// was removed as part of the L3-only routing refactor. The TUN device no longer
+// has an IP address and doesn't respond to ICMP.
+
 #[tokio::test]
+#[ignore = "Local IP handling removed in L3-only refactor"]
 async fn test_icmp_echo_reply() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -29,6 +34,7 @@ async fn test_icmp_echo_reply() {
 }
 
 #[tokio::test]
+#[ignore = "Local IP handling removed in L3-only refactor"]
 async fn test_icmp_echo_burst() {
     let _ = tracing_subscriber::fmt::try_init();
 
