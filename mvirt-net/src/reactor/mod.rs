@@ -1765,6 +1765,12 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     head_index,
                     total_len,
                     result,
+                }
+                | CompletionNotify::VhostTxComplete {
+                    packet_id,
+                    head_index,
+                    total_len,
+                    result,
                 } => {
                     // Remove from in-flight tracking
                     if let Some(_in_flight) = vhost_to_vhost_in_flight.remove(&packet_id.raw()) {
@@ -1784,16 +1790,15 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         let _ = vring_state.signal_used_queue();
 
                         if result < 0 {
-                            warn!(error = -result, "VM-to-VM delivery failed");
+                            warn!(error = -result, "Packet delivery failed");
                         }
                     } else {
                         warn!(id = %packet_id, in_flight_count = vhost_to_vhost_in_flight.len(), "Completion for unknown packet");
                     }
                 }
-                CompletionNotify::VhostTxComplete { .. }
-                | CompletionNotify::TunRxComplete { .. } => {
-                    // These shouldn't arrive here - log warning
-                    warn!("Unexpected completion type in vhost reactor");
+                CompletionNotify::TunRxComplete { .. } => {
+                    // TunRxComplete should not arrive here
+                    warn!("Unexpected TunRxComplete in vhost reactor");
                 }
             }
         }
