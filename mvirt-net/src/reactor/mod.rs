@@ -1334,6 +1334,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         } else {
                             warn!("SQ full, dropping vhost TX");
                             let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
+                            descriptors_returned = true;
                         }
                     }
                 }
@@ -1385,10 +1386,12 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         } else {
                             warn!(dst = %target_reactor_id, "Failed to send to target reactor");
                             let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
+                            descriptors_returned = true;
                         }
                     } else {
                         warn!("No registry configured for VM-to-VM routing");
                         let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
+                        descriptors_returned = true;
                     }
                 }
 
