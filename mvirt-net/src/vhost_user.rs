@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use vhost::vhost_user::Listener;
 use vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
-use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringMutex};
+use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringMutex, VringT};
 use vm_memory::{ByteValued, GuestMemoryAtomic, GuestMemoryMmap, Le16};
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::event::{
@@ -62,6 +62,8 @@ pub struct VhostUserNetBackend {
     reactor_notify: Option<OwnedFd>,
     /// Whether handshake has been completed
     handshake_done: bool,
+    /// Store vrings for set_event_idx propagation
+    vrings: Option<Vec<VringType>>,
 }
 
 impl VhostUserNetBackend {
@@ -83,6 +85,7 @@ impl VhostUserNetBackend {
             handshake_tx,
             reactor_notify,
             handshake_done: false,
+            vrings: None,
         })
     }
 
@@ -103,6 +106,14 @@ impl VhostUserNetBackend {
 
         // Clone vrings for the reactor
         let vrings_clone: Vec<VringType> = vrings.to_vec();
+
+        // Store vrings for later set_event_idx calls
+        self.vrings = Some(vrings_clone.clone());
+
+        // Apply event_idx to vrings (may have been set before handshake)
+        for vring in &vrings_clone {
+            vring.set_queue_event_idx(self.event_idx);
+        }
 
         let handshake = VhostHandshake {
             mem: mem.clone(),
@@ -161,6 +172,14 @@ impl VhostUserBackendMut for VhostUserNetBackend {
     fn set_event_idx(&mut self, enabled: bool) {
         info!(enabled, "set_event_idx called");
         self.event_idx = enabled;
+
+        // Propagate to vrings if available
+        if let Some(ref vrings) = self.vrings {
+            for vring in vrings {
+                vring.set_queue_event_idx(enabled);
+            }
+            info!(enabled, num_vrings = vrings.len(), "Propagated event_idx to vrings");
+        }
     }
 
     fn update_memory(&mut self, mem: GuestMemoryMmapAtomic) -> io::Result<()> {
