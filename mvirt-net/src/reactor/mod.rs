@@ -68,8 +68,9 @@ const VIRTIO_NET_HDR_SIZE: usize = 12;
 /// Ethernet header size
 const ETHERNET_HDR_SIZE: usize = 14;
 
-/// Size of buffer for peeking at packet headers (Virtio + IP + ICMP headers)
-const PEEK_BUF_SIZE: usize = 128;
+/// Size of buffer for peeking at packet headers and protocol handling.
+/// Must be large enough for DHCP packets (12 + 14 + 20 + 8 + ~548 = ~600 bytes).
+const PEEK_BUF_SIZE: usize = 600;
 
 /// Strip Ethernet header from iovecs for L3 TUN transmission.
 ///
@@ -1068,10 +1069,17 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
     fn handle_vhost_ethernet_protocols(&self, state: &VhostState, peek_data: &[u8]) -> bool {
         let nic_config = match &self.nic_config {
             Some(cfg) => cfg,
-            None => return false,
+            None => {
+                debug!("handle_vhost_ethernet_protocols: no nic_config");
+                return false;
+            }
         };
 
         if peek_data.len() <= VIRTIO_NET_HDR_SIZE {
+            debug!(
+                len = peek_data.len(),
+                "handle_vhost_ethernet_protocols: packet too short"
+            );
             return false;
         }
 
@@ -1081,8 +1089,18 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         // Parse Ethernet frame
         let eth_frame = match EthernetFrame::new_checked(ethernet_data) {
             Ok(f) => f,
-            Err(_) => return false,
+            Err(e) => {
+                debug!(error = ?e, "handle_vhost_ethernet_protocols: invalid Ethernet frame");
+                return false;
+            }
         };
+
+        debug!(
+            ethertype = ?eth_frame.ethertype(),
+            src_mac = ?eth_frame.src_addr(),
+            dst_mac = ?eth_frame.dst_addr(),
+            "handle_vhost_ethernet_protocols: checking packet"
+        );
 
         match eth_frame.ethertype() {
             EthernetProtocol::Arp => {

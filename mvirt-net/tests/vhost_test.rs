@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use mvirt_net::router::{Router, VhostConfig};
 use mvirt_net::test_util::{
-    VhostUserFrontendDevice,
-    frontend_device::{ETHERNET_HDR_SIZE, VIRTIO_NET_HDR_SIZE, create_icmp_echo_request},
+    ETHERNET_HDR_SIZE, VIRTIO_NET_HDR_SIZE, VhostUserFrontendDevice, create_icmp_echo_request,
 };
 
 // NOTE: This test is ignored because local IP handling (ICMP echo to router IP)
@@ -61,7 +60,7 @@ async fn test_vhost_user_ping() {
     // Create and send an ICMP echo request
     // Source: 10.99.100.2 (simulated VM), Dest: 10.99.100.1 (router)
     let packet =
-        create_icmp_echo_request(1, vm_mac, router_mac, [10, 99, 100, 2], [10, 99, 100, 1]);
+        create_icmp_echo_request(vm_mac, router_mac, [10, 99, 100, 2], [10, 99, 100, 1], 1, 1);
     println!("Sending ICMP echo request ({} bytes)", packet.len());
     frontend
         .send_packet(&packet)

@@ -40,24 +40,44 @@ pub fn handle_dhcp_packet(
     ethernet_frame: &[u8],
 ) -> Option<Vec<u8>> {
     // Parse Ethernet frame
-    let eth_frame = EthernetFrame::new_checked(ethernet_frame).ok()?;
+    let eth_frame = match EthernetFrame::new_checked(ethernet_frame) {
+        Ok(f) => f,
+        Err(e) => {
+            debug!(error = ?e, "DHCP: failed to parse Ethernet frame");
+            return None;
+        }
+    };
 
     if eth_frame.ethertype() != EthernetProtocol::Ipv4 {
         return None;
     }
 
     // Parse IPv4 packet
-    let ipv4_packet = Ipv4Packet::new_checked(eth_frame.payload()).ok()?;
+    let ipv4_packet = match Ipv4Packet::new_checked(eth_frame.payload()) {
+        Ok(p) => p,
+        Err(e) => {
+            debug!(error = ?e, payload_len = eth_frame.payload().len(), "DHCP: failed to parse IPv4 packet");
+            return None;
+        }
+    };
 
     if ipv4_packet.next_header() != IpProtocol::Udp {
+        debug!(proto = ?ipv4_packet.next_header(), "DHCP: not UDP");
         return None;
     }
 
     // Parse UDP packet
-    let udp_packet = UdpPacket::new_checked(ipv4_packet.payload()).ok()?;
+    let udp_packet = match UdpPacket::new_checked(ipv4_packet.payload()) {
+        Ok(p) => p,
+        Err(e) => {
+            debug!(error = ?e, "DHCP: failed to parse UDP packet");
+            return None;
+        }
+    };
 
     // Check if it's a DHCP packet (client → server)
     if udp_packet.dst_port() != DHCP_SERVER_PORT {
+        debug!(dst_port = udp_packet.dst_port(), "DHCP: wrong port");
         return None;
     }
 

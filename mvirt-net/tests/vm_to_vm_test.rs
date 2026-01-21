@@ -11,8 +11,7 @@ use mvirt_net::reactor::ReactorRegistry;
 use mvirt_net::router::{Router, VhostConfig};
 use mvirt_net::routing::{IpPrefix, RouteTarget};
 use mvirt_net::test_util::{
-    VhostUserFrontendDevice,
-    frontend_device::{ETHERNET_HDR_SIZE, VIRTIO_NET_HDR_SIZE, create_icmp_echo_request},
+    ETHERNET_HDR_SIZE, VIRTIO_NET_HDR_SIZE, VhostUserFrontendDevice, create_icmp_echo_request,
 };
 
 /// Test VM-to-VM packet forwarding through the router.
@@ -45,7 +44,7 @@ async fn test_vm_to_vm_routing() {
 
     // VM (guest) interface MACs
     let vm_mac_a = [0x52, 0x54, 0x00, 0xCC, 0xDD, 0x01];
-    let vm_mac_b = [0x52, 0x54, 0x00, 0xCC, 0xDD, 0x02];
+    let _vm_mac_b = [0x52, 0x54, 0x00, 0xCC, 0xDD, 0x02];
 
     // Clean up any stale sockets
     let _ = std::fs::remove_file(socket_a);
@@ -142,7 +141,7 @@ async fn test_vm_to_vm_routing() {
 
     // VM A sends ICMP echo request to VM B
     // L2 frame: src=VM_A_MAC, dst=Router_A_MAC (gateway), payload=IP packet
-    let packet = create_icmp_echo_request(1, vm_mac_a, router_mac_a, vm_a_ip, vm_b_ip);
+    let packet = create_icmp_echo_request(vm_mac_a, router_mac_a, vm_a_ip, vm_b_ip, 1, 1);
     println!(
         "VM A sending ICMP echo request to VM B ({} bytes)...",
         packet.len()
