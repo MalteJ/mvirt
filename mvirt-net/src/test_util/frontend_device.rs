@@ -385,12 +385,33 @@ impl VhostUserFrontendDevice {
     }
 }
 
-/// Create an ICMP echo request packet with virtio-net header
-pub fn create_icmp_echo_request(seq: u16, src_ip: [u8; 4], dst_ip: [u8; 4]) -> Vec<u8> {
-    let mut packet = vec![0u8; VIRTIO_NET_HDR_SIZE + 20 + 8 + 56]; // hdr + IP + ICMP + data
+/// Ethernet header size
+pub const ETHERNET_HDR_SIZE: usize = 14;
 
-    let ip_start = VIRTIO_NET_HDR_SIZE;
+/// EtherType for IPv4
+pub const ETHERTYPE_IPV4: u16 = 0x0800;
+
+/// Create an ICMP echo request packet with virtio-net header and Ethernet frame
+///
+/// Packet format: [virtio-net hdr (12)][Ethernet hdr (14)][IP hdr (20)][ICMP (8+56)]
+pub fn create_icmp_echo_request(
+    seq: u16,
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+) -> Vec<u8> {
+    // virtio-net header + Ethernet + IP + ICMP + data
+    let mut packet = vec![0u8; VIRTIO_NET_HDR_SIZE + ETHERNET_HDR_SIZE + 20 + 8 + 56];
+
+    let eth_start = VIRTIO_NET_HDR_SIZE;
+    let ip_start = eth_start + ETHERNET_HDR_SIZE;
     let icmp_start = ip_start + 20;
+
+    // Ethernet header: dst MAC (6) + src MAC (6) + ethertype (2)
+    packet[eth_start..eth_start + 6].copy_from_slice(&dst_mac);
+    packet[eth_start + 6..eth_start + 12].copy_from_slice(&src_mac);
+    packet[eth_start + 12..eth_start + 14].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
 
     // IP header
     packet[ip_start] = 0x45; // version + IHL

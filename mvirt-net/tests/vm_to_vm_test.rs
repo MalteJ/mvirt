@@ -12,7 +12,7 @@ use mvirt_net::router::{Router, VhostConfig};
 use mvirt_net::routing::{IpPrefix, RouteTarget};
 use mvirt_net::test_util::{
     VhostUserFrontendDevice,
-    frontend_device::{VIRTIO_NET_HDR_SIZE, create_icmp_echo_request},
+    frontend_device::{ETHERNET_HDR_SIZE, VIRTIO_NET_HDR_SIZE, create_icmp_echo_request},
 };
 
 /// Test VM-to-VM packet forwarding through the router.
@@ -39,8 +39,13 @@ async fn test_vm_to_vm_routing() {
     let vm_a_ip: [u8; 4] = [10, 200, 1, 2];
     let vm_b_ip: [u8; 4] = [10, 200, 2, 2];
 
-    let mac_a = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0x01];
-    let mac_b = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0x02];
+    // Router vhost-user interface MACs (presented to guests)
+    let router_mac_a = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0x01];
+    let router_mac_b = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0x02];
+
+    // VM (guest) interface MACs
+    let vm_mac_a = [0x52, 0x54, 0x00, 0xCC, 0xDD, 0x01];
+    let vm_mac_b = [0x52, 0x54, 0x00, 0xCC, 0xDD, 0x02];
 
     // Clean up any stale sockets
     let _ = std::fs::remove_file(socket_a);
@@ -57,7 +62,7 @@ async fn test_vm_to_vm_routing() {
         4096,
         256,
         256,
-        Some(VhostConfig::new(socket_a.to_string(), mac_a)),
+        Some(VhostConfig::new(socket_a.to_string(), router_mac_a)),
         Arc::clone(&registry),
     )
     .await
@@ -74,7 +79,7 @@ async fn test_vm_to_vm_routing() {
         4096,
         256,
         256,
-        Some(VhostConfig::new(socket_b.to_string(), mac_b)),
+        Some(VhostConfig::new(socket_b.to_string(), router_mac_b)),
         Arc::clone(&registry),
     )
     .await
@@ -136,7 +141,8 @@ async fn test_vm_to_vm_routing() {
     }
 
     // VM A sends ICMP echo request to VM B
-    let packet = create_icmp_echo_request(1, vm_a_ip, vm_b_ip);
+    // L2 frame: src=VM_A_MAC, dst=Router_A_MAC (gateway), payload=IP packet
+    let packet = create_icmp_echo_request(1, vm_mac_a, router_mac_a, vm_a_ip, vm_b_ip);
     println!(
         "VM A sending ICMP echo request to VM B ({} bytes)...",
         packet.len()
@@ -166,12 +172,15 @@ async fn test_vm_to_vm_routing() {
         println!("VM B received packet: {} bytes", received.len());
 
         // Verify it's the ICMP echo request we sent
-        let ip_start = VIRTIO_NET_HDR_SIZE;
+        // Packet format: [virtio-net hdr][Ethernet hdr][IP hdr][ICMP]
+        let eth_start = VIRTIO_NET_HDR_SIZE;
+        let ip_start = eth_start + ETHERNET_HDR_SIZE;
         let icmp_start = ip_start + 20;
 
         assert!(
             received.len() >= icmp_start + 8,
-            "Received packet too short"
+            "Received packet too short: {} bytes",
+            received.len()
         );
 
         // Check IP source and destination

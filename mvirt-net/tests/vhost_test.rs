@@ -5,7 +5,7 @@ use std::time::Duration;
 use mvirt_net::router::{Router, VhostConfig};
 use mvirt_net::test_util::{
     VhostUserFrontendDevice,
-    frontend_device::{VIRTIO_NET_HDR_SIZE, create_icmp_echo_request},
+    frontend_device::{ETHERNET_HDR_SIZE, VIRTIO_NET_HDR_SIZE, create_icmp_echo_request},
 };
 
 // NOTE: This test is ignored because local IP handling (ICMP echo to router IP)
@@ -17,7 +17,8 @@ async fn test_vhost_user_ping() {
 
     let socket_path = "/tmp/iou-vhost-test.sock";
     let local_ip = std::net::Ipv4Addr::new(10, 99, 100, 1);
-    let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+    let router_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+    let vm_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x57];
 
     // Clean up any stale socket
     let _ = std::fs::remove_file(socket_path);
@@ -30,7 +31,7 @@ async fn test_vhost_user_ping() {
         4096,
         256,
         256,
-        Some(VhostConfig::new(socket_path.to_string(), mac)),
+        Some(VhostConfig::new(socket_path.to_string(), router_mac)),
     )
     .await
     .expect("Failed to start router");
@@ -59,7 +60,8 @@ async fn test_vhost_user_ping() {
 
     // Create and send an ICMP echo request
     // Source: 10.99.100.2 (simulated VM), Dest: 10.99.100.1 (router)
-    let packet = create_icmp_echo_request(1, [10, 99, 100, 2], [10, 99, 100, 1]);
+    let packet =
+        create_icmp_echo_request(1, vm_mac, router_mac, [10, 99, 100, 2], [10, 99, 100, 1]);
     println!("Sending ICMP echo request ({} bytes)", packet.len());
     frontend
         .send_packet(&packet)
@@ -98,8 +100,9 @@ async fn test_vhost_user_ping() {
         println!("Received reply: {} bytes", reply.len());
 
         // Verify it's an ICMP echo reply
-        // Skip virtio-net header (10 bytes), IP header starts at offset 10
-        let ip_start = VIRTIO_NET_HDR_SIZE;
+        // Packet format: [virtio-net hdr][Ethernet hdr][IP hdr][ICMP]
+        let eth_start = VIRTIO_NET_HDR_SIZE;
+        let ip_start = eth_start + ETHERNET_HDR_SIZE;
         let icmp_start = ip_start + 20;
 
         assert!(reply.len() >= icmp_start + 8, "Reply too short");
