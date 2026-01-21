@@ -1642,16 +1642,18 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             let mut packet_data = Vec::with_capacity(total_len);
 
             for iov in &packet.iovecs {
-                let slice = unsafe {
-                    std::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len)
-                };
+                let slice =
+                    unsafe { std::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len) };
                 packet_data.extend_from_slice(slice);
             }
 
             // Strip Ethernet header: [virtio_net_hdr (12)][Ethernet (14)][IP...] -> [virtio_net_hdr (12)][IP...]
             // Keep virtio_net_hdr (first 12 bytes), skip Ethernet header (next 14 bytes)
             if packet_data.len() < VIRTIO_NET_HDR_SIZE + ETHERNET_HDR_SIZE {
-                warn!(len = packet_data.len(), "Packet too short for Ethernet stripping");
+                warn!(
+                    len = packet_data.len(),
+                    "Packet too short for Ethernet stripping"
+                );
                 // Send failure completion
                 self.send_incoming_completion(&packet, -libc::EINVAL);
                 continue;
@@ -1675,8 +1677,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 Ok(()) => {
                     debug!(
                         len = l3_packet.len(),
-                        user_data,
-                        "Queued incoming packet write to TUN"
+                        user_data, "Queued incoming packet write to TUN"
                     );
                     // Track in-flight for completion handling
                     incoming_to_tun_in_flight.insert(

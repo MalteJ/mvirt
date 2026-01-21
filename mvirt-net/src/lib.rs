@@ -7,6 +7,7 @@ pub mod ping;
 pub mod reactor;
 pub mod router;
 pub mod routing;
+pub mod test_util;
 pub mod tun;
 pub mod vhost_user;
 pub mod virtqueue;

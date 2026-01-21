@@ -178,7 +178,11 @@ impl VhostUserBackendMut for VhostUserNetBackend {
             for vring in vrings {
                 vring.set_queue_event_idx(enabled);
             }
-            info!(enabled, num_vrings = vrings.len(), "Propagated event_idx to vrings");
+            info!(
+                enabled,
+                num_vrings = vrings.len(),
+                "Propagated event_idx to vrings"
+            );
         }
     }
 
