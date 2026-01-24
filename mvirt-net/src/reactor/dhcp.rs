@@ -3,9 +3,10 @@
 //! This module implements a minimal DHCP server that responds to DISCOVER and REQUEST
 //! messages from VMs with the configured IP address, gateway, and DNS servers.
 
-use super::{GATEWAY_MAC, NicConfig};
+use super::{GATEWAY_IPV4_LINK_LOCAL, GATEWAY_MAC, NicConfig};
 use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, Opcode, OptionCode};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
+use ipnet::Ipv4Net;
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, IpProtocol, Ipv4Address,
     Ipv4Packet, Ipv4Repr, UdpPacket, UdpRepr,
@@ -130,11 +131,10 @@ fn handle_discover(
     discover: &Message,
 ) -> Option<Vec<u8>> {
     let ipv4_address = nic_config.ipv4_address?;
-    let gateway = nic_config.ipv4_gateway?;
 
     debug!(
         offered_ip = %ipv4_address,
-        gateway = %gateway,
+        gateway = %GATEWAY_IPV4_LINK_LOCAL,
         xid = discover.xid(),
         "Sending DHCP OFFER"
     );
@@ -208,8 +208,6 @@ fn build_dhcp_response(
     msg_type: MessageType,
     assigned_ip: Ipv4Addr,
 ) -> Option<Vec<u8>> {
-    let gateway = nic_config.ipv4_gateway?;
-
     // Build DHCP response message
     let mut response = Message::default();
     response.set_opcode(Opcode::BootReply);
@@ -217,7 +215,7 @@ fn build_dhcp_response(
     response.set_xid(request.xid());
     response.set_flags(request.flags());
     response.set_yiaddr(assigned_ip);
-    response.set_siaddr(gateway);
+    response.set_siaddr(GATEWAY_IPV4_LINK_LOCAL);
     response.set_chaddr(request.chaddr());
 
     // Set broadcast flag if client requested it
@@ -231,18 +229,28 @@ fn build_dhcp_response(
     // Message type
     opts.insert(DhcpOption::MessageType(msg_type));
 
-    // Server identifier (gateway IP)
-    opts.insert(DhcpOption::ServerIdentifier(gateway));
+    // Server identifier (link-local gateway)
+    opts.insert(DhcpOption::ServerIdentifier(GATEWAY_IPV4_LINK_LOCAL));
 
     // Lease time
     opts.insert(DhcpOption::AddressLeaseTime(DEFAULT_LEASE_TIME));
 
-    // Subnet mask
-    let subnet_mask = prefix_to_mask(nic_config.ipv4_prefix_len);
-    opts.insert(DhcpOption::SubnetMask(subnet_mask));
+    // Subnet mask - use /32 since we use link-local gateway with static routes
+    opts.insert(DhcpOption::SubnetMask(Ipv4Addr::new(255, 255, 255, 255)));
 
-    // Router (gateway)
-    opts.insert(DhcpOption::Router(vec![gateway]));
+    // Router (link-local gateway) - for legacy clients without Option 121 support
+    opts.insert(DhcpOption::Router(vec![GATEWAY_IPV4_LINK_LOCAL]));
+
+    // Classless Static Routes (Option 121) - takes precedence over Router
+    // Route format: Vec<(destination_network, next_hop)>
+    // - 169.254.0.1/32 via 0.0.0.0 (on-link route to gateway)
+    // - 0.0.0.0/0 via 169.254.0.1 (default route via gateway)
+    let gateway_net = Ipv4Net::new(GATEWAY_IPV4_LINK_LOCAL, 32).unwrap();
+    let default_net = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();
+    opts.insert(DhcpOption::ClasslessStaticRoute(vec![
+        (gateway_net, Ipv4Addr::UNSPECIFIED),   // 169.254.0.1/32 on-link
+        (default_net, GATEWAY_IPV4_LINK_LOCAL), // 0.0.0.0/0 via gateway
+    ]));
 
     // DNS servers
     let dns_v4: Vec<Ipv4Addr> = nic_config
@@ -272,8 +280,6 @@ fn build_dhcp_nak(
     _eth_frame: &EthernetFrame<&[u8]>,
     request: &Message,
 ) -> Option<Vec<u8>> {
-    let gateway = nic_config.ipv4_gateway?;
-
     let mut response = Message::default();
     response.set_opcode(Opcode::BootReply);
     response.set_htype(request.htype());
@@ -282,7 +288,7 @@ fn build_dhcp_nak(
 
     let opts = response.opts_mut();
     opts.insert(DhcpOption::MessageType(MessageType::Nak));
-    opts.insert(DhcpOption::ServerIdentifier(gateway));
+    opts.insert(DhcpOption::ServerIdentifier(GATEWAY_IPV4_LINK_LOCAL));
 
     let mut dhcp_bytes = Vec::new();
     let mut encoder = Encoder::new(&mut dhcp_bytes);
@@ -294,13 +300,12 @@ fn build_dhcp_nak(
 
 /// Build the complete DHCP response packet with Ethernet/IP/UDP headers.
 fn build_dhcp_packet(
-    nic_config: &NicConfig,
+    _nic_config: &NicConfig,
     virtio_hdr: &[u8],
     request: &Message,
     dhcp_bytes: &[u8],
     assigned_ip: Ipv4Addr,
 ) -> Option<Vec<u8>> {
-    let gateway = nic_config.ipv4_gateway?;
     let virtio_hdr_size = virtio_hdr.len();
 
     // Determine destination based on broadcast flag and client address
@@ -339,9 +344,9 @@ fn build_dhcp_packet(
     let mut eth_frame = EthernetFrame::new_unchecked(&mut packet[virtio_hdr_size..]);
     eth_repr.emit(&mut eth_frame);
 
-    // IPv4 header
+    // IPv4 header - source is the link-local gateway
     let ip_repr = Ipv4Repr {
-        src_addr: Ipv4Address::from_bytes(&gateway.octets()),
+        src_addr: Ipv4Address::from_bytes(&GATEWAY_IPV4_LINK_LOCAL.octets()),
         dst_addr: dst_ip,
         next_header: IpProtocol::Udp,
         payload_len: udp_len,
@@ -380,11 +385,10 @@ fn build_dhcp_packet(
 
 /// Build a broadcast DHCP packet (for NAK).
 fn build_dhcp_packet_broadcast(
-    nic_config: &NicConfig,
+    _nic_config: &NicConfig,
     virtio_hdr: &[u8],
     dhcp_bytes: &[u8],
 ) -> Option<Vec<u8>> {
-    let gateway = nic_config.ipv4_gateway?;
     let virtio_hdr_size = virtio_hdr.len();
 
     let udp_len = UDP_HEADER_SIZE + dhcp_bytes.len();
@@ -407,9 +411,9 @@ fn build_dhcp_packet_broadcast(
     let mut eth_frame = EthernetFrame::new_unchecked(&mut packet[virtio_hdr_size..]);
     eth_repr.emit(&mut eth_frame);
 
-    // IPv4 header
+    // IPv4 header - source is the link-local gateway
     let ip_repr = Ipv4Repr {
-        src_addr: Ipv4Address::from_bytes(&gateway.octets()),
+        src_addr: Ipv4Address::from_bytes(&GATEWAY_IPV4_LINK_LOCAL.octets()),
         dst_addr: Ipv4Address::BROADCAST,
         next_header: IpProtocol::Udp,
         payload_len: udp_len,
@@ -439,29 +443,13 @@ fn build_dhcp_packet_broadcast(
     Some(packet)
 }
 
-/// Convert prefix length to subnet mask.
-fn prefix_to_mask(prefix_len: u8) -> Ipv4Addr {
-    if prefix_len == 0 {
-        Ipv4Addr::new(0, 0, 0, 0)
-    } else if prefix_len >= 32 {
-        Ipv4Addr::new(255, 255, 255, 255)
-    } else {
-        let mask = !((1u32 << (32 - prefix_len)) - 1);
-        Ipv4Addr::from(mask)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_prefix_to_mask() {
-        assert_eq!(prefix_to_mask(0), Ipv4Addr::new(0, 0, 0, 0));
-        assert_eq!(prefix_to_mask(8), Ipv4Addr::new(255, 0, 0, 0));
-        assert_eq!(prefix_to_mask(16), Ipv4Addr::new(255, 255, 0, 0));
-        assert_eq!(prefix_to_mask(24), Ipv4Addr::new(255, 255, 255, 0));
-        assert_eq!(prefix_to_mask(32), Ipv4Addr::new(255, 255, 255, 255));
-        assert_eq!(prefix_to_mask(25), Ipv4Addr::new(255, 255, 255, 128));
+    fn test_link_local_gateway_constant() {
+        // Verify the link-local gateway address
+        assert_eq!(GATEWAY_IPV4_LINK_LOCAL, Ipv4Addr::new(169, 254, 0, 1));
     }
 }

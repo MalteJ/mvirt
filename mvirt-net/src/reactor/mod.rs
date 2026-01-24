@@ -36,6 +36,10 @@ pub const GATEWAY_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 /// IPv6 link-local gateway address (fe80::1)
 pub const GATEWAY_IPV6_LINK_LOCAL: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
 
+/// IPv4 link-local gateway address (like AWS/GCP).
+/// Uses 169.254.0.1 to provide a consistent gateway regardless of VM subnet.
+pub const GATEWAY_IPV4_LINK_LOCAL: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 1);
+
 /// NIC configuration passed to the reactor for DHCP/ARP/ND handling.
 #[derive(Clone, Debug)]
 pub struct NicConfig {
@@ -362,10 +366,13 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
     /// Route an IPv4 packet.
     fn route_ipv4(&self, ip_data: &[u8]) -> RoutingDecision {
-        let Ok(ipv4) = Ipv4Packet::new_checked(ip_data) else {
-            debug!("route_ipv4: invalid IPv4 header");
+        // Minimum IPv4 header is 20 bytes
+        if ip_data.len() < 20 {
+            debug!("route_ipv4: packet too short for IPv4 header");
             return RoutingDecision::Drop;
-        };
+        }
+        // Use new_unchecked because we may only have a truncated peek buffer
+        let ipv4 = Ipv4Packet::new_unchecked(ip_data);
 
         let dst_addr = ipv4.dst_addr();
         let src_addr = ipv4.src_addr();
@@ -408,10 +415,13 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
     /// Route an IPv6 packet.
     fn route_ipv6(&self, ip_data: &[u8]) -> RoutingDecision {
-        let Ok(ipv6) = Ipv6Packet::new_checked(ip_data) else {
-            debug!("route_ipv6: invalid IPv6 header");
+        // IPv6 header is always 40 bytes
+        if ip_data.len() < 40 {
+            debug!("route_ipv6: packet too short for IPv6 header");
             return RoutingDecision::Drop;
-        };
+        }
+        // Use new_unchecked because we may only have a truncated peek buffer
+        let ipv6 = Ipv6Packet::new_unchecked(ip_data);
 
         let dst_addr = ipv6.dst_addr();
         let src_addr = ipv6.src_addr();
@@ -1215,12 +1225,10 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     Self::inject_to_vhost_rx(state, &response);
                     return true;
                 }
-                // For ICMP echo to gateway, handle it too
-                if let Ok(ipv4) = Ipv4Packet::new_checked(eth_frame.payload())
-                    && let Some(gateway) = nic_config.ipv4_gateway
-                {
+                // For ICMP echo to link-local gateway, handle it
+                if let Ok(ipv4) = Ipv4Packet::new_checked(eth_frame.payload()) {
                     let dst = Ipv4Addr::from(ipv4.dst_addr().0);
-                    if dst == gateway
+                    if dst == GATEWAY_IPV4_LINK_LOCAL
                         && ipv4.next_header() == IpProtocol::Icmp
                         && let Ok(icmp) = Icmpv4Packet::new_checked(ipv4.payload())
                         && icmp.msg_type() == Icmpv4Message::EchoRequest
@@ -1386,137 +1394,137 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
             let queue = vring_state.get_queue_mut();
             while let Some(desc_chain) = queue.pop_descriptor_chain(&*mem_guard) {
-            let Some(in_flight) =
-                Self::desc_chain_to_iovecs(&desc_chain, &mem_guard, keep_alive.clone())
-            else {
-                // Empty chain - return immediately
-                let _ = queue.add_used(&*mem_guard, desc_chain.head_index(), 0);
-                descriptors_returned = true;
-                continue;
-            };
+                let Some(in_flight) =
+                    Self::desc_chain_to_iovecs(&desc_chain, &mem_guard, keep_alive.clone())
+                else {
+                    // Empty chain - return immediately
+                    let _ = queue.add_used(&*mem_guard, desc_chain.head_index(), 0);
+                    descriptors_returned = true;
+                    continue;
+                };
 
-            debug!(
-                len = in_flight.total_len,
-                iovecs = in_flight.iovecs.len(),
-                "vhost TX processing"
-            );
+                debug!(
+                    len = in_flight.total_len,
+                    iovecs = in_flight.iovecs.len(),
+                    "vhost TX processing"
+                );
 
-            // Peek at packet headers
-            let peek_slice = Self::peek_packet_headers(&in_flight);
+                // Peek at packet headers
+                let peek_slice = Self::peek_packet_headers(&in_flight);
 
-            // First, try to handle protocol packets locally (ARP, DHCP, ICMPv6, DHCPv6)
-            // These need responses injected back to the VM
-            if self.handle_vhost_ethernet_protocols(state, &peek_slice) {
-                // Protocol handler consumed the packet and injected a response
-                let _ = queue.add_used(&*mem_guard, in_flight.head_index, in_flight.total_len);
-                descriptors_returned = true;
-                continue;
-            }
-
-            // Route the packet using Ethernet-aware routing
-            let routing_decision = self.peek_and_route_ethernet(&peek_slice);
-
-            match routing_decision {
-                RoutingDecision::ToTun { if_index: _ } => {
-                    // Route to TUN - strip Ethernet header for L3 TUN device
-                    let Some(tun_iovecs) = strip_ethernet_header(&in_flight.iovecs) else {
-                        warn!("Packet too short for Ethernet stripping");
-                        let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
-                        descriptors_returned = true;
-                        continue;
-                    };
-
-                    let user_data = *vhost_tx_id | USER_DATA_VHOST_TX_FLAG;
-                    *vhost_tx_id = vhost_tx_id.wrapping_add(1);
-
-                    // Store modified iovecs in in_flight for the writev
-                    let mut in_flight = in_flight;
-                    in_flight.iovecs = tun_iovecs;
-
-                    let writev = opcode::Writev::new(
-                        tun_fd,
-                        in_flight.iovecs.as_ptr(),
-                        in_flight.iovecs.len() as u32,
-                    )
-                    .build()
-                    .user_data(user_data);
-
-                    unsafe {
-                        if ring.submission().push(&writev).is_ok() {
-                            debug!(len = in_flight.total_len, "vhost TX -> TUN (zero-copy)");
-                            vhost_tx_in_flight.insert(user_data, in_flight);
-                        } else {
-                            warn!("SQ full, dropping vhost TX");
-                            let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
-                            descriptors_returned = true;
-                        }
-                    }
+                // First, try to handle protocol packets locally (ARP, DHCP, ICMPv6, DHCPv6)
+                // These need responses injected back to the VM
+                if self.handle_vhost_ethernet_protocols(state, &peek_slice) {
+                    // Protocol handler consumed the packet and injected a response
+                    let _ = queue.add_used(&*mem_guard, in_flight.head_index, in_flight.total_len);
+                    descriptors_returned = true;
+                    continue;
                 }
 
-                RoutingDecision::ToVhost {
-                    reactor_id: target_reactor_id,
-                } => {
-                    // Route to another VM (or TUN reactor) - send via registry
-                    // Clone registry to avoid borrow conflicts
-                    let registry_opt = self.registry.clone();
-                    if let Some(registry) = registry_opt {
-                        let packet_id = self.next_packet_id();
-                        let source = PacketSource::VhostToVhost {
-                            head_index: in_flight.head_index,
-                            total_len: in_flight.total_len,
-                            source_reactor: self.reactor_id,
+                // Route the packet using Ethernet-aware routing
+                let routing_decision = self.peek_and_route_ethernet(&peek_slice);
+
+                match routing_decision {
+                    RoutingDecision::ToTun { if_index: _ } => {
+                        // Route to TUN - strip Ethernet header for L3 TUN device
+                        let Some(tun_iovecs) = strip_ethernet_header(&in_flight.iovecs) else {
+                            warn!("Packet too short for Ethernet stripping");
+                            let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
+                            descriptors_returned = true;
+                            continue;
                         };
 
-                        let packet = PacketRef::new(
-                            packet_id,
-                            in_flight.iovecs.clone(),
-                            source,
-                            in_flight.keep_alive.clone(),
-                        );
+                        let user_data = *vhost_tx_id | USER_DATA_VHOST_TX_FLAG;
+                        *vhost_tx_id = vhost_tx_id.wrapping_add(1);
 
-                        debug!(
-                            packet_id = %packet_id,
-                            len = in_flight.total_len,
-                            src = %self.reactor_id,
-                            dst = %target_reactor_id,
-                            head_idx = in_flight.head_index,
-                            "Sending packet to target reactor"
-                        );
+                        // Store modified iovecs in in_flight for the writev
+                        let mut in_flight = in_flight;
+                        in_flight.iovecs = tun_iovecs;
 
-                        if registry.send_packet_to(&target_reactor_id, packet) {
+                        let writev = opcode::Writev::new(
+                            tun_fd,
+                            in_flight.iovecs.as_ptr(),
+                            in_flight.iovecs.len() as u32,
+                        )
+                        .build()
+                        .user_data(user_data);
+
+                        unsafe {
+                            if ring.submission().push(&writev).is_ok() {
+                                debug!(len = in_flight.total_len, "vhost TX -> TUN (zero-copy)");
+                                vhost_tx_in_flight.insert(user_data, in_flight);
+                            } else {
+                                warn!("SQ full, dropping vhost TX");
+                                let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
+                                descriptors_returned = true;
+                            }
+                        }
+                    }
+
+                    RoutingDecision::ToVhost {
+                        reactor_id: target_reactor_id,
+                    } => {
+                        // Route to another VM (or TUN reactor) - send via registry
+                        // Clone registry to avoid borrow conflicts
+                        let registry_opt = self.registry.clone();
+                        if let Some(registry) = registry_opt {
+                            let packet_id = self.next_packet_id();
+                            let source = PacketSource::VhostToVhost {
+                                head_index: in_flight.head_index,
+                                total_len: in_flight.total_len,
+                                source_reactor: self.reactor_id,
+                            };
+
+                            let packet = PacketRef::new(
+                                packet_id,
+                                in_flight.iovecs.clone(),
+                                source,
+                                in_flight.keep_alive.clone(),
+                            );
+
                             debug!(
+                                packet_id = %packet_id,
                                 len = in_flight.total_len,
+                                src = %self.reactor_id,
                                 dst = %target_reactor_id,
-                                "vhost TX -> vhost (VM-to-VM)"
+                                head_idx = in_flight.head_index,
+                                "Sending packet to target reactor"
                             );
-                            // Track in-flight - don't return descriptor yet
-                            vhost_to_vhost_in_flight.insert(
-                                packet_id.raw(),
-                                VhostToVhostInFlight {
-                                    head_index: in_flight.head_index,
-                                    total_len: in_flight.total_len,
-                                },
-                            );
+
+                            if registry.send_packet_to(&target_reactor_id, packet) {
+                                debug!(
+                                    len = in_flight.total_len,
+                                    dst = %target_reactor_id,
+                                    "vhost TX -> vhost (VM-to-VM)"
+                                );
+                                // Track in-flight - don't return descriptor yet
+                                vhost_to_vhost_in_flight.insert(
+                                    packet_id.raw(),
+                                    VhostToVhostInFlight {
+                                        head_index: in_flight.head_index,
+                                        total_len: in_flight.total_len,
+                                    },
+                                );
+                            } else {
+                                warn!(dst = %target_reactor_id, "Failed to send to target reactor");
+                                let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
+                                descriptors_returned = true;
+                            }
                         } else {
-                            warn!(dst = %target_reactor_id, "Failed to send to target reactor");
+                            warn!("No registry configured for VM-to-VM routing");
                             let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
                             descriptors_returned = true;
                         }
-                    } else {
-                        warn!("No registry configured for VM-to-VM routing");
+                    }
+
+                    RoutingDecision::Drop => {
+                        // Drop packet - return descriptor immediately
+                        debug!(len = in_flight.total_len, "vhost TX dropped (no route)");
                         let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
                         descriptors_returned = true;
                     }
                 }
-
-                RoutingDecision::Drop => {
-                    // Drop packet - return descriptor immediately
-                    debug!(len = in_flight.total_len, "vhost TX dropped (no route)");
-                    let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
-                    descriptors_returned = true;
-                }
             }
-        }
 
             // Only signal used queue if we actually returned descriptors
             if descriptors_returned {
@@ -1622,9 +1630,33 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             let mut phase = 0u8; // 0=virtio_hdr, 1=eth_hdr, 2=ip_payload
             let mut phase_offset = 0usize;
 
-            // Source tracking
+            // Pre-read virtio header and patch csum_start for Ethernet injection
+            let mut virtio_hdr_buf = [0u8; VIRTIO_NET_HDR_SIZE];
+            {
+                let mut tmp_idx = 0usize;
+                let mut tmp_off = 0usize;
+                let hdr_data = Self::read_from_iovecs(
+                    &packet.iovecs,
+                    &mut tmp_idx,
+                    &mut tmp_off,
+                    VIRTIO_NET_HDR_SIZE,
+                );
+                virtio_hdr_buf[..hdr_data.len()].copy_from_slice(&hdr_data);
+            }
+
+            // Adjust csum_start to account for injected Ethernet header
+            patch_virtio_hdr_for_eth_injection(&mut virtio_hdr_buf);
+
+            // Source tracking - start past virtio header since we read it into local buffer
             let mut src_iov_idx = 0usize;
             let mut src_iov_offset = 0usize;
+            // Skip past the virtio header in source iovecs
+            Self::skip_in_iovecs(
+                &packet.iovecs,
+                &mut src_iov_idx,
+                &mut src_iov_offset,
+                VIRTIO_NET_HDR_SIZE,
+            );
 
             for desc in desc_chain {
                 if !desc.is_write_only() {
@@ -1637,26 +1669,20 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 while desc_offset < available && written < total_out_len {
                     let to_copy = match phase {
                         0 => {
-                            // Phase 0: VirtioHdr from source (first 12 bytes)
+                            // Phase 0: VirtioHdr from patched local buffer
                             let remaining_in_phase = VIRTIO_NET_HDR_SIZE - phase_offset;
                             let remaining_in_desc = available - desc_offset;
                             let to_copy = remaining_in_phase.min(remaining_in_desc);
 
                             if to_copy > 0 {
-                                // Read from source iovecs
-                                let src_data = Self::read_from_iovecs(
-                                    &packet.iovecs,
-                                    &mut src_iov_idx,
-                                    &mut src_iov_offset,
-                                    to_copy,
-                                );
-
+                                let src_slice =
+                                    &virtio_hdr_buf[phase_offset..phase_offset + to_copy];
                                 let dst_addr = desc
                                     .addr()
                                     .checked_add(desc_offset as u64)
                                     .expect("Address overflow");
 
-                                if let Err(e) = mem_guard.write_slice(&src_data, dst_addr) {
+                                if let Err(e) = mem_guard.write_slice(src_slice, dst_addr) {
                                     warn!(?e, "Failed to write virtio_hdr to vhost RX buffer");
                                     let _ = queue.add_used(&*mem_guard, head_index, 0);
                                     let _ = vring_state.signal_used_queue();
@@ -1869,6 +1895,28 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         }
 
         result
+    }
+
+    /// Skip bytes in iovec array without copying (advance position only).
+    fn skip_in_iovecs(
+        iovecs: &[libc::iovec],
+        iov_idx: &mut usize,
+        iov_offset: &mut usize,
+        mut len: usize,
+    ) {
+        while len > 0 && *iov_idx < iovecs.len() {
+            let iov = &iovecs[*iov_idx];
+            let remaining = iov.iov_len - *iov_offset;
+            let to_skip = remaining.min(len);
+
+            *iov_offset += to_skip;
+            len -= to_skip;
+
+            if *iov_offset >= iov.iov_len {
+                *iov_idx += 1;
+                *iov_offset = 0;
+            }
+        }
     }
 
     /// Process incoming packets from other reactors (VM-to-VM receive path).
@@ -2121,5 +2169,94 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         }
 
         debug!(len = written, "Injected packet to vhost RX queue");
+    }
+}
+
+/// Patch virtio_net_hdr for Ethernet header injection.
+///
+/// When injecting a 14-byte Ethernet header into L3 packets from TUN,
+/// the `csum_start` offset in the virtio header must be adjusted to
+/// account for the additional header bytes. Otherwise, the guest OS
+/// will fail to locate the TCP/UDP header for checksum verification.
+///
+/// # Arguments
+/// * `virtio_hdr` - Mutable reference to the 12-byte virtio_net_hdr buffer
+///
+/// # Virtio Header Layout
+/// - offset 0: flags (bit 0 = NEEDS_CSUM)
+/// - offset 6-7: csum_start (little-endian u16)
+#[inline]
+fn patch_virtio_hdr_for_eth_injection(virtio_hdr: &mut [u8; VIRTIO_NET_HDR_SIZE]) {
+    const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+    if virtio_hdr[0] & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+        let csum_start = u16::from_le_bytes([virtio_hdr[6], virtio_hdr[7]]);
+        let adjusted = csum_start.wrapping_add(ETHERNET_HDR_SIZE as u16);
+        virtio_hdr[6..8].copy_from_slice(&adjusted.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that csum_start is adjusted when NEEDS_CSUM flag is set
+    #[test]
+    fn test_patch_virtio_hdr_needs_csum() {
+        // Create a virtio header with NEEDS_CSUM flag set
+        // csum_start = 20 (typical for TCP over IPv4: IP header = 20 bytes)
+        let mut hdr = [0u8; VIRTIO_NET_HDR_SIZE];
+        hdr[0] = 1; // flags = VIRTIO_NET_HDR_F_NEEDS_CSUM
+        hdr[6..8].copy_from_slice(&20u16.to_le_bytes()); // csum_start = 20
+
+        patch_virtio_hdr_for_eth_injection(&mut hdr);
+
+        // csum_start should be adjusted by ETHERNET_HDR_SIZE (14)
+        let csum_start = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(csum_start, 20 + ETHERNET_HDR_SIZE as u16);
+        assert_eq!(csum_start, 34);
+    }
+
+    /// Test that csum_start is NOT adjusted when NEEDS_CSUM flag is clear
+    #[test]
+    fn test_patch_virtio_hdr_no_csum() {
+        // Create a virtio header without NEEDS_CSUM flag
+        let mut hdr = [0u8; VIRTIO_NET_HDR_SIZE];
+        hdr[0] = 0; // flags = 0 (no checksum offload)
+        hdr[6..8].copy_from_slice(&20u16.to_le_bytes()); // csum_start = 20
+
+        patch_virtio_hdr_for_eth_injection(&mut hdr);
+
+        // csum_start should remain unchanged
+        let csum_start = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(csum_start, 20);
+    }
+
+    /// Test csum_start adjustment for IPv6 + TCP (csum_start = 40)
+    #[test]
+    fn test_patch_virtio_hdr_ipv6_tcp() {
+        // IPv6 header = 40 bytes, so csum_start = 40 for TCP
+        let mut hdr = [0u8; VIRTIO_NET_HDR_SIZE];
+        hdr[0] = 1; // flags = VIRTIO_NET_HDR_F_NEEDS_CSUM
+        hdr[6..8].copy_from_slice(&40u16.to_le_bytes()); // csum_start = 40
+
+        patch_virtio_hdr_for_eth_injection(&mut hdr);
+
+        let csum_start = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(csum_start, 40 + ETHERNET_HDR_SIZE as u16);
+        assert_eq!(csum_start, 54);
+    }
+
+    /// Test wrapping behavior for edge case (max u16 value)
+    #[test]
+    fn test_patch_virtio_hdr_wrapping() {
+        let mut hdr = [0u8; VIRTIO_NET_HDR_SIZE];
+        hdr[0] = 1; // flags = VIRTIO_NET_HDR_F_NEEDS_CSUM
+        hdr[6..8].copy_from_slice(&0xFFF0u16.to_le_bytes()); // near max
+
+        patch_virtio_hdr_for_eth_injection(&mut hdr);
+
+        let csum_start = u16::from_le_bytes([hdr[6], hdr[7]]);
+        // 0xFFF0 + 14 = 0xFFFE (no wrap)
+        assert_eq!(csum_start, 0xFFFE);
     }
 }

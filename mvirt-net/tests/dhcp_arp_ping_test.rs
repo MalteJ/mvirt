@@ -18,6 +18,9 @@ use mvirt_net::test_util::{
 /// Gateway MAC address used by the reactor
 const GATEWAY_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 
+/// Link-local gateway IP (like AWS/GCP)
+const GATEWAY_IPV4_LINK_LOCAL: [u8; 4] = [169, 254, 0, 1];
+
 /// Test the full DHCP + ARP + Ping flow
 #[tokio::test]
 async fn test_dhcp_arp_ping() {
@@ -138,7 +141,14 @@ async fn test_dhcp_arp_ping() {
     println!("  Lease time: {:?}", ack.lease_time);
 
     let assigned_ip = ack.your_ip;
-    let gateway = ack.router.expect("No gateway in DHCP ACK");
+    // Gateway is now the link-local address 169.254.0.1
+    let gateway = GATEWAY_IPV4_LINK_LOCAL;
+    // Verify DHCP router option contains the link-local gateway
+    assert_eq!(
+        ack.router.expect("No gateway in DHCP ACK"),
+        GATEWAY_IPV4_LINK_LOCAL,
+        "Router should be link-local gateway"
+    );
 
     println!(
         "\nDHCP complete! Assigned IP: {:?}, Gateway: {:?}",
@@ -180,7 +190,10 @@ async fn test_dhcp_arp_ping() {
         arp_reply.sender_mac[5]
     );
 
-    assert_eq!(arp_reply.sender_ip, gateway, "ARP sender IP mismatch");
+    assert_eq!(
+        arp_reply.sender_ip, GATEWAY_IPV4_LINK_LOCAL,
+        "ARP sender IP mismatch"
+    );
     assert_eq!(arp_reply.sender_mac, GATEWAY_MAC, "Gateway MAC mismatch");
 
     // =========================================================================
@@ -217,7 +230,10 @@ async fn test_dhcp_arp_ping() {
     println!("  From: {:?}", icmp_reply.src_ip);
     println!("  ID: 0x{:04x}, Seq: {}", icmp_reply.id, icmp_reply.seq);
 
-    assert_eq!(icmp_reply.src_ip, gateway, "ICMP source IP mismatch");
+    assert_eq!(
+        icmp_reply.src_ip, GATEWAY_IPV4_LINK_LOCAL,
+        "ICMP source IP mismatch"
+    );
     assert_eq!(icmp_reply.dst_ip, assigned_ip, "ICMP dest IP mismatch");
     assert_eq!(icmp_reply.id, 0x1234, "ICMP ID mismatch");
     assert_eq!(icmp_reply.seq, 1, "ICMP sequence mismatch");

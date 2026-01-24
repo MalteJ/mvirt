@@ -3,7 +3,7 @@
 //! This module handles ARP requests from VMs and responds with the gateway MAC address.
 //! The virtual gateway presents itself with a fixed MAC address for all gateway IPs.
 
-use super::{GATEWAY_MAC, NicConfig};
+use super::{GATEWAY_IPV4_LINK_LOCAL, GATEWAY_MAC, NicConfig};
 use smoltcp::wire::{
     ArpOperation, ArpPacket, ArpRepr, EthernetAddress, EthernetFrame, EthernetProtocol,
     EthernetRepr, Ipv4Address,
@@ -22,7 +22,7 @@ const ARP_PACKET_SIZE: usize = 28;
 /// Returns a response packet if the ARP request is for an address we should respond to
 /// (gateway IP or any IP we're proxying for).
 pub fn handle_arp_packet(
-    nic_config: &NicConfig,
+    _nic_config: &NicConfig,
     virtio_hdr: &[u8],
     ethernet_frame: &[u8],
 ) -> Option<Vec<u8>> {
@@ -46,11 +46,10 @@ pub fn handle_arp_packet(
             target_protocol_addr,
             ..
         } => {
-            // Check if the request is for our gateway IP
-            let gateway_ip = nic_config.ipv4_gateway?;
+            // Check if the request is for our link-local gateway IP
             let target_ip = Ipv4Addr::from(target_protocol_addr.0);
 
-            if target_ip == gateway_ip {
+            if target_ip == GATEWAY_IPV4_LINK_LOCAL {
                 debug!(
                     src_mac = ?source_hardware_addr,
                     src_ip = %source_protocol_addr,
@@ -67,11 +66,11 @@ pub fn handle_arp_packet(
             }
 
             // For proxy ARP, we could respond for other IPs in the network
-            // For now, we only respond for the gateway
+            // For now, we only respond for the link-local gateway
             debug!(
                 src_ip = %source_protocol_addr,
                 target_ip = %target_protocol_addr,
-                gateway = %gateway_ip,
+                gateway = %GATEWAY_IPV4_LINK_LOCAL,
                 "ARP request not for gateway, ignoring"
             );
             None
@@ -149,7 +148,7 @@ mod tests {
         let config = make_test_config();
         let virtio_hdr = [0u8; 12];
 
-        // Build an ARP request from the VM asking for the gateway
+        // Build an ARP request from the VM asking for the link-local gateway
         let mut packet = vec![0u8; ETHERNET_HEADER_SIZE + ARP_PACKET_SIZE];
 
         // Ethernet header
@@ -163,13 +162,13 @@ mod tests {
         let mut eth_frame = EthernetFrame::new_unchecked(&mut packet);
         eth_repr.emit(&mut eth_frame);
 
-        // ARP request
+        // ARP request for link-local gateway (169.254.0.1)
         let arp_repr = ArpRepr::EthernetIpv4 {
             operation: ArpOperation::Request,
             source_hardware_addr: vm_mac,
             source_protocol_addr: Ipv4Address::new(10, 0, 0, 2),
             target_hardware_addr: EthernetAddress([0, 0, 0, 0, 0, 0]),
-            target_protocol_addr: Ipv4Address::new(10, 0, 0, 1), // Gateway IP
+            target_protocol_addr: Ipv4Address::new(169, 254, 0, 1), // Link-local gateway
         };
         let mut arp_packet = ArpPacket::new_unchecked(eth_frame.payload_mut());
         arp_repr.emit(&mut arp_packet);
@@ -197,7 +196,7 @@ mod tests {
             } => {
                 assert_eq!(operation, ArpOperation::Reply);
                 assert_eq!(source_hardware_addr, EthernetAddress(GATEWAY_MAC));
-                assert_eq!(source_protocol_addr, Ipv4Address::new(10, 0, 0, 1));
+                assert_eq!(source_protocol_addr, Ipv4Address::new(169, 254, 0, 1));
                 assert_eq!(target_hardware_addr, vm_mac);
                 assert_eq!(target_protocol_addr, Ipv4Address::new(10, 0, 0, 2));
             }
