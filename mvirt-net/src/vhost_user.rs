@@ -290,38 +290,52 @@ impl VhostUserNetDevice {
         }
     }
 
-    /// Start the vhost-user daemon (blocking)
+    /// Start the vhost-user daemon (blocking, reconnection loop)
     pub fn run(self) -> io::Result<()> {
-        info!(socket = %self.socket_path, "Creating vhost-user-net backend");
-        let backend = Arc::new(RwLock::new(VhostUserNetBackend::new(
-            self.mac,
-            self.handshake_tx,
-            self.reactor_notify,
-        )?));
+        info!(socket = %self.socket_path, "Creating vhost-user-net backend with reconnection support");
 
-        info!("Creating VhostUserDaemon");
-        let mut daemon = VhostUserDaemon::new(
-            String::from("vhost-user-net"),
-            backend,
-            GuestMemoryAtomic::new(GuestMemoryMmap::new()),
-        )
-        .map_err(|e| io::Error::other(format!("daemon creation failed: {:?}", e)))?;
-
+        // Create listener once - it will be reused for reconnections
         info!(socket = %self.socket_path, "Creating listener");
         let mut listener = Listener::new(&self.socket_path, true)
             .map_err(|e| io::Error::other(format!("listener failed: {:?}", e)))?;
 
-        info!("Calling daemon.start()");
-        daemon
-            .start(&mut listener)
-            .map_err(|e| io::Error::other(format!("daemon start failed: {:?}", e)))?;
+        loop {
+            // Create fresh backend for each connection
+            info!("Creating new backend for connection");
+            let backend = Arc::new(RwLock::new(VhostUserNetBackend::new(
+                self.mac,
+                self.handshake_tx.clone(),
+                self.reactor_notify
+                    .as_ref()
+                    .map(|fd| fd.try_clone())
+                    .transpose()?,
+            )?));
 
-        info!("daemon.start() returned, calling daemon.wait()");
-        daemon
-            .wait()
-            .map_err(|e| io::Error::other(format!("daemon wait failed: {:?}", e)))?;
+            info!("Creating VhostUserDaemon");
+            let mut daemon = VhostUserDaemon::new(
+                String::from("vhost-user-net"),
+                backend,
+                GuestMemoryAtomic::new(GuestMemoryMmap::new()),
+            )
+            .map_err(|e| io::Error::other(format!("daemon creation failed: {:?}", e)))?;
 
-        info!("daemon.wait() returned");
-        Ok(())
+            info!("Waiting for VM connection...");
+            daemon
+                .start(&mut listener)
+                .map_err(|e| io::Error::other(format!("daemon start failed: {:?}", e)))?;
+
+            info!("VM connected, calling daemon.wait()");
+            match daemon.wait() {
+                Ok(()) => {
+                    info!("VM disconnected cleanly, waiting for reconnection...");
+                }
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        "VM connection ended with error, waiting for reconnection..."
+                    );
+                }
+            }
+        }
     }
 }
