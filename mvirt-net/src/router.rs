@@ -205,6 +205,7 @@ impl Router {
                     Some(packet_rx),
                     Some(completion_rx),
                     Some(nic_config),
+                    None, // No initial tables (will be populated via commands)
                 );
                 let id = reactor.id();
                 (reactor, handle, Some(tx), id)
@@ -217,6 +218,7 @@ impl Router {
                     Some(packet_rx),
                     Some(completion_rx),
                     None, // No NIC config for TUN-only reactors
+                    None, // No initial tables (will be populated via commands)
                 );
                 let id = reactor.id();
                 (reactor, handle, None, id)

@@ -297,8 +297,42 @@ impl RouteUpdate {
 pub struct RoutingManager {
     /// The authoritative routing tables.
     tables: RoutingTables,
-    /// Channels to send updates to each reactor.
+    /// Channels to send updates to each reactor (RouteUpdate protocol).
     update_senders: Vec<Sender<RouteUpdate>>,
+    /// Channels to send commands to each reactor (ReactorCommand protocol).
+    /// Used by ReactorHandle integration for unified command channel.
+    command_senders: Vec<Sender<ReactorCommand>>,
+}
+
+/// Commands that can be sent to the reactor (re-exported for tests).
+/// This is duplicated from reactor::ReactorCommand to avoid circular dependency.
+#[derive(Debug, Clone)]
+pub enum ReactorCommand {
+    Shutdown,
+    /// Create a new routing table
+    CreateTable {
+        id: Uuid,
+        name: String,
+    },
+    /// Delete a routing table
+    DeleteTable {
+        id: Uuid,
+    },
+    /// Add a route to a table
+    AddRoute {
+        table_id: Uuid,
+        prefix: IpPrefix,
+        target: RouteTarget,
+    },
+    /// Remove a route from a table
+    RemoveRoute {
+        table_id: Uuid,
+        prefix: IpPrefix,
+    },
+    /// Set the default routing table
+    SetDefaultTable {
+        id: Uuid,
+    },
 }
 
 impl RoutingManager {
@@ -307,15 +341,28 @@ impl RoutingManager {
         RoutingManager {
             tables: RoutingTables::new(),
             update_senders: Vec::new(),
+            command_senders: Vec::new(),
         }
     }
 
-    /// Register a reactor to receive routing updates.
+    /// Register a reactor to receive routing updates (RouteUpdate protocol).
     ///
     /// Returns the current routing tables for the reactor to initialize with.
     pub fn register_reactor(&mut self, sender: Sender<RouteUpdate>) -> RoutingTables {
         self.update_senders.push(sender);
         // Clone current tables for the new reactor
+        self.tables.clone()
+    }
+
+    /// Register a reactor via its command channel (ReactorCommand protocol).
+    ///
+    /// This integrates with ReactorHandle's existing command channel, converting
+    /// RouteUpdate messages to ReactorCommand internally. This avoids needing
+    /// a second eventfd for routing updates.
+    ///
+    /// Returns the current routing tables for the reactor to use as initial state.
+    pub fn register_command_channel(&mut self, tx: Sender<ReactorCommand>) -> RoutingTables {
+        self.command_senders.push(tx);
         self.tables.clone()
     }
 
@@ -336,6 +383,47 @@ impl RoutingManager {
                     false
                 }
             });
+
+        // Also broadcast as ReactorCommand to command_senders
+        self.broadcast_as_command(update);
+    }
+
+    /// Broadcast a RouteUpdate as ReactorCommand to all registered command channels.
+    fn broadcast_as_command(&mut self, update: &RouteUpdate) {
+        let cmd = Self::route_update_to_command(update);
+        self.command_senders
+            .retain(|sender| match sender.send(cmd.clone()) {
+                Ok(()) => true,
+                Err(_) => {
+                    debug!("Removing closed command channel");
+                    false
+                }
+            });
+    }
+
+    /// Convert a RouteUpdate to a ReactorCommand.
+    fn route_update_to_command(update: &RouteUpdate) -> ReactorCommand {
+        match update {
+            RouteUpdate::CreateTable { id, name } => ReactorCommand::CreateTable {
+                id: *id,
+                name: name.clone(),
+            },
+            RouteUpdate::DeleteTable { id } => ReactorCommand::DeleteTable { id: *id },
+            RouteUpdate::AddRoute {
+                table_id,
+                prefix,
+                target,
+            } => ReactorCommand::AddRoute {
+                table_id: *table_id,
+                prefix: prefix.clone(),
+                target: target.clone(),
+            },
+            RouteUpdate::RemoveRoute { table_id, prefix } => ReactorCommand::RemoveRoute {
+                table_id: *table_id,
+                prefix: prefix.clone(),
+            },
+            RouteUpdate::SetDefaultTable { id } => ReactorCommand::SetDefaultTable { id: *id },
+        }
     }
 
     /// Create a new routing table and broadcast to all reactors.
@@ -405,9 +493,14 @@ impl RoutingManager {
         &self.tables
     }
 
-    /// Get the number of registered reactors.
+    /// Get the number of registered reactors (via RouteUpdate protocol).
     pub fn reactor_count(&self) -> usize {
         self.update_senders.len()
+    }
+
+    /// Get the number of registered command channels (via ReactorCommand protocol).
+    pub fn command_channel_count(&self) -> usize {
+        self.command_senders.len()
     }
 }
 
@@ -420,6 +513,7 @@ impl Default for RoutingManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     #[test]
     fn test_lpm_lookup_v4() {
@@ -585,5 +679,169 @@ mod tests {
 
         let drop_target = RouteTarget::drop();
         assert!(matches!(drop_target, RouteTarget::Drop));
+    }
+
+    // === TDD Tests for Master-to-Worker Routing Table Synchronization ===
+
+    #[test]
+    fn test_routing_manager_with_reactor_handle() {
+        // Test that RoutingManager can register via ReactorHandle's command channel
+        // and broadcasts convert RouteUpdate to ReactorCommand
+        let (command_tx, command_rx) = mpsc::channel();
+
+        let mut manager = RoutingManager::new();
+        let _tables = manager.register_command_channel(command_tx);
+
+        // Add route via manager
+        let table_id = Uuid::new_v4();
+        manager.create_table(table_id, "test");
+
+        // Should receive as ReactorCommand
+        let cmd = command_rx.try_recv().unwrap();
+        assert!(matches!(cmd, ReactorCommand::CreateTable { id, .. } if id == table_id));
+    }
+
+    #[test]
+    fn test_routing_manager_initial_tables_sync() {
+        // Test that newly registered reactor receives current routing state
+        let mut manager = RoutingManager::new();
+
+        // Pre-populate manager with tables and routes
+        let table_id = Uuid::new_v4();
+        manager.create_table(table_id, "existing");
+        manager.add_route(
+            table_id,
+            IpPrefix::V4("10.0.0.0/8".parse().unwrap()),
+            RouteTarget::Drop,
+        );
+
+        // Register new reactor
+        let (tx, _rx) = mpsc::channel();
+        let initial_tables = manager.register_command_channel(tx);
+
+        // Initial tables should contain pre-existing routes
+        let table = initial_tables.get_table(&table_id).unwrap();
+        assert!(table.lookup_v4("10.0.0.1".parse().unwrap()).is_some());
+    }
+
+    #[test]
+    fn test_routing_manager_broadcasts_to_all() {
+        // Test that route updates broadcast to ALL registered reactors
+        let mut manager = RoutingManager::new();
+
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+        let (tx3, rx3) = mpsc::channel();
+
+        manager.register_command_channel(tx1);
+        manager.register_command_channel(tx2);
+        manager.register_command_channel(tx3);
+
+        // First create a table so that add_route works
+        let table_id = Uuid::new_v4();
+        manager.create_table(table_id, "test-network");
+
+        // Drain the CreateTable commands
+        let _ = rx1.try_recv();
+        let _ = rx2.try_recv();
+        let _ = rx3.try_recv();
+
+        // Now add a route
+        manager.add_route(
+            table_id,
+            IpPrefix::V4("192.168.0.0/24".parse().unwrap()),
+            RouteTarget::Drop,
+        );
+
+        // All 3 should receive the AddRoute command
+        assert!(matches!(
+            rx1.try_recv().unwrap(),
+            ReactorCommand::AddRoute { .. }
+        ));
+        assert!(matches!(
+            rx2.try_recv().unwrap(),
+            ReactorCommand::AddRoute { .. }
+        ));
+        assert!(matches!(
+            rx3.try_recv().unwrap(),
+            ReactorCommand::AddRoute { .. }
+        ));
+    }
+
+    #[test]
+    fn test_routing_manager_end_to_end() {
+        // Simulate full workflow: manager creates route, reactor applies it
+        let mut manager = RoutingManager::new();
+        let (tx, rx) = mpsc::channel();
+
+        let initial_tables = manager.register_command_channel(tx);
+        let mut local_tables = initial_tables; // Reactor's local copy
+
+        // Manager adds route
+        let table_id = Uuid::new_v4();
+        manager.create_table(table_id, "network-1");
+        manager.set_default_table(table_id);
+        manager.add_route(
+            table_id,
+            IpPrefix::V4("10.0.0.0/24".parse().unwrap()),
+            RouteTarget::reactor(ReactorId::new()),
+        );
+
+        // Reactor drains channel and applies commands (simulates run loop)
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                ReactorCommand::CreateTable { id, name } => {
+                    local_tables.add_table(LpmTable::new(id, &name));
+                }
+                ReactorCommand::SetDefaultTable { id } => {
+                    local_tables.set_default(id);
+                }
+                ReactorCommand::AddRoute {
+                    table_id,
+                    prefix,
+                    target,
+                } => {
+                    if let Some(table) = local_tables.get_table_mut(&table_id) {
+                        match prefix {
+                            IpPrefix::V4(p) => table.insert_v4(p, target),
+                            IpPrefix::V6(p) => table.insert_v6(p, target),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Verify reactor's local tables match manager's
+        assert!(local_tables.get_default().is_some());
+        let table = local_tables.get_table(&table_id).unwrap();
+        assert!(table.lookup_v4("10.0.0.5".parse().unwrap()).is_some());
+    }
+
+    #[test]
+    fn test_routing_manager_cleanup_closed_command_channels() {
+        // Test that closed command channels are cleaned up on broadcast
+        let mut manager = RoutingManager::new();
+
+        let (tx1, rx1) = mpsc::channel::<ReactorCommand>();
+        let (tx2, rx2) = mpsc::channel::<ReactorCommand>();
+
+        manager.register_command_channel(tx1);
+        manager.register_command_channel(tx2);
+
+        assert_eq!(manager.command_channel_count(), 2);
+
+        // Explicitly drop rx2's receiver to close the channel
+        drop(rx2);
+
+        // Broadcast - should clean up the closed channel
+        let table_id = Uuid::new_v4();
+        manager.create_table(table_id, "cleanup_test");
+
+        // tx1 should still work
+        assert!(rx1.try_recv().is_ok());
+
+        // Manager should have cleaned up the dead channel
+        assert_eq!(manager.command_channel_count(), 1);
     }
 }

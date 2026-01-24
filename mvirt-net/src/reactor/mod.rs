@@ -367,10 +367,17 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             None,
             None,
             nic_config,
+            None, // No initial tables
         )
     }
 
-    /// Create a new reactor with full inter-reactor communication support
+    /// Create a new reactor with full inter-reactor communication support.
+    ///
+    /// # Parameters
+    /// - `initial_tables`: Optional pre-populated routing tables. When provided,
+    ///   the reactor starts with these tables instead of empty ones. This is used
+    ///   when registering with a RoutingManager to receive the current routing state.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_registry(
         rx_queue: RX,
         tx_queue: TX,
@@ -379,6 +386,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         packet_rx: Option<Receiver<PacketRef>>,
         completion_rx: Option<Receiver<CompletionNotify>>,
         nic_config: Option<NicConfig>,
+        initial_tables: Option<RoutingTables>,
     ) -> (Self, ReactorHandle) {
         // Create eventfd for signaling
         let efd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
@@ -397,7 +405,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             event_fd: event_fd_raw,
             command_rx,
             handshake_rx,
-            routing_tables: RoutingTables::new(),
+            routing_tables: initial_tables.unwrap_or_default(),
             reactor_id: ReactorId::new(),
             registry,
             packet_rx,
@@ -420,6 +428,11 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
     /// Get the reactor's unique ID
     pub fn id(&self) -> ReactorId {
         self.reactor_id
+    }
+
+    /// Get a reference to the reactor's routing tables.
+    pub fn routing_tables(&self) -> &RoutingTables {
+        &self.routing_tables
     }
 
     /// Generate a new unique packet ID
