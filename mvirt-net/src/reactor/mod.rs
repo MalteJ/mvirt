@@ -685,12 +685,15 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             }
                         }
 
-                        // Check for vhost handshake (one-time)
-                        if vhost_state.is_none()
-                            && let Some(ref rx) = self.handshake_rx
+                        // Check for vhost handshake (supports reconnection)
+                        if let Some(ref rx) = self.handshake_rx
                             && let Ok(handshake) = rx.try_recv()
                         {
-                            info!("Received vhost handshake from daemon");
+                            if vhost_state.is_some() {
+                                info!("Received new vhost handshake (VM reconnected)");
+                            } else {
+                                info!("Received vhost handshake from daemon");
+                            }
                             vhost_state = Some(VhostState {
                                 mem: handshake.mem,
                                 vrings: handshake.vrings,
