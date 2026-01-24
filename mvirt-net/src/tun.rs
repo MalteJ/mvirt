@@ -5,6 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::ManuallyDrop;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use tracing::{debug, info, warn};
 
@@ -46,6 +47,7 @@ impl TunDevice {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(libc::O_NONBLOCK)
             .open("/dev/net/tun")?;
 
         let mut ifr = IfReq {
