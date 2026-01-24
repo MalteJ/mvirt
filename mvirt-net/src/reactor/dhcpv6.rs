@@ -241,7 +241,18 @@ fn build_dhcpv6_response(
         .insert(DhcpOption::ServerId(server_duid_bytes));
 
     // Add IA_NA with address if provided
+    // IMPORTANT: We must echo back the client's IAID, not use a hardcoded value
     if let Some(addr) = assigned_ip {
+        // Extract client's IAID from the request's IA_NA option
+        let client_iaid = request
+            .opts()
+            .get(OptionCode::IANA)
+            .and_then(|opt| match opt {
+                DhcpOption::IANA(iana) => Some(iana.id),
+                _ => None,
+            })
+            .unwrap_or(1); // Fallback to 1 if no IA_NA in request
+
         let ia_addr = IAAddr {
             addr,
             preferred_life: PREFERRED_LIFETIME,
@@ -250,7 +261,7 @@ fn build_dhcpv6_response(
         };
 
         let ia_na = IANA {
-            id: 1, // IAID
+            id: client_iaid, // Echo back client's IAID
             t1: PREFERRED_LIFETIME / 2,
             t2: (PREFERRED_LIFETIME * 4) / 5,
             opts: {

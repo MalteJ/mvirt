@@ -1,8 +1,9 @@
-//! ICMPv6 Neighbor Discovery handler for vhost-user interfaces.
+//! ICMPv6 handler for vhost-user interfaces.
 //!
 //! This module handles:
 //! - Neighbor Solicitation (NS) → Neighbor Advertisement (NA) for gateway resolution
 //! - Router Solicitation (RS) → Router Advertisement (RA) for IPv6 configuration
+//! - Echo Request → Echo Reply for gateway ping (fe80::1)
 //!
 //! The RA does NOT include a prefix for SLAAC - VMs must use DHCPv6 for addressing.
 
@@ -48,13 +49,22 @@ pub fn handle_icmpv6_packet(
     let src_addr = ipv6_packet.src_addr();
     let src_mac = eth_frame.src_addr();
 
+    let dst_addr = ipv6_packet.dst_addr();
+
+    // For NS/NA, we need the raw ICMPv6 data to extract the target address
+    // because smoltcp's payload() for NS returns only options, not the target address.
+    let icmpv6_raw = ipv6_packet.payload();
+
     match icmpv6_packet.msg_type() {
         Icmpv6Message::NeighborSolicit => {
-            handle_neighbor_solicitation(nic_config, virtio_hdr, &icmpv6_packet, src_addr, src_mac)
+            handle_neighbor_solicitation(nic_config, virtio_hdr, icmpv6_raw, src_addr, src_mac)
         }
         Icmpv6Message::RouterSolicit => {
             handle_router_solicitation(nic_config, virtio_hdr, src_addr, src_mac)
         }
+        Icmpv6Message::EchoRequest => handle_echo_request(
+            nic_config, virtio_hdr, icmpv6_raw, src_addr, src_mac, dst_addr,
+        ),
         _ => None,
     }
 }
@@ -63,18 +73,25 @@ pub fn handle_icmpv6_packet(
 fn handle_neighbor_solicitation(
     nic_config: &NicConfig,
     virtio_hdr: &[u8],
-    icmpv6_packet: &Icmpv6Packet<&[u8]>,
+    icmpv6_raw: &[u8],
     src_addr: Ipv6Address,
     src_mac: EthernetAddress,
 ) -> Option<Vec<u8>> {
-    // NS packet structure: ICMPv6 header (8 bytes) + target address (16 bytes) + options
-    let data = icmpv6_packet.payload();
-    if data.len() < 20 {
+    // NS packet structure (raw ICMPv6 data):
+    // - Type (1 byte) at offset 0
+    // - Code (1 byte) at offset 1
+    // - Checksum (2 bytes) at offset 2-3
+    // - Reserved (4 bytes) at offset 4-7
+    // - Target Address (16 bytes) at offset 8-23
+    // - Options (variable) starting at offset 24
+
+    // Minimum NS length: type(1) + code(1) + checksum(2) + reserved(4) + target(16) = 24
+    if icmpv6_raw.len() < 24 {
         return None;
     }
 
-    // Skip reserved field (4 bytes after header) and get target address
-    let target_bytes: [u8; 16] = data[4..20].try_into().ok()?;
+    // Get target address at bytes 8-23
+    let target_bytes: [u8; 16] = icmpv6_raw[8..24].try_into().ok()?;
     let target_addr = Ipv6Address::from_bytes(&target_bytes);
 
     // Convert to std Ipv6Addr for comparison
@@ -195,6 +212,111 @@ fn handle_router_solicitation(
     );
 
     build_router_advertisement(nic_config, virtio_hdr, src_addr, src_mac)
+}
+
+/// Handle Echo Request - respond with Echo Reply if destination is gateway.
+fn handle_echo_request(
+    nic_config: &NicConfig,
+    virtio_hdr: &[u8],
+    icmpv6_raw: &[u8],
+    src_addr: Ipv6Address,
+    src_mac: EthernetAddress,
+    dst_addr: Ipv6Address,
+) -> Option<Vec<u8>> {
+    // Echo Request structure (raw ICMPv6 data):
+    // - Type (1 byte) at offset 0 = 128
+    // - Code (1 byte) at offset 1 = 0
+    // - Checksum (2 bytes) at offset 2-3
+    // - Identifier (2 bytes) at offset 4-5
+    // - Sequence Number (2 bytes) at offset 6-7
+    // - Data (variable) starting at offset 8
+
+    // Minimum Echo Request length: type(1) + code(1) + checksum(2) + id(2) + seq(2) = 8
+    if icmpv6_raw.len() < 8 {
+        return None;
+    }
+
+    // Check if destination is our gateway address
+    let dst_v6 = Ipv6Addr::from(dst_addr.0);
+    let gateway_ll = GATEWAY_IPV6_LINK_LOCAL;
+    let gateway_v6 = nic_config.ipv6_gateway;
+
+    let is_for_gateway = dst_v6 == gateway_ll || gateway_v6.map(|g| dst_v6 == g).unwrap_or(false);
+
+    if !is_for_gateway {
+        return None;
+    }
+
+    debug!(
+        src = %src_addr,
+        dst = %dst_addr,
+        "Echo Request for gateway, sending Echo Reply"
+    );
+
+    build_echo_reply(virtio_hdr, icmpv6_raw, src_addr, src_mac)
+}
+
+/// Build an Echo Reply response.
+fn build_echo_reply(
+    virtio_hdr: &[u8],
+    echo_request: &[u8],
+    dst_addr: Ipv6Address,
+    dst_mac: EthernetAddress,
+) -> Option<Vec<u8>> {
+    let gateway_mac = EthernetAddress(GATEWAY_MAC);
+    let gateway_ll = Ipv6Address::from_bytes(&GATEWAY_IPV6_LINK_LOCAL.octets());
+
+    // Echo Reply has same structure as Echo Request, just different type
+    // Copy the entire request and change the type to 129 (Echo Reply)
+    let icmpv6_len = echo_request.len();
+    let ip_len = IPV6_HEADER_SIZE + icmpv6_len;
+    let virtio_hdr_size = virtio_hdr.len();
+    let total_len = virtio_hdr_size + ETHERNET_HEADER_SIZE + ip_len;
+
+    let mut packet = vec![0u8; total_len];
+
+    // Virtio header (zeroed)
+    packet[..virtio_hdr_size].fill(0);
+
+    // Ethernet header
+    let eth_repr = EthernetRepr {
+        src_addr: gateway_mac,
+        dst_addr: dst_mac,
+        ethertype: EthernetProtocol::Ipv6,
+    };
+    let mut eth_frame = EthernetFrame::new_unchecked(&mut packet[virtio_hdr_size..]);
+    eth_repr.emit(&mut eth_frame);
+
+    // IPv6 header
+    let ipv6_repr = Ipv6Repr {
+        src_addr: gateway_ll,
+        dst_addr,
+        next_header: IpProtocol::Icmpv6,
+        payload_len: icmpv6_len,
+        hop_limit: 64,
+    };
+    let mut ipv6_packet = Ipv6Packet::new_unchecked(eth_frame.payload_mut());
+    ipv6_repr.emit(&mut ipv6_packet);
+
+    // ICMPv6 Echo Reply - copy request and change type
+    let icmpv6_start = virtio_hdr_size + ETHERNET_HEADER_SIZE + IPV6_HEADER_SIZE;
+    let icmpv6_data = &mut packet[icmpv6_start..];
+
+    // Copy the echo request data (id, seq, payload)
+    icmpv6_data[..icmpv6_len].copy_from_slice(echo_request);
+
+    // Type: Echo Reply (129)
+    icmpv6_data[0] = 129;
+    // Code: 0 (already copied, but ensure it's 0)
+    icmpv6_data[1] = 0;
+    // Checksum: clear and recompute
+    icmpv6_data[2..4].fill(0);
+
+    // Compute ICMPv6 checksum
+    let checksum = compute_icmpv6_checksum(&gateway_ll, &dst_addr, icmpv6_data);
+    icmpv6_data[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+    Some(packet)
 }
 
 /// Build a Router Advertisement response.
@@ -385,5 +507,53 @@ mod tests {
         // Verify ICMPv6 type is RA (134)
         let icmpv6 = Icmpv6Packet::new_checked(ipv6.payload()).unwrap();
         assert_eq!(icmpv6.msg_type(), Icmpv6Message::RouterAdvert);
+    }
+
+    #[test]
+    fn test_echo_reply() {
+        let virtio_hdr = [0u8; 12];
+
+        // Build a simple Echo Request: type(128) + code(0) + checksum(2) + id(2) + seq(2) + data
+        let mut echo_request = vec![0u8; 16];
+        echo_request[0] = 128; // Type: Echo Request
+        echo_request[1] = 0; // Code
+        // checksum[2..4] = 0 (we don't need valid checksum for this test)
+        echo_request[4..6].copy_from_slice(&0x1234u16.to_be_bytes()); // Identifier
+        echo_request[6..8].copy_from_slice(&0x0001u16.to_be_bytes()); // Sequence
+        echo_request[8..16].copy_from_slice(b"pingdata"); // Data
+
+        let response = build_echo_reply(
+            &virtio_hdr,
+            &echo_request,
+            Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2),
+            EthernetAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
+        );
+
+        assert!(response.is_some());
+        let packet = response.unwrap();
+
+        // Verify Ethernet frame
+        let eth = EthernetFrame::new_checked(&packet[12..]).unwrap();
+        assert_eq!(eth.ethertype(), EthernetProtocol::Ipv6);
+        assert_eq!(eth.src_addr(), EthernetAddress(GATEWAY_MAC));
+
+        // Verify IPv6 header
+        let ipv6 = Ipv6Packet::new_checked(eth.payload()).unwrap();
+        assert_eq!(ipv6.next_header(), IpProtocol::Icmpv6);
+        assert_eq!(ipv6.hop_limit(), 64);
+        assert_eq!(
+            ipv6.src_addr(),
+            Ipv6Address::from_bytes(&GATEWAY_IPV6_LINK_LOCAL.octets())
+        );
+
+        // Verify ICMPv6 type is Echo Reply (129)
+        let icmpv6 = Icmpv6Packet::new_checked(ipv6.payload()).unwrap();
+        assert_eq!(icmpv6.msg_type(), Icmpv6Message::EchoReply);
+
+        // Verify identifier and sequence are preserved
+        let icmpv6_raw = ipv6.payload();
+        assert_eq!(&icmpv6_raw[4..6], &0x1234u16.to_be_bytes());
+        assert_eq!(&icmpv6_raw[6..8], &0x0001u16.to_be_bytes());
+        assert_eq!(&icmpv6_raw[8..16], b"pingdata");
     }
 }
