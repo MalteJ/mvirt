@@ -20,6 +20,19 @@ use vmm_sys_util::event::{
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 const VIRTIO_F_RING_EVENT_IDX: u64 = 1 << 29;
 
+// Virtio-net feature flags
+const VIRTIO_NET_F_CSUM: u64 = 1 << 0;
+const VIRTIO_NET_F_GUEST_CSUM: u64 = 1 << 1;
+const VIRTIO_NET_F_GUEST_TSO4: u64 = 1 << 7;
+const VIRTIO_NET_F_GUEST_TSO6: u64 = 1 << 8;
+const VIRTIO_NET_F_GUEST_ECN: u64 = 1 << 9;
+const VIRTIO_NET_F_GUEST_UFO: u64 = 1 << 10;
+const VIRTIO_NET_F_HOST_TSO4: u64 = 1 << 11;
+const VIRTIO_NET_F_HOST_TSO6: u64 = 1 << 12;
+const VIRTIO_NET_F_HOST_ECN: u64 = 1 << 13;
+const VIRTIO_NET_F_HOST_UFO: u64 = 1 << 14;
+const VIRTIO_NET_F_MRG_RXBUF: u64 = 1 << 15;
+
 /// Number of virtqueues (RX, TX)
 const NUM_QUEUES: usize = 2;
 const QUEUE_SIZE: usize = 256;
@@ -162,6 +175,17 @@ impl VhostUserBackendMut for VhostUserNetBackend {
     fn features(&self) -> u64 {
         VIRTIO_F_VERSION_1
             | VIRTIO_F_RING_EVENT_IDX
+            | VIRTIO_NET_F_CSUM
+            | VIRTIO_NET_F_GUEST_CSUM
+            | VIRTIO_NET_F_GUEST_TSO4
+            | VIRTIO_NET_F_GUEST_TSO6
+            | VIRTIO_NET_F_GUEST_ECN
+            | VIRTIO_NET_F_GUEST_UFO
+            | VIRTIO_NET_F_HOST_TSO4
+            | VIRTIO_NET_F_HOST_TSO6
+            | VIRTIO_NET_F_HOST_ECN
+            | VIRTIO_NET_F_HOST_UFO
+            | VIRTIO_NET_F_MRG_RXBUF
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
     }
 

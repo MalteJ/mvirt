@@ -65,8 +65,9 @@ const USER_DATA_RX_FLAG: u64 = 1 << 63;
 const USER_DATA_EVENT_FLAG: u64 = 1 << 62;
 const USER_DATA_VHOST_TX_FLAG: u64 = 1 << 61;
 const USER_DATA_INCOMING_TUN_FLAG: u64 = 1 << 60;
+const USER_DATA_TUN_POLL_FLAG: u64 = 1 << 59;
 
-/// virtio-net header size for vhost (without VIRTIO_NET_F_MRG_RXBUF)
+/// virtio-net header size (with VIRTIO_NET_F_MRG_RXBUF)
 const VIRTIO_NET_HDR_SIZE: usize = 12;
 
 /// Ethernet header size
@@ -126,6 +127,18 @@ fn patch_virtio_hdr_for_eth_stripping(virtio_hdr: &mut [u8; VIRTIO_NET_HDR_SIZE]
         let adjusted = csum_start.saturating_sub(ETHERNET_HDR_SIZE as u16);
         virtio_hdr[6..8].copy_from_slice(&adjusted.to_le_bytes());
     }
+}
+
+/// Offset of num_buffers field in virtio_net_hdr (with MRG_RXBUF)
+const NUM_BUFFERS_OFFSET: usize = 10;
+
+/// Patches the num_buffers field in virtio_net_hdr in guest memory.
+#[inline]
+fn patch_num_buffers<M: GuestMemory>(mem: &M, hdr_addr: vm_memory::GuestAddress, num_buffers: u16) {
+    let num_buffers_addr = hdr_addr
+        .checked_add(NUM_BUFFERS_OFFSET as u64)
+        .expect("num_buffers address overflow");
+    let _ = mem.write_slice(&num_buffers.to_le_bytes(), num_buffers_addr);
 }
 
 /// Prepares VhostTxInFlight for TUN transmission by:
@@ -559,6 +572,10 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         let mut rx_in_flight: std::collections::HashMap<u64, DescriptorChain> =
             std::collections::HashMap::new();
 
+        // Track RX chains waiting for poll completion (EAGAIN handling)
+        let mut rx_poll_pending: std::collections::HashMap<u64, DescriptorChain> =
+            std::collections::HashMap::new();
+
         // Track in-flight TX writes
         let mut tx_in_flight: std::collections::HashMap<u64, DescriptorChain> =
             std::collections::HashMap::new();
@@ -655,7 +672,8 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             for (user_data, result) in completions {
                 let is_event = (user_data & USER_DATA_EVENT_FLAG) != 0;
                 let is_rx = (user_data & USER_DATA_RX_FLAG) != 0;
-                let chain_id = user_data & !(USER_DATA_RX_FLAG | USER_DATA_EVENT_FLAG);
+                let chain_id = user_data
+                    & !(USER_DATA_RX_FLAG | USER_DATA_EVENT_FLAG | USER_DATA_TUN_POLL_FLAG);
 
                 if is_event {
                     // Eventfd signaled - check for commands
@@ -989,19 +1007,12 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     continue;
                 }
 
-                if is_rx {
-                    // RX completion - packet received from TUN (L3 packet)
-                    let chain = match rx_in_flight.remove(&chain_id) {
-                        Some(c) => c,
-                        None => {
-                            error!(chain_id, "Unknown RX chain_id");
-                            continue;
-                        }
-                    };
-
-                    if result < 0 {
-                        if result == -libc::EAGAIN {
-                            // No data ready - resubmit the same buffer without logging
+                // Handle TUN poll completion (EAGAIN recovery)
+                let is_tun_poll = (user_data & USER_DATA_TUN_POLL_FLAG) != 0;
+                if is_tun_poll {
+                    if let Some(chain) = rx_poll_pending.remove(&chain_id) {
+                        if result >= 0 {
+                            // Poll succeeded - TUN is ready, resubmit ReadFixed
                             let read_e = opcode::ReadFixed::new(
                                 tun_fd,
                                 chain.buffer.ptr,
@@ -1014,6 +1025,40 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             unsafe {
                                 if ring.submission().push(&read_e).is_ok() {
                                     rx_in_flight.insert(chain.chain_id, chain);
+                                } else {
+                                    self.rx_queue.push_used(chain.chain_id, 0);
+                                }
+                            }
+                        } else {
+                            error!(error = -result, chain_id, "TUN poll error");
+                            self.rx_queue.push_used(chain.chain_id, 0);
+                        }
+                    }
+                    continue;
+                }
+
+                if is_rx {
+                    // RX completion - packet received from TUN (L3 packet)
+                    let chain = match rx_in_flight.remove(&chain_id) {
+                        Some(c) => c,
+                        None => {
+                            error!(chain_id, "Unknown RX chain_id");
+                            continue;
+                        }
+                    };
+
+                    if result < 0 {
+                        if result == -libc::EAGAIN {
+                            // No data ready - submit PollAdd instead of immediate resubmit
+                            let poll_e = opcode::PollAdd::new(tun_fd, libc::POLLIN as u32)
+                                .build()
+                                .user_data(chain.chain_id | USER_DATA_TUN_POLL_FLAG);
+
+                            unsafe {
+                                if ring.submission().push(&poll_e).is_ok() {
+                                    rx_poll_pending.insert(chain.chain_id, chain);
+                                } else {
+                                    self.rx_queue.push_used(chain.chain_id, 0);
                                 }
                             }
                             continue;
@@ -1693,14 +1738,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         let mut vring_state = rx_vring.get_mut();
         let queue = vring_state.get_queue_mut();
 
-        // Get an available descriptor from the RX queue
-        let Some(desc_chain) = queue.pop_descriptor_chain(&*mem_guard) else {
-            debug!("No RX buffer available for VM-to-VM packet");
-            return -libc::ENOSPC;
-        };
-
-        let head_index = desc_chain.head_index();
-
         // Check if this is a TunRx packet needing Ethernet header injection
         let tun_rx_info = match &packet.source {
             PacketSource::TunRx {
@@ -1708,6 +1745,24 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             } => Some((*dst_mac, *ethertype)),
             _ => None,
         };
+
+        // Track descriptor chains used for mergeable RX buffers
+        let mut chains_used: Vec<(u16, u32)> = Vec::new();
+        let mut first_hdr_addr: Option<vm_memory::GuestAddress> = None;
+
+        // Helper to return all chains with len=0 on error
+        let return_chains_on_error =
+            |queue: &mut virtio_queue::Queue,
+             mem: &vm_memory::GuestMemoryMmap,
+             chains: &[(u16, u32)],
+             current_head: Option<u16>| {
+                for (head_idx, _) in chains {
+                    let _ = queue.add_used(mem, *head_idx, 0);
+                }
+                if let Some(head) = current_head {
+                    let _ = queue.add_used(mem, head, 0);
+                }
+            };
 
         let written = if let Some((dst_mac, ethertype)) = tun_rx_info {
             // Scatter-gather write for TunRx (zero-copy with Ethernet header injection):
@@ -1762,140 +1817,213 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 VIRTIO_NET_HDR_SIZE,
             );
 
-            for desc in desc_chain {
-                if !desc.is_write_only() {
-                    continue;
-                }
+            // Pop descriptor chains until all packet data is written
+            while written < total_out_len {
+                let Some(desc_chain) = queue.pop_descriptor_chain(&*mem_guard) else {
+                    if chains_used.is_empty() {
+                        debug!("No RX buffer available for TunRx packet");
+                        return -libc::ENOSPC;
+                    }
+                    // Ran out of chains mid-packet
+                    warn!(
+                        written,
+                        total_out_len, "Ran out of RX buffers mid-packet (TunRx)"
+                    );
+                    return_chains_on_error(queue, &mem_guard, &chains_used, None);
+                    let _ = vring_state.signal_used_queue();
+                    return -libc::ENOSPC;
+                };
 
-                let available = desc.len() as usize;
-                let mut desc_offset = 0usize;
+                let head_index = desc_chain.head_index();
+                let chain_start_written = written;
 
-                while desc_offset < available && written < total_out_len {
-                    let to_copy = match phase {
-                        0 => {
-                            // Phase 0: VirtioHdr from patched local buffer
-                            let remaining_in_phase = VIRTIO_NET_HDR_SIZE - phase_offset;
-                            let remaining_in_desc = available - desc_offset;
-                            let to_copy = remaining_in_phase.min(remaining_in_desc);
+                for desc in desc_chain {
+                    if !desc.is_write_only() {
+                        continue;
+                    }
 
-                            if to_copy > 0 {
-                                let src_slice =
-                                    &virtio_hdr_buf[phase_offset..phase_offset + to_copy];
-                                let dst_addr = desc
-                                    .addr()
-                                    .checked_add(desc_offset as u64)
-                                    .expect("Address overflow");
+                    // Track first header address for num_buffers patching
+                    if first_hdr_addr.is_none() {
+                        first_hdr_addr = Some(desc.addr());
+                    }
 
-                                if let Err(e) = mem_guard.write_slice(src_slice, dst_addr) {
-                                    warn!(?e, "Failed to write virtio_hdr to vhost RX buffer");
-                                    let _ = queue.add_used(&*mem_guard, head_index, 0);
-                                    let _ = vring_state.signal_used_queue();
-                                    return -libc::EIO;
+                    let available = desc.len() as usize;
+                    let mut desc_offset = 0usize;
+
+                    while desc_offset < available && written < total_out_len {
+                        let to_copy = match phase {
+                            0 => {
+                                // Phase 0: VirtioHdr from patched local buffer
+                                let remaining_in_phase = VIRTIO_NET_HDR_SIZE - phase_offset;
+                                let remaining_in_desc = available - desc_offset;
+                                let to_copy = remaining_in_phase.min(remaining_in_desc);
+
+                                if to_copy > 0 {
+                                    let src_slice =
+                                        &virtio_hdr_buf[phase_offset..phase_offset + to_copy];
+                                    let dst_addr = desc
+                                        .addr()
+                                        .checked_add(desc_offset as u64)
+                                        .expect("Address overflow");
+
+                                    if let Err(e) = mem_guard.write_slice(src_slice, dst_addr) {
+                                        warn!(?e, "Failed to write virtio_hdr to vhost RX buffer");
+                                        return_chains_on_error(
+                                            queue,
+                                            &mem_guard,
+                                            &chains_used,
+                                            Some(head_index),
+                                        );
+                                        let _ = vring_state.signal_used_queue();
+                                        return -libc::EIO;
+                                    }
                                 }
+                                to_copy
                             }
-                            to_copy
-                        }
-                        1 => {
-                            // Phase 1: EthHdr from stack
-                            let remaining_in_phase = ETHERNET_HDR_SIZE - phase_offset;
-                            let remaining_in_desc = available - desc_offset;
-                            let to_copy = remaining_in_phase.min(remaining_in_desc);
+                            1 => {
+                                // Phase 1: EthHdr from stack
+                                let remaining_in_phase = ETHERNET_HDR_SIZE - phase_offset;
+                                let remaining_in_desc = available - desc_offset;
+                                let to_copy = remaining_in_phase.min(remaining_in_desc);
 
-                            if to_copy > 0 {
-                                let src_slice = &eth_hdr[phase_offset..phase_offset + to_copy];
-                                let dst_addr = desc
-                                    .addr()
-                                    .checked_add(desc_offset as u64)
-                                    .expect("Address overflow");
+                                if to_copy > 0 {
+                                    let src_slice = &eth_hdr[phase_offset..phase_offset + to_copy];
+                                    let dst_addr = desc
+                                        .addr()
+                                        .checked_add(desc_offset as u64)
+                                        .expect("Address overflow");
 
-                                if let Err(e) = mem_guard.write_slice(src_slice, dst_addr) {
-                                    warn!(?e, "Failed to write eth_hdr to vhost RX buffer");
-                                    let _ = queue.add_used(&*mem_guard, head_index, 0);
-                                    let _ = vring_state.signal_used_queue();
-                                    return -libc::EIO;
+                                    if let Err(e) = mem_guard.write_slice(src_slice, dst_addr) {
+                                        warn!(?e, "Failed to write eth_hdr to vhost RX buffer");
+                                        return_chains_on_error(
+                                            queue,
+                                            &mem_guard,
+                                            &chains_used,
+                                            Some(head_index),
+                                        );
+                                        let _ = vring_state.signal_used_queue();
+                                        return -libc::EIO;
+                                    }
                                 }
+                                to_copy
                             }
-                            to_copy
-                        }
-                        2 => {
-                            // Phase 2: IP Payload from source (skip virtio_hdr)
-                            let ip_payload_len = total_src_len.saturating_sub(VIRTIO_NET_HDR_SIZE);
-                            let remaining_in_phase = ip_payload_len - phase_offset;
-                            let remaining_in_desc = available - desc_offset;
-                            let to_copy = remaining_in_phase.min(remaining_in_desc);
+                            2 => {
+                                // Phase 2: IP Payload from source (skip virtio_hdr)
+                                let ip_payload_len =
+                                    total_src_len.saturating_sub(VIRTIO_NET_HDR_SIZE);
+                                let remaining_in_phase = ip_payload_len - phase_offset;
+                                let remaining_in_desc = available - desc_offset;
+                                let to_copy = remaining_in_phase.min(remaining_in_desc);
 
-                            if to_copy > 0 {
-                                // Read from source iovecs (already past virtio_hdr)
-                                let src_data = Self::read_from_iovecs(
-                                    &packet.iovecs,
-                                    &mut src_iov_idx,
-                                    &mut src_iov_offset,
-                                    to_copy,
-                                );
+                                if to_copy > 0 {
+                                    // Read from source iovecs (already past virtio_hdr)
+                                    let src_data = Self::read_from_iovecs(
+                                        &packet.iovecs,
+                                        &mut src_iov_idx,
+                                        &mut src_iov_offset,
+                                        to_copy,
+                                    );
 
-                                let dst_addr = desc
-                                    .addr()
-                                    .checked_add(desc_offset as u64)
-                                    .expect("Address overflow");
+                                    let dst_addr = desc
+                                        .addr()
+                                        .checked_add(desc_offset as u64)
+                                        .expect("Address overflow");
 
-                                if let Err(e) = mem_guard.write_slice(&src_data, dst_addr) {
-                                    warn!(?e, "Failed to write ip_payload to vhost RX buffer");
-                                    let _ = queue.add_used(&*mem_guard, head_index, 0);
-                                    let _ = vring_state.signal_used_queue();
-                                    return -libc::EIO;
+                                    if let Err(e) = mem_guard.write_slice(&src_data, dst_addr) {
+                                        warn!(?e, "Failed to write ip_payload to vhost RX buffer");
+                                        return_chains_on_error(
+                                            queue,
+                                            &mem_guard,
+                                            &chains_used,
+                                            Some(head_index),
+                                        );
+                                        let _ = vring_state.signal_used_queue();
+                                        return -libc::EIO;
+                                    }
                                 }
+                                to_copy
                             }
-                            to_copy
+                            _ => break,
+                        };
+
+                        desc_offset += to_copy;
+                        phase_offset += to_copy;
+                        written += to_copy;
+
+                        // Check if phase complete, advance to next
+                        let phase_len = match phase {
+                            0 => VIRTIO_NET_HDR_SIZE,
+                            1 => ETHERNET_HDR_SIZE,
+                            2 => total_src_len.saturating_sub(VIRTIO_NET_HDR_SIZE),
+                            _ => 0,
+                        };
+
+                        if phase_offset >= phase_len {
+                            phase += 1;
+                            phase_offset = 0;
                         }
-                        _ => break,
-                    };
+                    }
 
-                    desc_offset += to_copy;
-                    phase_offset += to_copy;
-                    written += to_copy;
-
-                    // Check if phase complete, advance to next
-                    let phase_len = match phase {
-                        0 => VIRTIO_NET_HDR_SIZE,
-                        1 => ETHERNET_HDR_SIZE,
-                        2 => total_src_len.saturating_sub(VIRTIO_NET_HDR_SIZE),
-                        _ => 0,
-                    };
-
-                    if phase_offset >= phase_len {
-                        phase += 1;
-                        phase_offset = 0;
+                    if written >= total_out_len {
+                        break;
                     }
                 }
 
-                if written >= total_out_len {
-                    break;
-                }
+                let chain_bytes = (written - chain_start_written) as u32;
+                chains_used.push((head_index, chain_bytes));
             }
 
             debug!(
                 src_len = total_src_len,
                 out_len = written,
+                num_buffers = chains_used.len(),
                 "TunRx: copied with Ethernet header injection"
             );
             written
         } else {
             // Standard VM-to-VM copy (no Ethernet header injection)
             let mut written = 0usize;
-            let mut src_offset = 0usize;
             let mut src_iov_idx = 0usize;
             let mut src_iov_offset = 0usize;
 
             // Calculate total packet length
             let total_packet_len: usize = packet.iovecs.iter().map(|iov| iov.iov_len).sum();
 
-            // Copy from source iovecs to destination descriptors
-            for desc in desc_chain {
-                if desc.is_write_only() {
+            // Pop descriptor chains until all packet data is written
+            while written < total_packet_len {
+                let Some(desc_chain) = queue.pop_descriptor_chain(&*mem_guard) else {
+                    if chains_used.is_empty() {
+                        debug!("No RX buffer available for VM-to-VM packet");
+                        return -libc::ENOSPC;
+                    }
+                    // Ran out of chains mid-packet
+                    warn!(
+                        written,
+                        total_packet_len, "Ran out of RX buffers mid-packet (VM-to-VM)"
+                    );
+                    return_chains_on_error(queue, &mem_guard, &chains_used, None);
+                    let _ = vring_state.signal_used_queue();
+                    return -libc::ENOSPC;
+                };
+
+                let head_index = desc_chain.head_index();
+                let chain_start_written = written;
+
+                // Copy from source iovecs to destination descriptors
+                for desc in desc_chain {
+                    if !desc.is_write_only() {
+                        continue;
+                    }
+
+                    // Track first header address for num_buffers patching
+                    if first_hdr_addr.is_none() {
+                        first_hdr_addr = Some(desc.addr());
+                    }
+
                     let available = desc.len() as usize;
                     let mut desc_offset = 0usize;
 
-                    while desc_offset < available && src_offset < total_packet_len {
+                    while desc_offset < available && written < total_packet_len {
                         if src_iov_idx >= packet.iovecs.len() {
                             break;
                         }
@@ -1918,14 +2046,17 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
                             if let Err(e) = mem_guard.write_slice(src_slice, dst_addr) {
                                 warn!(?e, "Failed to write to vhost RX buffer");
-                                // Return descriptor with error
-                                let _ = queue.add_used(&*mem_guard, head_index, 0);
+                                return_chains_on_error(
+                                    queue,
+                                    &mem_guard,
+                                    &chains_used,
+                                    Some(head_index),
+                                );
                                 let _ = vring_state.signal_used_queue();
                                 return -libc::EIO;
                             }
 
                             desc_offset += to_copy;
-                            src_offset += to_copy;
                             src_iov_offset += to_copy;
                             written += to_copy;
 
@@ -1937,28 +2068,34 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         }
                     }
 
-                    if src_offset >= total_packet_len {
+                    if written >= total_packet_len {
                         break;
                     }
                 }
+
+                let chain_bytes = (written - chain_start_written) as u32;
+                chains_used.push((head_index, chain_bytes));
             }
 
-            if written < total_packet_len {
-                warn!(
-                    written,
-                    expected = total_packet_len,
-                    "Partial copy to vhost RX"
-                );
-            }
-
-            debug!(len = written, "VM-to-VM: copied packet to vhost RX queue");
+            debug!(
+                len = written,
+                num_buffers = chains_used.len(),
+                "VM-to-VM: copied packet to vhost RX queue"
+            );
             written
         };
 
-        // Return the descriptor with the length written
-        if let Err(e) = queue.add_used(&*mem_guard, head_index, written as u32) {
-            warn!(?e, "Failed to add used descriptor to vhost RX");
-            return -libc::EIO;
+        // Patch num_buffers in the first virtio_net_hdr
+        let num_buffers = chains_used.len() as u16;
+        if let Some(hdr_addr) = first_hdr_addr {
+            patch_num_buffers(&*mem_guard, hdr_addr, num_buffers);
+        }
+
+        // Return all descriptor chains with their lengths
+        for (head_idx, len) in &chains_used {
+            if let Err(e) = queue.add_used(&*mem_guard, *head_idx, *len) {
+                warn!(?e, head_idx, "Failed to add used descriptor to vhost RX");
+            }
         }
 
         written as i32
@@ -2229,57 +2366,93 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         let mut vring_state = rx_vring.get_mut();
         let queue = vring_state.get_queue_mut();
 
-        // Get an available descriptor from the RX queue
-        let Some(desc_chain) = queue.pop_descriptor_chain(&*mem_guard) else {
-            warn!("No RX buffer available for vhost injection");
-            return;
-        };
-
-        let head_index = desc_chain.head_index();
+        let packet_len = packet.len();
         let mut written = 0usize;
 
-        // Write packet data to descriptor chain
-        for desc in desc_chain {
-            if desc.is_write_only() {
+        // Track descriptor chains used for mergeable RX buffers
+        let mut chains_used: Vec<(u16, u32)> = Vec::new();
+        let mut first_hdr_addr: Option<vm_memory::GuestAddress> = None;
+
+        // Pop descriptor chains until all packet data is written
+        while written < packet_len {
+            let Some(desc_chain) = queue.pop_descriptor_chain(&*mem_guard) else {
+                if chains_used.is_empty() {
+                    warn!("No RX buffer available for vhost injection");
+                    return;
+                }
+                // Ran out of chains mid-packet - return all chains with len=0
+                warn!(written, packet_len, "Ran out of RX buffers mid-packet");
+                for (head_idx, _) in &chains_used {
+                    let _ = queue.add_used(&*mem_guard, *head_idx, 0);
+                }
+                let _ = vring_state.signal_used_queue();
+                return;
+            };
+
+            let head_index = desc_chain.head_index();
+            let chain_start_written = written;
+
+            // Write packet data to this descriptor chain
+            for desc in desc_chain {
+                if !desc.is_write_only() {
+                    continue;
+                }
+
+                // Track first header address for num_buffers patching
+                if first_hdr_addr.is_none() {
+                    first_hdr_addr = Some(desc.addr());
+                }
+
                 let available = desc.len() as usize;
-                let to_write = std::cmp::min(available, packet.len() - written);
+                let to_write = std::cmp::min(available, packet_len - written);
 
                 if to_write > 0 {
                     if let Err(e) =
                         mem_guard.write_slice(&packet[written..written + to_write], desc.addr())
                     {
                         warn!(?e, "Failed to write to vhost RX buffer");
+                        // Return all chains with len=0
+                        for (head_idx, _) in &chains_used {
+                            let _ = queue.add_used(&*mem_guard, *head_idx, 0);
+                        }
+                        let _ = queue.add_used(&*mem_guard, head_index, 0);
+                        let _ = vring_state.signal_used_queue();
                         return;
                     }
                     written += to_write;
                 }
 
-                if written >= packet.len() {
+                if written >= packet_len {
                     break;
                 }
             }
+
+            let chain_bytes = (written - chain_start_written) as u32;
+            chains_used.push((head_index, chain_bytes));
         }
 
-        if written < packet.len() {
-            warn!(
-                written,
-                expected = packet.len(),
-                "Partial write to vhost RX"
-            );
+        // Patch num_buffers in the first virtio_net_hdr
+        let num_buffers = chains_used.len() as u16;
+        if let Some(hdr_addr) = first_hdr_addr {
+            patch_num_buffers(&*mem_guard, hdr_addr, num_buffers);
         }
 
-        // Return the descriptor with the length written
-        if let Err(e) = queue.add_used(&*mem_guard, head_index, written as u32) {
-            warn!(?e, "Failed to add used descriptor to vhost RX");
-            return;
+        // Return all descriptor chains with their lengths
+        for (head_idx, len) in &chains_used {
+            if let Err(e) = queue.add_used(&*mem_guard, *head_idx, *len) {
+                warn!(?e, head_idx, "Failed to add used descriptor to vhost RX");
+            }
         }
 
-        // Signal the guest
+        // Signal the guest once
         if let Err(e) = vring_state.signal_used_queue() {
             warn!(?e, "Failed to signal vhost RX used queue");
         }
 
-        debug!(len = written, "Injected packet to vhost RX queue");
+        debug!(
+            len = written,
+            num_buffers, "Injected packet to vhost RX queue"
+        );
     }
 }
 
