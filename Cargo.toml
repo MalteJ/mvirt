@@ -18,3 +18,4 @@ strip = true
 [profile.release]
 lto = true
 panic = "abort"
+debug = true  # Keep debug symbols for profiling

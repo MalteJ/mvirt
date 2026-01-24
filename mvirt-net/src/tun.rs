@@ -11,6 +11,12 @@ use tracing::{debug, info, warn};
 
 const TUNSETIFF: nix::libc::Ioctl = 0x400454ca as nix::libc::Ioctl;
 const TUNSETVNETHDRSZ: nix::libc::Ioctl = 0x400454d8 as nix::libc::Ioctl;
+const TUNSETOFFLOAD: nix::libc::Ioctl = 0x400454d0 as nix::libc::Ioctl;
+
+const TUN_F_CSUM: c_uint = 0x01;
+const TUN_F_TSO4: c_uint = 0x02;
+const TUN_F_TSO6: c_uint = 0x04;
+const TUN_F_TSO_ECN: c_uint = 0x08;
 
 /// Size of the virtio_net_hdr structure (12 bytes for v1)
 pub const VNET_HDR_SIZE: usize = 12;
@@ -72,6 +78,14 @@ impl TunDevice {
         // Set the vnet header size
         let vnet_hdr_sz: c_uint = VNET_HDR_SIZE as c_uint;
         let result = unsafe { nix::libc::ioctl(file.as_raw_fd(), TUNSETVNETHDRSZ, &vnet_hdr_sz) };
+
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Enable GSO/TSO offloading
+        let offload_flags: c_uint = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6 | TUN_F_TSO_ECN;
+        let result = unsafe { nix::libc::ioctl(file.as_raw_fd(), TUNSETOFFLOAD, offload_flags) };
 
         if result < 0 {
             return Err(io::Error::last_os_error());
