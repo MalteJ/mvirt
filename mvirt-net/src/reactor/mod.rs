@@ -15,6 +15,7 @@ use crate::virtqueue::{DescriptorChain, RxVirtqueue, TxPacket, TxVirtqueue};
 use io_uring::{IoUring, opcode, types};
 use nix::libc;
 use nix::sys::eventfd::{EfdFlags, EventFd};
+use smallvec::SmallVec;
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, Icmpv4Message, Icmpv4Packet,
     Icmpv4Repr, IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6Packet,
@@ -76,17 +77,21 @@ const ETHERNET_HDR_SIZE: usize = 14;
 /// Must be large enough for DHCP packets (12 + 14 + 20 + 8 + ~548 = ~600 bytes).
 const PEEK_BUF_SIZE: usize = 600;
 
+/// Stack-allocated iovec buffer for typical packet processing (2-3 segments).
+/// Falls back to heap only when more than 4 iovecs are needed.
+type IovecVec = SmallVec<[libc::iovec; 4]>;
+
 /// Strip Ethernet header from iovecs for L3 TUN transmission.
 ///
 /// Input:  iovecs containing [virtio_net_hdr (12)][ethernet (14)][IP packet...]
 /// Output: new iovecs containing [virtio_net_hdr (12)][IP packet...]
 ///
 /// Returns None if the packet is too short or malformed.
-fn strip_ethernet_header(iovecs: &[libc::iovec]) -> Option<Vec<libc::iovec>> {
+fn strip_ethernet_header(iovecs: &[libc::iovec]) -> Option<IovecVec> {
     const SKIP_START: usize = VIRTIO_NET_HDR_SIZE; // 12
     const SKIP_END: usize = VIRTIO_NET_HDR_SIZE + ETHERNET_HDR_SIZE; // 26
 
-    let mut result: Vec<libc::iovec> = Vec::with_capacity(iovecs.len());
+    let mut result: IovecVec = SmallVec::new();
     let mut pos = 0usize;
 
     for iov in iovecs {
@@ -141,7 +146,7 @@ struct VhostState {
 struct VhostTxInFlight {
     head_index: u16,
     total_len: u32,
-    iovecs: Vec<libc::iovec>,
+    iovecs: IovecVec,
     keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
@@ -1130,7 +1135,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Option<VhostTxInFlight> {
         let head_index = desc_chain.head_index();
-        let mut iovecs = Vec::new();
+        let mut iovecs: IovecVec = SmallVec::new();
         let mut total_len = 0u32;
 
         for desc in desc_chain.clone() {
@@ -1477,7 +1482,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
                             let packet = PacketRef::new(
                                 packet_id,
-                                in_flight.iovecs.clone(),
+                                in_flight.iovecs.to_vec(),
                                 source,
                                 in_flight.keep_alive.clone(),
                             );

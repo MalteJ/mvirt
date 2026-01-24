@@ -58,6 +58,9 @@ rand = "0.8"
 # Error handling
 thiserror = "1.0"
 
+# Stack-allocated vectors for hot path
+smallvec = "1.15"
+
 [build-dependencies]
 tonic-prost-build = "0.14"
 
