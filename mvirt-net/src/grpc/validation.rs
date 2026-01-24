@@ -311,15 +311,19 @@ fn parse_mac(s: &str) -> Result<[u8; 6]> {
 }
 
 /// Allocate the next available IPv4 address in a network.
+///
+/// Starts at network + 1 (e.g., 10.0.0.1 for 10.0.0.0/24) since the gateway
+/// uses a link-local address (169.254.0.1) instead of an address from the subnet.
 pub fn allocate_ipv4_address(network: &NetworkData, storage: &Storage) -> Option<Ipv4Addr> {
     let subnet = network.ipv4_subnet?;
     let used = storage.get_used_ipv4_addresses(&network.id).ok()?;
 
-    // Start from network + 2 (skip network and gateway)
+    // Start from network + 1 (skip only network address)
+    // Gateway uses link-local 169.254.0.1, not an address from this subnet
     let network_addr = u32::from(subnet.network());
     let broadcast_addr = u32::from(subnet.broadcast());
 
-    for addr_int in (network_addr + 2)..broadcast_addr {
+    for addr_int in (network_addr + 1)..broadcast_addr {
         let addr = Ipv4Addr::from(addr_int);
         if !used.contains(&addr) {
             return Some(addr);
@@ -330,15 +334,19 @@ pub fn allocate_ipv4_address(network: &NetworkData, storage: &Storage) -> Option
 }
 
 /// Allocate the next available IPv6 address in a network.
+///
+/// Starts at prefix + 1 (e.g., 2001:db8::1 for 2001:db8::/64) since the gateway
+/// uses a link-local address (fe80::1) instead of an address from the prefix.
 pub fn allocate_ipv6_address(network: &NetworkData, storage: &Storage) -> Option<Ipv6Addr> {
     let prefix = network.ipv6_prefix?;
     let used = storage.get_used_ipv6_addresses(&network.id).ok()?;
 
-    // Start from prefix + 2 (skip :: and ::1 which is gateway)
+    // Start from prefix + 1 (skip only :: network address)
+    // Gateway uses link-local fe80::1, not an address from this prefix
     let network_addr = u128::from(prefix.network());
 
     // Limit search to first 65536 addresses
-    for offset in 2u128..65536 {
+    for offset in 1u128..65536 {
         let addr = Ipv6Addr::from(network_addr + offset);
         if !used.contains(&addr) {
             return Some(addr);
@@ -375,5 +383,74 @@ mod tests {
         assert!(parse_mac("invalid").is_err());
         assert!(parse_mac("02:00:00:00:00").is_err());
         assert!(parse_mac("02:00:00:00:00:xx").is_err());
+    }
+
+    #[test]
+    fn test_allocate_ipv4_starts_at_first_usable() {
+        use crate::grpc::storage::{NetworkData, Storage};
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let storage = Storage::in_memory().unwrap();
+
+        // Create network 10.0.0.0/24
+        let network = NetworkData {
+            id: Uuid::new_v4(),
+            name: "test-v4".to_string(),
+            ipv4_enabled: true,
+            ipv4_subnet: Some("10.0.0.0/24".parse().unwrap()),
+            ipv6_enabled: false,
+            ipv6_prefix: None,
+            dns_servers: vec![],
+            ntp_servers: vec![],
+            is_public: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        storage.create_network(&network).unwrap();
+
+        // First allocated IP should be 10.0.0.1 (only skip .0 network address)
+        // Gateway uses link-local 169.254.0.1, not an address from this subnet
+        let first_ip = allocate_ipv4_address(&network, &storage).unwrap();
+        assert_eq!(
+            first_ip,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "First IPv4 should be .1 (gateway uses link-local 169.254.0.1)"
+        );
+    }
+
+    #[test]
+    fn test_allocate_ipv6_starts_at_first_usable() {
+        use crate::grpc::storage::{NetworkData, Storage};
+        use chrono::Utc;
+        use std::net::Ipv6Addr;
+        use uuid::Uuid;
+
+        let storage = Storage::in_memory().unwrap();
+
+        // Create network 2001:db8::/64
+        let network = NetworkData {
+            id: Uuid::new_v4(),
+            name: "test-v6".to_string(),
+            ipv4_enabled: false,
+            ipv4_subnet: None,
+            ipv6_enabled: true,
+            ipv6_prefix: Some("2001:db8::/64".parse().unwrap()),
+            dns_servers: vec![],
+            ntp_servers: vec![],
+            is_public: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        storage.create_network(&network).unwrap();
+
+        // First allocated IP should be 2001:db8::1 (only skip :: network address)
+        // Gateway uses link-local fe80::1, not an address from this prefix
+        let first_ip = allocate_ipv6_address(&network, &storage).unwrap();
+        assert_eq!(
+            first_ip,
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            "First IPv6 should be ::1 (gateway uses link-local fe80::1)"
+        );
     }
 }
