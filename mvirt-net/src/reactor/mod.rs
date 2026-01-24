@@ -704,18 +704,123 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             );
                         }
 
-                        // Process completion notifications
-                        if let Some(ref state) = vhost_state {
-                            self.process_completions(state, &mut vhost_to_vhost_in_flight);
-                        }
+                        // Process all completion notifications (unified handling)
+                        if let Some(ref completion_rx) = self.completion_rx {
+                            while let Ok(completion) = completion_rx.try_recv() {
+                                debug!(
+                                    id = %completion.packet_id(),
+                                    result = completion.result(),
+                                    reactor_id = %self.reactor_id,
+                                    "Received completion notification"
+                                );
 
-                        // Process TunRxComplete notifications (for TUN reactor zero-copy path)
-                        self.process_tun_rx_completions(
-                            &mut tun_rx_in_flight,
-                            &mut ring,
-                            tun_fd,
-                            &mut rx_in_flight,
-                        );
+                                match completion {
+                                    CompletionNotify::VhostToVhostComplete {
+                                        packet_id,
+                                        head_index,
+                                        total_len,
+                                        result,
+                                    }
+                                    | CompletionNotify::VhostTxComplete {
+                                        packet_id,
+                                        head_index,
+                                        total_len,
+                                        result,
+                                    } => {
+                                        if let Some(ref state) = vhost_state {
+                                            // Remove from in-flight tracking
+                                            if vhost_to_vhost_in_flight
+                                                .remove(&packet_id.raw())
+                                                .is_some()
+                                            {
+                                                debug!(
+                                                    packet_id = %packet_id,
+                                                    head_index,
+                                                    total_len,
+                                                    result,
+                                                    "Returning TX descriptor to guest"
+                                                );
+                                                // Return descriptor to guest
+                                                let mem_guard = state.mem.memory();
+                                                let tx_vring = &state.vrings[VHOST_TX_QUEUE];
+                                                let mut vring_state = tx_vring.get_mut();
+                                                let queue = vring_state.get_queue_mut();
+
+                                                let used_len =
+                                                    if result >= 0 { total_len } else { 0 };
+                                                let _ = queue.add_used(
+                                                    &*mem_guard,
+                                                    head_index,
+                                                    used_len,
+                                                );
+                                                let _ = vring_state.signal_used_queue();
+
+                                                if result < 0 {
+                                                    warn!(
+                                                        error = -result,
+                                                        "Packet delivery failed"
+                                                    );
+                                                }
+                                            } else {
+                                                warn!(
+                                                    id = %packet_id,
+                                                    in_flight_count = vhost_to_vhost_in_flight.len(),
+                                                    "Completion for unknown packet"
+                                                );
+                                            }
+                                        } else {
+                                            debug!(
+                                                id = %packet_id,
+                                                "Vhost completion received but no vhost state"
+                                            );
+                                        }
+                                    }
+                                    CompletionNotify::TunRxComplete {
+                                        packet_id,
+                                        chain_id,
+                                        result,
+                                    } => {
+                                        // Remove from in-flight tracking
+                                        if tun_rx_in_flight.remove(&packet_id.raw()).is_some() {
+                                            debug!(
+                                                packet_id = %packet_id,
+                                                chain_id,
+                                                result,
+                                                "TUN reactor: received TunRxComplete, returning buffer"
+                                            );
+
+                                            // Return buffer to pool
+                                            self.rx_queue.push_used(chain_id, result as u32);
+
+                                            // Resubmit RX read
+                                            if let Some(new_chain) = self.rx_queue.pop_available() {
+                                                let read_e = opcode::ReadFixed::new(
+                                                    tun_fd,
+                                                    new_chain.buffer.ptr,
+                                                    new_chain.buffer.len,
+                                                    new_chain.buffer.buf_index,
+                                                )
+                                                .build()
+                                                .user_data(new_chain.chain_id | USER_DATA_RX_FLAG);
+
+                                                unsafe {
+                                                    if ring.submission().push(&read_e).is_ok() {
+                                                        rx_in_flight
+                                                            .insert(new_chain.chain_id, new_chain);
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            warn!(
+                                                packet_id = %packet_id,
+                                                chain_id,
+                                                "TunRxComplete for unknown packet"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // If not shutting down, resubmit eventfd read
@@ -1270,16 +1375,17 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         let tx_vring = &state.vrings[VHOST_TX_QUEUE];
 
         let mut vring_state = tx_vring.get_mut();
-        let queue = vring_state.get_queue_mut();
 
-        let mut descriptors_returned = false;
+        loop {
+            let mut descriptors_returned = false;
 
-        // Create keep_alive reference to prevent guest memory from being unmapped
-        // while packets are in flight (in io_uring or inter-reactor channels)
-        let keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>> =
-            Some(Arc::new(state.mem.clone()));
+            // Create keep_alive reference to prevent guest memory from being unmapped
+            // while packets are in flight (in io_uring or inter-reactor channels)
+            let keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>> =
+                Some(Arc::new(state.mem.clone()));
 
-        while let Some(desc_chain) = queue.pop_descriptor_chain(&*mem_guard) {
+            let queue = vring_state.get_queue_mut();
+            while let Some(desc_chain) = queue.pop_descriptor_chain(&*mem_guard) {
             let Some(in_flight) =
                 Self::desc_chain_to_iovecs(&desc_chain, &mem_guard, keep_alive.clone())
             else {
@@ -1412,14 +1518,19 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             }
         }
 
-        // Only signal used queue if we actually returned descriptors
-        if descriptors_returned {
-            let _ = vring_state.signal_used_queue();
-        }
+            // Only signal used queue if we actually returned descriptors
+            if descriptors_returned {
+                let _ = vring_state.signal_used_queue();
+            }
 
-        // Re-enable notifications for event_idx mode
-        // This tells the guest driver we're ready for more notifications
-        let _ = vring_state.enable_notification();
+            // Re-enable notifications for event_idx mode.
+            // Critical: check if more work arrived while we were processing.
+            // enable_notification() returns Ok(true) if descriptors are pending.
+            match vring_state.enable_notification() {
+                Ok(true) => continue, // More descriptors pending, process them
+                _ => break,           // Queue empty or error, safe to sleep
+            }
+        }
     }
 
     /// Peek at packet headers from iovecs, returning a slice for routing decisions
@@ -1472,7 +1583,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
         // Get an available descriptor from the RX queue
         let Some(desc_chain) = queue.pop_descriptor_chain(&*mem_guard) else {
-            warn!("No RX buffer available for VM-to-VM packet");
+            debug!("No RX buffer available for VM-to-VM packet");
             return -libc::ENOSPC;
         };
 
@@ -1947,143 +2058,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             let source_reactor = packet.source.source_reactor();
             if !registry.send_completion_to(&source_reactor, completion) {
                 warn!(src = %source_reactor, "Failed to send completion to source reactor");
-            }
-        }
-    }
-
-    /// Process completion notifications from other reactors.
-    ///
-    /// When a VM-to-VM packet is delivered, the target reactor sends back
-    /// a CompletionNotify. We use this to return the TX descriptor to the guest.
-    fn process_completions(
-        &self,
-        state: &VhostState,
-        vhost_to_vhost_in_flight: &mut std::collections::HashMap<u64, VhostToVhostInFlight>,
-    ) {
-        let Some(ref completion_rx) = self.completion_rx else {
-            return;
-        };
-
-        let mem_guard = state.mem.memory();
-        let tx_vring = &state.vrings[VHOST_TX_QUEUE];
-
-        while let Ok(completion) = completion_rx.try_recv() {
-            debug!(
-                id = %completion.packet_id(),
-                result = completion.result(),
-                reactor_id = %self.reactor_id,
-                "NIC reactor: received completion notification"
-            );
-
-            match completion {
-                CompletionNotify::VhostToVhostComplete {
-                    packet_id,
-                    head_index,
-                    total_len,
-                    result,
-                }
-                | CompletionNotify::VhostTxComplete {
-                    packet_id,
-                    head_index,
-                    total_len,
-                    result,
-                } => {
-                    // Remove from in-flight tracking
-                    if let Some(_in_flight) = vhost_to_vhost_in_flight.remove(&packet_id.raw()) {
-                        debug!(
-                            packet_id = %packet_id,
-                            head_index,
-                            total_len,
-                            result,
-                            "Returning TX descriptor to guest"
-                        );
-                        // Return descriptor to guest
-                        let mut vring_state = tx_vring.get_mut();
-                        let queue = vring_state.get_queue_mut();
-
-                        let used_len = if result >= 0 { total_len } else { 0 };
-                        let _ = queue.add_used(&*mem_guard, head_index, used_len);
-                        let _ = vring_state.signal_used_queue();
-
-                        if result < 0 {
-                            warn!(error = -result, "Packet delivery failed");
-                        }
-                    } else {
-                        warn!(id = %packet_id, in_flight_count = vhost_to_vhost_in_flight.len(), "Completion for unknown packet");
-                    }
-                }
-                CompletionNotify::TunRxComplete { .. } => {
-                    // TunRxComplete should be handled by process_tun_rx_completions
-                    debug!("TunRxComplete ignored in vhost reactor (handled separately)");
-                }
-            }
-        }
-    }
-
-    /// Process TunRxComplete notifications to return RX buffers to pool.
-    ///
-    /// When a TunRx packet is delivered to a vhost reactor, it sends back
-    /// a TunRxComplete. We use this to return the RX buffer to the pool
-    /// and resubmit a new read.
-    fn process_tun_rx_completions(
-        &mut self,
-        tun_rx_in_flight: &mut std::collections::HashMap<u64, u64>,
-        ring: &mut IoUring,
-        tun_fd: types::Fd,
-        rx_in_flight: &mut std::collections::HashMap<u64, DescriptorChain>,
-    ) {
-        let Some(ref completion_rx) = self.completion_rx else {
-            return;
-        };
-
-        while let Ok(completion) = completion_rx.try_recv() {
-            match completion {
-                CompletionNotify::TunRxComplete {
-                    packet_id,
-                    chain_id,
-                    result,
-                } => {
-                    // Remove from in-flight tracking
-                    if tun_rx_in_flight.remove(&packet_id.raw()).is_some() {
-                        debug!(
-                            packet_id = %packet_id,
-                            chain_id,
-                            result,
-                            "TUN reactor: received TunRxComplete, returning buffer"
-                        );
-
-                        // Return buffer to pool
-                        self.rx_queue.push_used(chain_id, result as u32);
-
-                        // Resubmit RX read
-                        if let Some(new_chain) = self.rx_queue.pop_available() {
-                            let read_e = opcode::ReadFixed::new(
-                                tun_fd,
-                                new_chain.buffer.ptr,
-                                new_chain.buffer.len,
-                                new_chain.buffer.buf_index,
-                            )
-                            .build()
-                            .user_data(new_chain.chain_id | USER_DATA_RX_FLAG);
-
-                            unsafe {
-                                if ring.submission().push(&read_e).is_ok() {
-                                    rx_in_flight.insert(new_chain.chain_id, new_chain);
-                                }
-                            }
-                        }
-                    } else {
-                        warn!(
-                            packet_id = %packet_id,
-                            chain_id,
-                            "TunRxComplete for unknown packet"
-                        );
-                    }
-                }
-                _ => {
-                    // Other completions should not arrive at TUN reactor
-                    warn!(?completion, "Unexpected completion type in TUN reactor");
-                }
             }
         }
     }
