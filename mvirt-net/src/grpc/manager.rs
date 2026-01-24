@@ -47,6 +47,8 @@ struct ManagedNic {
     #[allow(dead_code)]
     data: NicData,
     router: Router,
+    /// Routing table ID for this NIC
+    table_id: Uuid,
 }
 
 /// NetworkManager manages the lifecycle of routers for networks and NICs.
@@ -293,13 +295,14 @@ impl NetworkManager {
         }
 
         // Add VM-to-VM routes for other NICs in the same network
-        self.add_vm_to_vm_routes(&nics_guard, &router, nic, network);
+        self.add_vm_to_vm_routes(&nics_guard, &router, nic, network, table_id);
 
         nics_guard.insert(
             nic.id,
             ManagedNic {
                 data: nic.clone(),
                 router,
+                table_id,
             },
         );
 
@@ -389,9 +392,8 @@ impl NetworkManager {
         router: &Router,
         nic: &NicData,
         network: &NetworkData,
+        new_nic_table_id: Uuid,
     ) {
-        let table_id = Uuid::new_v4();
-
         // For each existing NIC in the same network, add bidirectional routes
         for (other_id, other_managed) in nics_guard.iter() {
             if *other_id == nic.id {
@@ -406,7 +408,7 @@ impl NetworkManager {
             if let Some(other_ipv4) = other_managed.data.ipv4_address {
                 let prefix = Ipv4Net::new(other_ipv4, 32).unwrap();
                 router.reactor_handle().add_route(
-                    table_id,
+                    new_nic_table_id,
                     IpPrefix::V4(prefix),
                     RouteTarget::reactor(other_managed.router.reactor_id()),
                 );
@@ -415,10 +417,8 @@ impl NetworkManager {
             // Add route from existing NIC to new NIC
             if let Some(nic_ipv4) = nic.ipv4_address {
                 let prefix = Ipv4Net::new(nic_ipv4, 32).unwrap();
-                // Get the table ID for the other router
-                // Note: We use a fixed naming convention for table lookup
                 other_managed.router.reactor_handle().add_route(
-                    table_id,
+                    other_managed.table_id,
                     IpPrefix::V4(prefix),
                     RouteTarget::reactor(router.reactor_id()),
                 );

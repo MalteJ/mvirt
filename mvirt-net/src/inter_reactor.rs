@@ -103,6 +103,10 @@ pub enum PacketSource {
         total_len: u32,
         /// Reactor that owns this packet.
         source_reactor: ReactorId,
+        /// Destination MAC address (target VM's MAC).
+        dst_mac: [u8; 6],
+        /// Source MAC address (router's MAC).
+        src_mac: [u8; 6],
     },
 }
 

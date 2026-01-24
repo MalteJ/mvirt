@@ -981,7 +981,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             PacketSource::VhostToVhost {
                                 head_index,
                                 total_len,
-                                source_reactor: _,
+                                ..
                             } => CompletionNotify::VhostToVhostComplete {
                                 packet_id: in_flight.packet_id,
                                 head_index: *head_index,
@@ -1626,11 +1626,18 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         // Clone registry to avoid borrow conflicts
                         let registry_opt = self.registry.clone();
                         if let Some(registry) = registry_opt {
+                            // Lookup destination VM's MAC address for header rewriting
+                            let dst_mac = registry
+                                .get_mac_for_reactor(&target_reactor_id)
+                                .unwrap_or([0xff; 6]); // Fallback: broadcast
+
                             let packet_id = self.next_packet_id();
                             let source = PacketSource::VhostToVhost {
                                 head_index: in_flight.head_index,
                                 total_len: in_flight.total_len,
                                 source_reactor: self.reactor_id,
+                                dst_mac,
+                                src_mac: GATEWAY_MAC,
                             };
 
                             let packet = PacketRef::new(
@@ -1756,6 +1763,14 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             PacketSource::TunRx {
                 dst_mac, ethertype, ..
             } => Some((*dst_mac, *ethertype)),
+            _ => None,
+        };
+
+        // Check if this is a VM-to-VM packet needing MAC rewriting
+        let vhost_to_vhost_macs = match &packet.source {
+            PacketSource::VhostToVhost {
+                dst_mac, src_mac, ..
+            } => Some((*dst_mac, *src_mac)),
             _ => None,
         };
 
@@ -2090,6 +2105,28 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 chains_used.push((head_index, chain_bytes));
             }
 
+            // Patch MAC addresses in Ethernet header for VM-to-VM packets
+            // Ethernet header starts at offset VIRTIO_NET_HDR_SIZE (12 bytes)
+            // dst_mac: bytes 0-5, src_mac: bytes 6-11
+            if let (Some((dst_mac, src_mac)), Some(hdr_addr)) =
+                (vhost_to_vhost_macs, first_hdr_addr)
+            {
+                let eth_addr = hdr_addr
+                    .checked_add(VIRTIO_NET_HDR_SIZE as u64)
+                    .expect("Address overflow");
+                // Write dst_mac (bytes 0-5)
+                let _ = mem_guard.write_slice(&dst_mac, eth_addr);
+                // Write src_mac (bytes 6-11)
+                if let Some(src_addr) = eth_addr.checked_add(6) {
+                    let _ = mem_guard.write_slice(&src_mac, src_addr);
+                }
+                debug!(
+                    dst_mac = ?dst_mac,
+                    src_mac = ?src_mac,
+                    "VM-to-VM: patched Ethernet MAC addresses"
+                );
+            }
+
             debug!(
                 len = written,
                 num_buffers = chains_used.len(),
@@ -2205,18 +2242,14 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 PacketSource::VhostToVhost {
                     head_index,
                     total_len,
-                    source_reactor: _,
+                    ..
                 } => CompletionNotify::VhostToVhostComplete {
                     packet_id: packet.id,
                     head_index: *head_index,
                     total_len: *total_len,
                     result,
                 },
-                PacketSource::TunRx {
-                    chain_id,
-                    source_reactor: _,
-                    ..
-                } => CompletionNotify::TunRxComplete {
+                PacketSource::TunRx { chain_id, .. } => CompletionNotify::TunRxComplete {
                     packet_id: packet.id,
                     chain_id: *chain_id,
                     result,
@@ -2339,7 +2372,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             PacketSource::VhostToVhost {
                 head_index,
                 total_len,
-                source_reactor: _,
+                ..
             } => CompletionNotify::VhostToVhostComplete {
                 packet_id: packet.id,
                 head_index: *head_index,
