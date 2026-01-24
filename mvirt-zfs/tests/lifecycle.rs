@@ -638,10 +638,10 @@ mod tests {
             .await
             .expect("Failed to ensure base dataset");
 
-        // Create base ZVOL
-        zfs.create_base_zvol(&template_id, size_bytes)
+        // Create template ZVOL
+        zfs.create_template_zvol(&template_id, size_bytes)
             .await
-            .expect("Failed to create base ZVOL");
+            .expect("Failed to create template ZVOL");
 
         // Create template snapshot
         let snap_path = zfs
@@ -650,10 +650,10 @@ mod tests {
             .expect("Failed to create template snapshot");
 
         // Store template
-        let template_entry = mvirt_zfs::store::TemplateEntry::new_from_import(
+        let template_entry = mvirt_zfs::store::TemplateEntry::new(
             template_id.clone(),
             template_name.to_string(),
-            zfs.base_zvol_path(&template_id),
+            zfs.template_zfs_path(&template_id),
             snap_path,
             size_bytes,
         );
@@ -667,7 +667,7 @@ mod tests {
         let volume_name = "test-gc-volume";
 
         let vol_info = zfs
-            .clone_to_volume(&template_id, &volume_id)
+            .clone_template_to_volume(&template_id, &volume_id)
             .await
             .expect("Failed to clone");
 
@@ -707,7 +707,7 @@ mod tests {
         assert_eq!(dep_count, 1, "Should have 1 dependent volume");
 
         // Base ZVOL should still exist
-        let base_zvol = zfs.base_zvol_path(&template_id);
+        let base_zvol = zfs.template_zfs_path(&template_id);
         assert!(
             zfs_exists(&base_zvol),
             "Base ZVOL should still exist (volume depends on it): {}",
@@ -734,9 +734,9 @@ mod tests {
         assert_eq!(dep_count_after, 0, "No dependent volumes");
 
         if !tpl_exists && dep_count_after == 0 {
-            zfs.delete_base_zvol(&template_id)
+            zfs.destroy_recursive(&zfs.template_zfs_path(&template_id))
                 .await
-                .expect("Failed to GC base ZVOL");
+                .expect("Failed to GC template ZVOL");
         }
 
         assert!(
