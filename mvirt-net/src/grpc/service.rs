@@ -204,6 +204,12 @@ impl NetService for NetServiceImpl {
             .create_network(&network)
             .map_err(storage_err_to_status)?;
 
+        // Add kernel routes if this is a public network
+        self.manager
+            .add_public_network_routes(&network)
+            .await
+            .map_err(manager_err_to_status)?;
+
         info!(id = %network.id, name = %network.name, "Network created");
         self.audit
             .network_created(&network.id.to_string(), &network.name);
@@ -354,6 +360,12 @@ impl NetService for NetServiceImpl {
                 nics_deleted += 1;
             }
         }
+
+        // Remove kernel routes if this was a public network
+        self.manager
+            .remove_public_network_routes(&network)
+            .await
+            .map_err(manager_err_to_status)?;
 
         // Delete network
         let deleted = self

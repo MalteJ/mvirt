@@ -6,9 +6,9 @@ use crate::router::{Router, VhostConfig};
 use crate::routing::{IpPrefix, RouteTarget};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nix::libc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -426,11 +426,10 @@ impl NetworkManager {
         }
     }
 
-    /// Sync public network routes to TUN.
+    /// Reconcile kernel routes for public networks.
     ///
-    /// This adds both:
-    /// - Kernel routes via rtnetlink (for return traffic from the network stack)
-    /// - Internal LPM routes (for packet routing within mvirt-net)
+    /// Adds routes for public networks that don't exist yet,
+    /// and removes routes that no longer belong to any public network.
     async fn sync_public_network_routes(&self) -> Result<()> {
         let tun_guard = self.tun_router.lock().await;
         let table_guard = self.tun_table_id.lock().await;
@@ -439,46 +438,161 @@ impl NetworkManager {
             let networks = self.storage.list_public_networks()?;
             let tun_if_index = router.tun_if_index();
 
-            for network in networks {
-                // Add IPv4 subnet routes
+            // Collect desired subnets
+            let mut desired_v4: HashSet<Ipv4Net> = HashSet::new();
+            let mut desired_v6: HashSet<Ipv6Net> = HashSet::new();
+
+            for network in &networks {
                 if let Some(subnet) = network.ipv4_subnet {
-                    // Add kernel route via rtnetlink
-                    if let Err(e) = Self::add_kernel_route_v4(tun_if_index, subnet).await {
-                        warn!(subnet = %subnet, error = %e, "Failed to add kernel route");
-                    }
-
-                    // Add internal LPM route
-                    router.reactor_handle().add_route(
-                        table_id,
-                        IpPrefix::V4(subnet),
-                        RouteTarget::Tun {
-                            if_index: tun_if_index,
-                        },
-                    );
-                    debug!(subnet = %subnet, "Added public network subnet to TUN");
+                    desired_v4.insert(subnet);
                 }
-
-                // Add IPv6 prefix routes
                 if let Some(prefix) = network.ipv6_prefix {
-                    // Add kernel route via rtnetlink
-                    if let Err(e) = Self::add_kernel_route_v6(tun_if_index, prefix).await {
-                        warn!(prefix = %prefix, error = %e, "Failed to add IPv6 kernel route");
-                    }
-
-                    // Add internal LPM route
-                    router.reactor_handle().add_route(
-                        table_id,
-                        IpPrefix::V6(prefix),
-                        RouteTarget::Tun {
-                            if_index: tun_if_index,
-                        },
-                    );
-                    debug!(prefix = %prefix, "Added public network IPv6 prefix to TUN");
+                    desired_v6.insert(prefix);
                 }
             }
+
+            // Get current routes via TUN device
+            let (current_v4, current_v6) =
+                Self::get_kernel_routes_for_interface(tun_if_index).await?;
+
+            // Add missing routes
+            for subnet in &desired_v4 {
+                if !current_v4.contains(subnet)
+                    && let Err(e) = Self::add_kernel_route_v4(tun_if_index, *subnet).await
+                {
+                    warn!(subnet = %subnet, error = %e, "Failed to add kernel route");
+                }
+                // Always update internal LPM route
+                router.reactor_handle().add_route(
+                    table_id,
+                    IpPrefix::V4(*subnet),
+                    RouteTarget::Tun {
+                        if_index: tun_if_index,
+                    },
+                );
+            }
+
+            for prefix in &desired_v6 {
+                if !current_v6.contains(prefix)
+                    && let Err(e) = Self::add_kernel_route_v6(tun_if_index, *prefix).await
+                {
+                    warn!(prefix = %prefix, error = %e, "Failed to add IPv6 kernel route");
+                }
+                router.reactor_handle().add_route(
+                    table_id,
+                    IpPrefix::V6(*prefix),
+                    RouteTarget::Tun {
+                        if_index: tun_if_index,
+                    },
+                );
+            }
+
+            // Remove stale routes
+            for subnet in &current_v4 {
+                if !desired_v4.contains(subnet) {
+                    info!(subnet = %subnet, "Removing stale kernel route");
+                    if let Err(e) = Self::delete_kernel_route_v4(tun_if_index, *subnet).await {
+                        warn!(subnet = %subnet, error = %e, "Failed to delete stale kernel route");
+                    }
+                }
+            }
+
+            for prefix in &current_v6 {
+                if !desired_v6.contains(prefix) {
+                    info!(prefix = %prefix, "Removing stale IPv6 kernel route");
+                    if let Err(e) = Self::delete_kernel_route_v6(tun_if_index, *prefix).await {
+                        warn!(prefix = %prefix, error = %e, "Failed to delete stale IPv6 kernel route");
+                    }
+                }
+            }
+
+            info!(
+                v4_routes = desired_v4.len(),
+                v6_routes = desired_v6.len(),
+                stale_v4 = current_v4.difference(&desired_v4).count(),
+                stale_v6 = current_v6.difference(&desired_v6).count(),
+                "Public network routes reconciled"
+            );
         }
 
         Ok(())
+    }
+
+    /// Query kernel routing table for routes via a specific interface.
+    async fn get_kernel_routes_for_interface(
+        if_index: u32,
+    ) -> io::Result<(HashSet<Ipv4Net>, HashSet<Ipv6Net>)> {
+        use futures::TryStreamExt;
+        use netlink_packet_route::route::RouteAttribute;
+
+        let (connection, handle, _) = rtnetlink::new_connection().map_err(io::Error::other)?;
+        tokio::spawn(connection);
+
+        let mut v4_routes = HashSet::new();
+        let mut v6_routes = HashSet::new();
+
+        // Get IPv4 routes
+        let mut v4_stream = handle.route().get(rtnetlink::IpVersion::V4).execute();
+        while let Some(route) = v4_stream.try_next().await.map_err(io::Error::other)? {
+            // Check if route uses our interface
+            let uses_if = route
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Oif(idx) if *idx == if_index));
+
+            if uses_if
+                && let Some((addr, prefix_len)) = Self::extract_v4_destination(&route)
+                && let Ok(net) = Ipv4Net::new(addr, prefix_len)
+            {
+                v4_routes.insert(net);
+            }
+        }
+
+        // Get IPv6 routes
+        let mut v6_stream = handle.route().get(rtnetlink::IpVersion::V6).execute();
+        while let Some(route) = v6_stream.try_next().await.map_err(io::Error::other)? {
+            let uses_if = route
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Oif(idx) if *idx == if_index));
+
+            if uses_if
+                && let Some((addr, prefix_len)) = Self::extract_v6_destination(&route)
+                && let Ok(net) = Ipv6Net::new(addr, prefix_len)
+            {
+                v6_routes.insert(net);
+            }
+        }
+
+        Ok((v4_routes, v6_routes))
+    }
+
+    fn extract_v4_destination(
+        route: &netlink_packet_route::route::RouteMessage,
+    ) -> Option<(Ipv4Addr, u8)> {
+        use netlink_packet_route::route::{RouteAddress, RouteAttribute};
+
+        let prefix_len = route.header.destination_prefix_length;
+        for attr in &route.attributes {
+            if let RouteAttribute::Destination(RouteAddress::Inet(v4)) = attr {
+                return Some((*v4, prefix_len));
+            }
+        }
+        None
+    }
+
+    fn extract_v6_destination(
+        route: &netlink_packet_route::route::RouteMessage,
+    ) -> Option<(Ipv6Addr, u8)> {
+        use netlink_packet_route::route::{RouteAddress, RouteAttribute};
+
+        let prefix_len = route.header.destination_prefix_length;
+        for attr in &route.attributes {
+            if let RouteAttribute::Destination(RouteAddress::Inet6(v6)) = attr {
+                return Some((*v6, prefix_len));
+            }
+        }
+        None
     }
 
     /// Add a kernel route via rtnetlink.
@@ -531,6 +645,154 @@ impl NetworkManager {
             }
             Err(e) => Err(io::Error::other(e)),
         }
+    }
+
+    /// Delete an IPv4 kernel route via rtnetlink.
+    async fn delete_kernel_route_v4(if_index: u32, subnet: Ipv4Net) -> io::Result<()> {
+        use netlink_packet_route::AddressFamily;
+        use netlink_packet_route::route::{
+            RouteAddress, RouteAttribute, RouteHeader, RouteMessage,
+        };
+
+        let (connection, handle, _) = rtnetlink::new_connection().map_err(io::Error::other)?;
+        tokio::spawn(connection);
+
+        let mut message = RouteMessage::default();
+        message.header.address_family = AddressFamily::Inet;
+        message.header.destination_prefix_length = subnet.prefix_len();
+        message.header.table = RouteHeader::RT_TABLE_MAIN;
+        message
+            .attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet(
+                subnet.addr(),
+            )));
+        message.attributes.push(RouteAttribute::Oif(if_index));
+
+        match handle.route().del(message).execute().await {
+            Ok(()) => {
+                info!(subnet = %subnet, if_index, "Kernel route deleted");
+                Ok(())
+            }
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::ESRCH => {
+                debug!(subnet = %subnet, "Kernel route does not exist");
+                Ok(())
+            }
+            Err(e) => Err(io::Error::other(e)),
+        }
+    }
+
+    /// Delete an IPv6 kernel route via rtnetlink.
+    async fn delete_kernel_route_v6(if_index: u32, prefix: Ipv6Net) -> io::Result<()> {
+        use netlink_packet_route::AddressFamily;
+        use netlink_packet_route::route::{
+            RouteAddress, RouteAttribute, RouteHeader, RouteMessage,
+        };
+
+        let (connection, handle, _) = rtnetlink::new_connection().map_err(io::Error::other)?;
+        tokio::spawn(connection);
+
+        let mut message = RouteMessage::default();
+        message.header.address_family = AddressFamily::Inet6;
+        message.header.destination_prefix_length = prefix.prefix_len();
+        message.header.table = RouteHeader::RT_TABLE_MAIN;
+        message
+            .attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                prefix.addr(),
+            )));
+        message.attributes.push(RouteAttribute::Oif(if_index));
+
+        match handle.route().del(message).execute().await {
+            Ok(()) => {
+                info!(prefix = %prefix, if_index, "IPv6 kernel route deleted");
+                Ok(())
+            }
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::ESRCH => {
+                debug!(prefix = %prefix, "IPv6 kernel route does not exist");
+                Ok(())
+            }
+            Err(e) => Err(io::Error::other(e)),
+        }
+    }
+
+    /// Add kernel routes for a public network's subnets.
+    pub async fn add_public_network_routes(&self, network: &NetworkData) -> Result<()> {
+        if !network.is_public {
+            return Ok(());
+        }
+
+        let tun_guard = self.tun_router.lock().await;
+        let table_guard = self.tun_table_id.lock().await;
+
+        if let (Some(router), Some(table_id)) = (tun_guard.as_ref(), *table_guard) {
+            let tun_if_index = router.tun_if_index();
+
+            if let Some(subnet) = network.ipv4_subnet {
+                if let Err(e) = Self::add_kernel_route_v4(tun_if_index, subnet).await {
+                    warn!(subnet = %subnet, error = %e, "Failed to add kernel route");
+                }
+                router.reactor_handle().add_route(
+                    table_id,
+                    IpPrefix::V4(subnet),
+                    RouteTarget::Tun {
+                        if_index: tun_if_index,
+                    },
+                );
+                info!(subnet = %subnet, "Added public network route");
+            }
+
+            if let Some(prefix) = network.ipv6_prefix {
+                if let Err(e) = Self::add_kernel_route_v6(tun_if_index, prefix).await {
+                    warn!(prefix = %prefix, error = %e, "Failed to add IPv6 kernel route");
+                }
+                router.reactor_handle().add_route(
+                    table_id,
+                    IpPrefix::V6(prefix),
+                    RouteTarget::Tun {
+                        if_index: tun_if_index,
+                    },
+                );
+                info!(prefix = %prefix, "Added public network IPv6 route");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove kernel routes for a public network's subnets.
+    pub async fn remove_public_network_routes(&self, network: &NetworkData) -> Result<()> {
+        if !network.is_public {
+            return Ok(());
+        }
+
+        let tun_guard = self.tun_router.lock().await;
+        let table_guard = self.tun_table_id.lock().await;
+
+        if let (Some(router), Some(table_id)) = (tun_guard.as_ref(), *table_guard) {
+            let tun_if_index = router.tun_if_index();
+
+            if let Some(subnet) = network.ipv4_subnet {
+                if let Err(e) = Self::delete_kernel_route_v4(tun_if_index, subnet).await {
+                    warn!(subnet = %subnet, error = %e, "Failed to delete kernel route");
+                }
+                router
+                    .reactor_handle()
+                    .remove_route(table_id, IpPrefix::V4(subnet));
+                info!(subnet = %subnet, "Removed public network route");
+            }
+
+            if let Some(prefix) = network.ipv6_prefix {
+                if let Err(e) = Self::delete_kernel_route_v6(tun_if_index, prefix).await {
+                    warn!(prefix = %prefix, error = %e, "Failed to delete IPv6 kernel route");
+                }
+                router
+                    .reactor_handle()
+                    .remove_route(table_id, IpPrefix::V6(prefix));
+                info!(prefix = %prefix, "Removed public network IPv6 route");
+            }
+        }
+
+        Ok(())
     }
 
     /// Shutdown the manager and all routers.

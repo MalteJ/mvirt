@@ -7,6 +7,7 @@ edition = "2024"
 io-uring = "0.7"
 nix = { version = "0.29", features = ["ioctl", "net", "event", "poll"] }
 rtnetlink = "0.14"
+netlink-packet-route = "0.19"
 tokio = { version = "1", features = ["rt", "macros", "signal", "time", "sync"] }
 futures = "0.3"
 smoltcp = { version = "0.11", default-features = false, features = [
