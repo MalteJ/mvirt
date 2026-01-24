@@ -206,7 +206,7 @@ mod tests {
         println!("Template in DB: id={}, name={}", template.id, template.name);
 
         // Verify base ZVOL exists
-        let base_zvol = zfs.base_zvol_path(&template.id);
+        let base_zvol = zfs.template_zfs_path(&template.id);
         assert!(
             zfs_exists(&base_zvol),
             "Base ZVOL should exist: {}",
@@ -230,7 +230,7 @@ mod tests {
         let volume_id = uuid::Uuid::new_v4().to_string();
 
         let vol_info = zfs
-            .clone_to_volume(&template.id, &volume_id)
+            .clone_template_to_volume(&template.id, &volume_id)
             .await
             .expect("Failed to clone template");
 
@@ -297,23 +297,12 @@ mod tests {
             .await
             .expect("Failed to create snapshot");
 
-        // First create ZFS snapshot entry
-        let zfs_snapshot_entry = mvirt_zfs::store::ZfsSnapshotEntry::new(
-            zfs_snap_id.clone(),
-            volume_id.clone(),
-            zfs_snap_id.clone(), // zfs_name is the UUID used in the ZFS path
-        );
-        store
-            .create_zfs_snapshot(&zfs_snapshot_entry)
-            .await
-            .expect("Failed to store ZFS snapshot");
-
-        // Then create mvirt snapshot entry referencing the ZFS snapshot
+        // Create mvirt snapshot entry
         let snapshot_entry = mvirt_zfs::store::SnapshotEntry::new(
             mvirt_snap_id.clone(),
             volume_id.clone(),
             snapshot_name.to_string(),
-            zfs_snap_id.clone(), // zfs_snapshot_id references zfs_snapshots table
+            zfs_snap_id.clone(), // zfs_name is the UUID used in the ZFS path
         );
 
         store
@@ -353,7 +342,7 @@ mod tests {
 
         // Clone snapshot to new base ZVOL
         let snap_path = format!("{}@{}", zfs.volume_zfs_path(&volume_id), zfs_snap_id);
-        zfs.clone_snapshot(&snap_path, &zfs.base_zvol_path(&new_template_id))
+        zfs.clone_snapshot(&snap_path, &zfs.template_zfs_path(&new_template_id))
             .await
             .expect("Failed to clone snapshot to base");
 
@@ -364,10 +353,10 @@ mod tests {
             .expect("Failed to create template snapshot");
 
         // Store new template
-        let new_template_entry = mvirt_zfs::store::TemplateEntry::new_from_import(
+        let new_template_entry = mvirt_zfs::store::TemplateEntry::new(
             new_template_id.clone(),
             new_template_name.to_string(),
-            zfs.base_zvol_path(&new_template_id),
+            zfs.template_zfs_path(&new_template_id),
             new_snap_path.clone(),
             template.size_bytes,
         );
@@ -392,7 +381,7 @@ mod tests {
         println!("New template in DB: {}", new_tpl_db.name);
 
         // Verify new base ZVOL and snapshot exist
-        let new_base = zfs.base_zvol_path(&new_template_id);
+        let new_base = zfs.template_zfs_path(&new_template_id);
         assert!(
             zfs_exists(&new_base),
             "New base ZVOL should exist: {}",
@@ -432,9 +421,9 @@ mod tests {
             "New template should have no dependent volumes"
         );
 
-        zfs.delete_base_zvol(&new_template_id)
+        zfs.destroy_recursive(&zfs.template_zfs_path(&new_template_id))
             .await
-            .expect("Failed to GC new base ZVOL");
+            .expect("Failed to GC new template ZVOL");
 
         assert!(
             !zfs_exists(&new_base),
@@ -448,35 +437,17 @@ mod tests {
 
         let _origin_template_id = vol_db.origin_template_id.clone();
 
-        // First delete all mvirt snapshots and their backing zfs_snapshots
+        // First delete all mvirt snapshots from database
         let snapshots = store
             .list_snapshots(&volume_id)
             .await
             .expect("Failed to list snapshots");
         for snap in &snapshots {
-            // Delete mvirt snapshot
             store
                 .delete_snapshot(&volume_id, &snap.name)
                 .await
                 .expect("Failed to delete snapshot");
-
-            // Check ref count for the zfs_snapshot
-            let ref_count = store
-                .count_zfs_snapshot_refs(&snap.zfs_snapshot_id)
-                .await
-                .expect("Failed to count refs");
-
-            // If no more references, delete the zfs_snapshot entry
-            if ref_count == 0 {
-                store
-                    .delete_zfs_snapshot(&snap.zfs_snapshot_id)
-                    .await
-                    .expect("Failed to delete zfs_snapshot");
-            }
-            println!(
-                "  Deleted snapshot: {} (refs remaining: {})",
-                snap.name, ref_count
-            );
+            println!("  Deleted snapshot: {}", snap.name);
         }
 
         // Delete from ZFS (recursive, includes snapshots)
@@ -552,10 +523,10 @@ mod tests {
 
         if !tpl_exists && dep_count == 0 {
             // Safe to GC
-            println!("GC: Deleting orphaned base ZVOL...");
-            zfs.delete_base_zvol(&template.id)
+            println!("GC: Deleting orphaned template ZVOL...");
+            zfs.destroy_recursive(&zfs.template_zfs_path(&template.id))
                 .await
-                .expect("Failed to delete base ZVOL");
+                .expect("Failed to delete template ZVOL");
         }
 
         // Verify base ZVOL is gone
@@ -632,11 +603,6 @@ mod tests {
         let template_id = uuid::Uuid::new_v4().to_string();
         let template_name = "test-gc-template";
         let size_bytes = 1024 * 1024 * 100; // 100MB
-
-        // Ensure base dataset exists
-        zfs.ensure_base_dataset()
-            .await
-            .expect("Failed to ensure base dataset");
 
         // Create template ZVOL
         zfs.create_template_zvol(&template_id, size_bytes)
