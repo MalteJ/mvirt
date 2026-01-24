@@ -42,9 +42,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --target x86_64-unknown-linux-gnu -- -D warnings
 
-      # Use native target for tests
+      # Use native target for tests (sudo needed for TUN/TAP tests)
       - name: Test
-        run: cargo test --workspace --target x86_64-unknown-linux-gnu
+        run: sudo -E cargo test --workspace --target x86_64-unknown-linux-gnu
 
   build:
     name: Build ISO
