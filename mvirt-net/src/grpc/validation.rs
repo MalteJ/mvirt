@@ -87,6 +87,7 @@ pub fn ipv6_prefixes_overlap(a: &Ipv6Net, b: &Ipv6Net) -> bool {
 }
 
 /// Validate network creation request.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_create_network(
     name: &str,
     ipv4_enabled: bool,
@@ -182,6 +183,7 @@ pub fn validate_create_network(
 }
 
 /// Validate NIC creation request.
+#[allow(clippy::type_complexity)]
 pub fn validate_create_nic(
     network: &NetworkData,
     mac_address: &str,

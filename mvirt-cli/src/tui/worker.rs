@@ -861,42 +861,38 @@ pub async fn action_worker(
                 let mut versions = ServiceVersions::default();
 
                 // Query VMM version
-                if let Some(ref mut client) = vm_client {
-                    if let Ok(response) =
+                if let Some(ref mut client) = vm_client
+                    && let Ok(response) =
                         client.get_version(crate::proto::GetVersionRequest {}).await
-                    {
-                        versions.vmm = Some(response.into_inner().version);
-                    }
+                {
+                    versions.vmm = Some(response.into_inner().version);
                 }
 
                 // Query ZFS version
-                if let Some(ref mut client) = zfs_client {
-                    if let Ok(response) = client
+                if let Some(ref mut client) = zfs_client
+                    && let Ok(response) = client
                         .get_version(crate::zfs_proto::GetVersionRequest {})
                         .await
-                    {
-                        versions.zfs = Some(response.into_inner().version);
-                    }
+                {
+                    versions.zfs = Some(response.into_inner().version);
                 }
 
                 // Query Net version
-                if let Some(ref mut client) = net_client {
-                    if let Ok(response) = client
+                if let Some(ref mut client) = net_client
+                    && let Ok(response) = client
                         .get_version(crate::net_proto::GetVersionRequest {})
                         .await
-                    {
-                        versions.net = Some(response.into_inner().version);
-                    }
+                {
+                    versions.net = Some(response.into_inner().version);
                 }
 
                 // Query Log version
-                if let Some(ref mut client) = log_client {
-                    if let Ok(response) = client
+                if let Some(ref mut client) = log_client
+                    && let Ok(response) = client
                         .get_version(mvirt_log::proto::GetVersionRequest {})
                         .await
-                    {
-                        versions.log = Some(response.into_inner().version);
-                    }
+                {
+                    versions.log = Some(response.into_inner().version);
                 }
 
                 ActionResult::VersionsRefreshed(versions)
