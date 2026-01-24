@@ -1429,6 +1429,10 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         if descriptors_returned {
             let _ = vring_state.signal_used_queue();
         }
+
+        // Re-enable notifications for event_idx mode
+        // This tells the guest driver we're ready for more notifications
+        let _ = vring_state.enable_notification();
     }
 
     /// Peek at packet headers from iovecs, returning a slice for routing decisions
