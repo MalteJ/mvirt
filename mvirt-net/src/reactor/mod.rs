@@ -123,32 +123,6 @@ fn strip_ethernet_header(iovecs: &[libc::iovec]) -> Option<Vec<libc::iovec>> {
     }
 }
 
-/// Prepend Ethernet header to L3 packet for vhost injection.
-///
-/// Input:  L3 packet data [virtio_net_hdr (12)][IP packet...]
-/// Output: L2 frame [virtio_net_hdr (12)][Ethernet (14)][IP packet...]
-///
-/// Uses GATEWAY_MAC as source and the provided dst_mac as destination.
-fn prepend_ethernet_header(data: &[u8], dst_mac: &[u8; 6], ethertype: u16) -> Vec<u8> {
-    let mut result = Vec::with_capacity(data.len() + ETHERNET_HDR_SIZE);
-
-    // Copy virtio_net_hdr (first 12 bytes)
-    let hdr_len = VIRTIO_NET_HDR_SIZE.min(data.len());
-    result.extend_from_slice(&data[..hdr_len]);
-
-    // Add Ethernet header (14 bytes): dst_mac (6) + src_mac (6) + ethertype (2)
-    result.extend_from_slice(dst_mac); // Destination MAC
-    result.extend_from_slice(&GATEWAY_MAC); // Source MAC (gateway)
-    result.extend_from_slice(&ethertype.to_be_bytes()); // EtherType
-
-    // Copy IP packet (skip virtio_net_hdr)
-    if data.len() > VIRTIO_NET_HDR_SIZE {
-        result.extend_from_slice(&data[VIRTIO_NET_HDR_SIZE..]);
-    }
-
-    result
-}
-
 /// vhost-user queue indices
 const VHOST_RX_QUEUE: usize = 0;
 const VHOST_TX_QUEUE: usize = 1;
@@ -541,6 +515,11 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             std::collections::HashMap::new();
         let mut incoming_tun_id: u64 = 0;
 
+        // Track in-flight TunRx packets (zero-copy path: packet_id -> chain_id)
+        // Buffer is NOT returned to pool until completion is received
+        let mut tun_rx_in_flight: std::collections::HashMap<u64, u64> =
+            std::collections::HashMap::new();
+
         // Pending TX packets to send
         let mut pending_tx: Vec<TxPacket> = Vec::new();
 
@@ -729,6 +708,14 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         if let Some(ref state) = vhost_state {
                             self.process_completions(state, &mut vhost_to_vhost_in_flight);
                         }
+
+                        // Process TunRxComplete notifications (for TUN reactor zero-copy path)
+                        self.process_tun_rx_completions(
+                            &mut tun_rx_in_flight,
+                            &mut ring,
+                            tun_fd,
+                            &mut rx_in_flight,
+                        );
                     }
 
                     // If not shutting down, resubmit eventfd read
@@ -777,7 +764,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             error!(error = -result, "incoming-to-TUN write error");
                             result
                         } else {
-                            info!(
+                            debug!(
                                 len = result,
                                 packet_id = %in_flight.packet_id,
                                 src = %in_flight.source.source_reactor(),
@@ -802,6 +789,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                                 chain_id,
                                 source_reactor: _,
                                 len,
+                                ..
                             } => CompletionNotify::TunRxComplete {
                                 packet_id: in_flight.packet_id,
                                 chain_id: *chain_id,
@@ -873,7 +861,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             RoutingDecision::ToVhost {
                                 reactor_id: target_reactor,
                             } => {
-                                // Forward to VM - prepend Ethernet header
+                                // Forward to VM - zero-copy path with Ethernet header injection at destination
                                 // Clone registry to avoid borrow conflicts
                                 let registry_opt = self.registry.clone();
                                 if let Some(registry) = registry_opt {
@@ -883,46 +871,45 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                                         .unwrap_or([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
 
                                     // Determine ethertype from IP version
-                                    let ethertype = match ip_version {
+                                    let ethertype: u16 = match ip_version {
                                         Some(4) => 0x0800, // IPv4
                                         Some(6) => 0x86DD, // IPv6
                                         _ => 0x0800,
                                     };
 
-                                    // Prepend Ethernet header to create L2 frame
-                                    let l2_frame =
-                                        prepend_ethernet_header(packet_data, &dst_mac, ethertype);
-
-                                    // Create PacketRef with owned data
+                                    // Create PacketRef pointing directly to TUN buffer - no allocation!
                                     let packet_id = self.next_packet_id();
                                     let source = PacketSource::TunRx {
                                         chain_id,
-                                        len: l2_frame.len() as u32,
+                                        len: len as u32,
                                         source_reactor: self.reactor_id,
+                                        dst_mac,
+                                        ethertype,
                                     };
 
-                                    // Create single iovec for the L2 frame
-                                    let l2_frame_arc: Arc<Vec<u8>> = Arc::new(l2_frame);
-                                    let l2_frame_ptr = l2_frame_arc.as_ptr();
-                                    let l2_frame_len = l2_frame_arc.len();
+                                    // Point directly to TUN buffer
                                     let iovec = libc::iovec {
-                                        iov_base: l2_frame_ptr as *mut _,
-                                        iov_len: l2_frame_len,
+                                        iov_base: chain.buffer.ptr as *mut _,
+                                        iov_len: len,
                                     };
 
                                     let packet = PacketRef::new(
                                         packet_id,
                                         vec![iovec],
                                         source,
-                                        Some(l2_frame_arc as Arc<dyn std::any::Any + Send + Sync>),
+                                        None, // No keep_alive - buffer managed by rx_queue
                                     );
 
                                     if registry.send_packet_to(&target_reactor, packet) {
                                         debug!(
                                             len,
                                             dst = %target_reactor,
-                                            "TUN RX -> vhost (L3 routed)"
+                                            "TUN RX -> vhost (zero-copy)"
                                         );
+                                        // Track in-flight - DON'T return buffer yet
+                                        tun_rx_in_flight.insert(packet_id.raw(), chain_id);
+                                        // Continue without returning the buffer
+                                        continue;
                                     } else {
                                         debug!(dst = %target_reactor, "TUN RX: target reactor not found");
                                     }
@@ -1381,7 +1368,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             in_flight.keep_alive.clone(),
                         );
 
-                        info!(
+                        debug!(
                             packet_id = %packet_id,
                             len = in_flight.total_len,
                             src = %self.reactor_id,
@@ -1470,6 +1457,12 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
     ///
     /// This is used for VM-to-VM routing where we need to copy from
     /// the source VM's guest memory to the destination VM's RX queue.
+    ///
+    /// For TunRx packets (zero-copy path), this function performs Ethernet header
+    /// injection using a 3-phase scatter-gather write:
+    /// - Phase 0: Copy VirtioHdr (12 bytes) from source
+    /// - Phase 1: Write EthHdr (14 bytes) constructed on stack
+    /// - Phase 2: Copy IP Payload from source (offset 12+)
     fn copy_to_vhost_rx(state: &VhostState, packet: &PacketRef) -> i32 {
         let mem_guard = state.mem.memory();
         let rx_vring = &state.vrings[VHOST_RX_QUEUE];
@@ -1484,75 +1477,242 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         };
 
         let head_index = desc_chain.head_index();
-        let mut written = 0usize;
-        let mut src_offset = 0usize;
-        let mut src_iov_idx = 0usize;
-        let mut src_iov_offset = 0usize;
 
-        // Calculate total packet length
-        let total_packet_len: usize = packet.iovecs.iter().map(|iov| iov.iov_len).sum();
+        // Check if this is a TunRx packet needing Ethernet header injection
+        let tun_rx_info = match &packet.source {
+            PacketSource::TunRx {
+                dst_mac, ethertype, ..
+            } => Some((*dst_mac, *ethertype)),
+            _ => None,
+        };
 
-        // Copy from source iovecs to destination descriptors
-        for desc in desc_chain {
-            if desc.is_write_only() {
+        let written = if let Some((dst_mac, ethertype)) = tun_rx_info {
+            // Scatter-gather write for TunRx (zero-copy with Ethernet header injection):
+            // Source: [VirtioHdr(12)][IP Payload]
+            // Dest:   [VirtioHdr(12)][EthHdr(14)][IP Payload]
+
+            // Build Ethernet header on stack (14 bytes)
+            let mut eth_hdr = [0u8; ETHERNET_HDR_SIZE];
+            eth_hdr[0..6].copy_from_slice(&dst_mac);
+            eth_hdr[6..12].copy_from_slice(&GATEWAY_MAC);
+            eth_hdr[12..14].copy_from_slice(&ethertype.to_be_bytes());
+
+            // Calculate total source length
+            let total_src_len: usize = packet.iovecs.iter().map(|iov| iov.iov_len).sum();
+
+            // Total output length = source + Ethernet header
+            let total_out_len = total_src_len + ETHERNET_HDR_SIZE;
+
+            // 3-phase write: virtio_hdr, eth_hdr, ip_payload
+            // Phase 0: VirtioHdr (bytes 0..12 from source)
+            // Phase 1: EthHdr (14 bytes from stack)
+            // Phase 2: IP Payload (bytes 12+ from source)
+            let mut written = 0usize;
+            let mut phase = 0u8; // 0=virtio_hdr, 1=eth_hdr, 2=ip_payload
+            let mut phase_offset = 0usize;
+
+            // Source tracking
+            let mut src_iov_idx = 0usize;
+            let mut src_iov_offset = 0usize;
+
+            for desc in desc_chain {
+                if !desc.is_write_only() {
+                    continue;
+                }
+
                 let available = desc.len() as usize;
                 let mut desc_offset = 0usize;
 
-                while desc_offset < available && src_offset < total_packet_len {
-                    if src_iov_idx >= packet.iovecs.len() {
-                        break;
-                    }
+                while desc_offset < available && written < total_out_len {
+                    let to_copy = match phase {
+                        0 => {
+                            // Phase 0: VirtioHdr from source (first 12 bytes)
+                            let remaining_in_phase = VIRTIO_NET_HDR_SIZE - phase_offset;
+                            let remaining_in_desc = available - desc_offset;
+                            let to_copy = remaining_in_phase.min(remaining_in_desc);
 
-                    let src_iov = &packet.iovecs[src_iov_idx];
-                    let src_remaining = src_iov.iov_len - src_iov_offset;
-                    let dst_remaining = available - desc_offset;
-                    let to_copy = src_remaining.min(dst_remaining);
+                            if to_copy > 0 {
+                                // Read from source iovecs
+                                let src_data = Self::read_from_iovecs(
+                                    &packet.iovecs,
+                                    &mut src_iov_idx,
+                                    &mut src_iov_offset,
+                                    to_copy,
+                                );
 
-                    if to_copy > 0 {
-                        // Copy from source iovec to destination descriptor
-                        let src_ptr =
-                            unsafe { (src_iov.iov_base as *const u8).add(src_iov_offset) };
-                        let src_slice = unsafe { std::slice::from_raw_parts(src_ptr, to_copy) };
+                                let dst_addr = desc
+                                    .addr()
+                                    .checked_add(desc_offset as u64)
+                                    .expect("Address overflow");
 
-                        let dst_addr = desc
-                            .addr()
-                            .checked_add(desc_offset as u64)
-                            .expect("Address overflow");
-
-                        if let Err(e) = mem_guard.write_slice(src_slice, dst_addr) {
-                            warn!(?e, "Failed to write to vhost RX buffer");
-                            // Return descriptor with error
-                            let _ = queue.add_used(&*mem_guard, head_index, 0);
-                            let _ = vring_state.signal_used_queue();
-                            return -libc::EIO;
+                                if let Err(e) = mem_guard.write_slice(&src_data, dst_addr) {
+                                    warn!(?e, "Failed to write virtio_hdr to vhost RX buffer");
+                                    let _ = queue.add_used(&*mem_guard, head_index, 0);
+                                    let _ = vring_state.signal_used_queue();
+                                    return -libc::EIO;
+                                }
+                            }
+                            to_copy
                         }
+                        1 => {
+                            // Phase 1: EthHdr from stack
+                            let remaining_in_phase = ETHERNET_HDR_SIZE - phase_offset;
+                            let remaining_in_desc = available - desc_offset;
+                            let to_copy = remaining_in_phase.min(remaining_in_desc);
 
-                        desc_offset += to_copy;
-                        src_offset += to_copy;
-                        src_iov_offset += to_copy;
-                        written += to_copy;
+                            if to_copy > 0 {
+                                let src_slice = &eth_hdr[phase_offset..phase_offset + to_copy];
+                                let dst_addr = desc
+                                    .addr()
+                                    .checked_add(desc_offset as u64)
+                                    .expect("Address overflow");
 
-                        // Move to next source iovec if exhausted
-                        if src_iov_offset >= src_iov.iov_len {
-                            src_iov_idx += 1;
-                            src_iov_offset = 0;
+                                if let Err(e) = mem_guard.write_slice(src_slice, dst_addr) {
+                                    warn!(?e, "Failed to write eth_hdr to vhost RX buffer");
+                                    let _ = queue.add_used(&*mem_guard, head_index, 0);
+                                    let _ = vring_state.signal_used_queue();
+                                    return -libc::EIO;
+                                }
+                            }
+                            to_copy
                         }
+                        2 => {
+                            // Phase 2: IP Payload from source (skip virtio_hdr)
+                            let ip_payload_len = total_src_len.saturating_sub(VIRTIO_NET_HDR_SIZE);
+                            let remaining_in_phase = ip_payload_len - phase_offset;
+                            let remaining_in_desc = available - desc_offset;
+                            let to_copy = remaining_in_phase.min(remaining_in_desc);
+
+                            if to_copy > 0 {
+                                // Read from source iovecs (already past virtio_hdr)
+                                let src_data = Self::read_from_iovecs(
+                                    &packet.iovecs,
+                                    &mut src_iov_idx,
+                                    &mut src_iov_offset,
+                                    to_copy,
+                                );
+
+                                let dst_addr = desc
+                                    .addr()
+                                    .checked_add(desc_offset as u64)
+                                    .expect("Address overflow");
+
+                                if let Err(e) = mem_guard.write_slice(&src_data, dst_addr) {
+                                    warn!(?e, "Failed to write ip_payload to vhost RX buffer");
+                                    let _ = queue.add_used(&*mem_guard, head_index, 0);
+                                    let _ = vring_state.signal_used_queue();
+                                    return -libc::EIO;
+                                }
+                            }
+                            to_copy
+                        }
+                        _ => break,
+                    };
+
+                    desc_offset += to_copy;
+                    phase_offset += to_copy;
+                    written += to_copy;
+
+                    // Check if phase complete, advance to next
+                    let phase_len = match phase {
+                        0 => VIRTIO_NET_HDR_SIZE,
+                        1 => ETHERNET_HDR_SIZE,
+                        2 => total_src_len.saturating_sub(VIRTIO_NET_HDR_SIZE),
+                        _ => 0,
+                    };
+
+                    if phase_offset >= phase_len {
+                        phase += 1;
+                        phase_offset = 0;
                     }
                 }
 
-                if src_offset >= total_packet_len {
+                if written >= total_out_len {
                     break;
                 }
             }
-        }
 
-        if written < total_packet_len {
-            warn!(
-                written,
-                expected = total_packet_len,
-                "Partial copy to vhost RX"
+            debug!(
+                src_len = total_src_len,
+                out_len = written,
+                "TunRx: copied with Ethernet header injection"
             );
-        }
+            written
+        } else {
+            // Standard VM-to-VM copy (no Ethernet header injection)
+            let mut written = 0usize;
+            let mut src_offset = 0usize;
+            let mut src_iov_idx = 0usize;
+            let mut src_iov_offset = 0usize;
+
+            // Calculate total packet length
+            let total_packet_len: usize = packet.iovecs.iter().map(|iov| iov.iov_len).sum();
+
+            // Copy from source iovecs to destination descriptors
+            for desc in desc_chain {
+                if desc.is_write_only() {
+                    let available = desc.len() as usize;
+                    let mut desc_offset = 0usize;
+
+                    while desc_offset < available && src_offset < total_packet_len {
+                        if src_iov_idx >= packet.iovecs.len() {
+                            break;
+                        }
+
+                        let src_iov = &packet.iovecs[src_iov_idx];
+                        let src_remaining = src_iov.iov_len - src_iov_offset;
+                        let dst_remaining = available - desc_offset;
+                        let to_copy = src_remaining.min(dst_remaining);
+
+                        if to_copy > 0 {
+                            // Copy from source iovec to destination descriptor
+                            let src_ptr =
+                                unsafe { (src_iov.iov_base as *const u8).add(src_iov_offset) };
+                            let src_slice = unsafe { std::slice::from_raw_parts(src_ptr, to_copy) };
+
+                            let dst_addr = desc
+                                .addr()
+                                .checked_add(desc_offset as u64)
+                                .expect("Address overflow");
+
+                            if let Err(e) = mem_guard.write_slice(src_slice, dst_addr) {
+                                warn!(?e, "Failed to write to vhost RX buffer");
+                                // Return descriptor with error
+                                let _ = queue.add_used(&*mem_guard, head_index, 0);
+                                let _ = vring_state.signal_used_queue();
+                                return -libc::EIO;
+                            }
+
+                            desc_offset += to_copy;
+                            src_offset += to_copy;
+                            src_iov_offset += to_copy;
+                            written += to_copy;
+
+                            // Move to next source iovec if exhausted
+                            if src_iov_offset >= src_iov.iov_len {
+                                src_iov_idx += 1;
+                                src_iov_offset = 0;
+                            }
+                        }
+                    }
+
+                    if src_offset >= total_packet_len {
+                        break;
+                    }
+                }
+            }
+
+            if written < total_packet_len {
+                warn!(
+                    written,
+                    expected = total_packet_len,
+                    "Partial copy to vhost RX"
+                );
+            }
+
+            debug!(len = written, "VM-to-VM: copied packet to vhost RX queue");
+            written
+        };
 
         // Return the descriptor with the length written
         if let Err(e) = queue.add_used(&*mem_guard, head_index, written as u32) {
@@ -1565,8 +1725,39 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             warn!(?e, "Failed to signal vhost RX used queue");
         }
 
-        debug!(len = written, "VM-to-VM: copied packet to vhost RX queue");
         written as i32
+    }
+
+    /// Helper function to read data from iovecs, advancing position.
+    fn read_from_iovecs(
+        iovecs: &[libc::iovec],
+        iov_idx: &mut usize,
+        iov_offset: &mut usize,
+        mut len: usize,
+    ) -> Vec<u8> {
+        let mut result = Vec::with_capacity(len);
+
+        while len > 0 && *iov_idx < iovecs.len() {
+            let iov = &iovecs[*iov_idx];
+            let remaining = iov.iov_len - *iov_offset;
+            let to_copy = remaining.min(len);
+
+            if to_copy > 0 {
+                let src_ptr = unsafe { (iov.iov_base as *const u8).add(*iov_offset) };
+                let src_slice = unsafe { std::slice::from_raw_parts(src_ptr, to_copy) };
+                result.extend_from_slice(src_slice);
+
+                *iov_offset += to_copy;
+                len -= to_copy;
+            }
+
+            if *iov_offset >= iov.iov_len {
+                *iov_idx += 1;
+                *iov_offset = 0;
+            }
+        }
+
+        result
     }
 
     /// Process incoming packets from other reactors (VM-to-VM receive path).
@@ -1612,7 +1803,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 PacketSource::TunRx {
                     chain_id,
                     source_reactor: _,
-                    len: _,
+                    ..
                 } => CompletionNotify::TunRxComplete {
                     packet_id: packet.id,
                     chain_id: *chain_id,
@@ -1655,7 +1846,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         };
 
         while let Ok(packet) = packet_rx.try_recv() {
-            info!(
+            debug!(
                 id = %packet.id,
                 len = packet.total_len(),
                 src = %packet.source.source_reactor(),
@@ -1735,11 +1926,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 total_len: *total_len,
                 result,
             },
-            PacketSource::TunRx {
-                chain_id,
-                source_reactor: _,
-                len,
-            } => CompletionNotify::TunRxComplete {
+            PacketSource::TunRx { chain_id, len, .. } => CompletionNotify::TunRxComplete {
                 packet_id: packet.id,
                 chain_id: *chain_id,
                 result: *len as i32,
@@ -1781,7 +1968,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         let tx_vring = &state.vrings[VHOST_TX_QUEUE];
 
         while let Ok(completion) = completion_rx.try_recv() {
-            info!(
+            debug!(
                 id = %completion.packet_id(),
                 result = completion.result(),
                 reactor_id = %self.reactor_id,
@@ -1803,7 +1990,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 } => {
                     // Remove from in-flight tracking
                     if let Some(_in_flight) = vhost_to_vhost_in_flight.remove(&packet_id.raw()) {
-                        info!(
+                        debug!(
                             packet_id = %packet_id,
                             head_index,
                             total_len,
@@ -1826,8 +2013,76 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     }
                 }
                 CompletionNotify::TunRxComplete { .. } => {
-                    // TunRxComplete should not arrive here
-                    warn!("Unexpected TunRxComplete in vhost reactor");
+                    // TunRxComplete should be handled by process_tun_rx_completions
+                    debug!("TunRxComplete ignored in vhost reactor (handled separately)");
+                }
+            }
+        }
+    }
+
+    /// Process TunRxComplete notifications to return RX buffers to pool.
+    ///
+    /// When a TunRx packet is delivered to a vhost reactor, it sends back
+    /// a TunRxComplete. We use this to return the RX buffer to the pool
+    /// and resubmit a new read.
+    fn process_tun_rx_completions(
+        &mut self,
+        tun_rx_in_flight: &mut std::collections::HashMap<u64, u64>,
+        ring: &mut IoUring,
+        tun_fd: types::Fd,
+        rx_in_flight: &mut std::collections::HashMap<u64, DescriptorChain>,
+    ) {
+        let Some(ref completion_rx) = self.completion_rx else {
+            return;
+        };
+
+        while let Ok(completion) = completion_rx.try_recv() {
+            match completion {
+                CompletionNotify::TunRxComplete {
+                    packet_id,
+                    chain_id,
+                    result,
+                } => {
+                    // Remove from in-flight tracking
+                    if tun_rx_in_flight.remove(&packet_id.raw()).is_some() {
+                        debug!(
+                            packet_id = %packet_id,
+                            chain_id,
+                            result,
+                            "TUN reactor: received TunRxComplete, returning buffer"
+                        );
+
+                        // Return buffer to pool
+                        self.rx_queue.push_used(chain_id, result as u32);
+
+                        // Resubmit RX read
+                        if let Some(new_chain) = self.rx_queue.pop_available() {
+                            let read_e = opcode::ReadFixed::new(
+                                tun_fd,
+                                new_chain.buffer.ptr,
+                                new_chain.buffer.len,
+                                new_chain.buffer.buf_index,
+                            )
+                            .build()
+                            .user_data(new_chain.chain_id | USER_DATA_RX_FLAG);
+
+                            unsafe {
+                                if ring.submission().push(&read_e).is_ok() {
+                                    rx_in_flight.insert(new_chain.chain_id, new_chain);
+                                }
+                            }
+                        }
+                    } else {
+                        warn!(
+                            packet_id = %packet_id,
+                            chain_id,
+                            "TunRxComplete for unknown packet"
+                        );
+                    }
+                }
+                _ => {
+                    // Other completions should not arrive at TUN reactor
+                    warn!(?completion, "Unexpected completion type in TUN reactor");
                 }
             }
         }
