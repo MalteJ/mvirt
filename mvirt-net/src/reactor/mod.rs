@@ -122,10 +122,33 @@ fn copy_from_iovecs(
 #[inline]
 fn patch_virtio_hdr_for_eth_stripping(virtio_hdr: &mut [u8; VIRTIO_NET_HDR_SIZE]) {
     const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
-    if virtio_hdr[0] & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
-        let csum_start = u16::from_le_bytes([virtio_hdr[6], virtio_hdr[7]]);
-        let adjusted = csum_start.saturating_sub(ETHERNET_HDR_SIZE as u16);
-        virtio_hdr[6..8].copy_from_slice(&adjusted.to_le_bytes());
+    
+    // Debug-Ausgabe VOR der Änderung
+    let flags = virtio_hdr[0];
+    let old_csum_start = u16::from_le_bytes([virtio_hdr[6], virtio_hdr[7]]);
+    let old_csum_offset = u16::from_le_bytes([virtio_hdr[8], virtio_hdr[9]]);
+    let old_hdr_len = u16::from_le_bytes([virtio_hdr[2], virtio_hdr[3]]);
+
+    if flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+        // 1. Patch csum_start
+        let csum_start = old_csum_start;
+        let adjusted_start = csum_start.saturating_sub(ETHERNET_HDR_SIZE as u16);
+        virtio_hdr[6..8].copy_from_slice(&adjusted_start.to_le_bytes());
+
+        // 2. Patch hdr_len
+        let hdr_len = old_hdr_len;
+        let adjusted_len = if hdr_len >= ETHERNET_HDR_SIZE as u16 {
+            hdr_len - ETHERNET_HDR_SIZE as u16
+        } else {
+            hdr_len // Sollte nicht passieren
+        };
+        virtio_hdr[2..4].copy_from_slice(&adjusted_len.to_le_bytes());
+
+        // Logge, was wir tun
+        debug!(
+            "Offload Patch: flags={:#x} csum_start={}->{} csum_offset={} hdr_len={}->{}",
+            flags, old_csum_start, adjusted_start, old_csum_offset, old_hdr_len, adjusted_len
+        );
     }
 }
 
@@ -2332,6 +2355,10 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             let mut l3_packet = Vec::with_capacity(packet_data.len() - ETHERNET_HDR_SIZE);
             l3_packet.extend_from_slice(&packet_data[..VIRTIO_NET_HDR_SIZE]); // virtio_net_hdr
             l3_packet.extend_from_slice(&packet_data[VIRTIO_NET_HDR_SIZE + ETHERNET_HDR_SIZE..]); // IP packet
+
+            if let Ok(hdr_array_ref) = (&mut l3_packet[..VIRTIO_NET_HDR_SIZE]).try_into() {
+                patch_virtio_hdr_for_eth_stripping(hdr_array_ref);
+            }
 
             // Generate unique user_data for this write
             let user_data = USER_DATA_INCOMING_TUN_FLAG | *incoming_tun_id;
