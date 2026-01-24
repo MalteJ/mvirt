@@ -1930,11 +1930,6 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             return -libc::EIO;
         }
 
-        // Signal the guest
-        if let Err(e) = vring_state.signal_used_queue() {
-            warn!(?e, "Failed to signal vhost RX used queue");
-        }
-
         written as i32
     }
 
@@ -2008,6 +2003,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         };
 
         // Process all pending packets from the channel
+        let mut signal_needed = false;
 
         while let Ok(packet) = packet_rx.try_recv() {
             debug!(
@@ -2019,6 +2015,9 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
             // Copy packet to local RX queue
             let result = Self::copy_to_vhost_rx(state, &packet);
+            if result >= 0 {
+                signal_needed = true;
+            }
 
             // Send completion notification back to source reactor
             let completion = match &packet.source {
@@ -2059,6 +2058,14 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     warn!(src = %source_reactor, "Failed to send completion to source reactor");
                 }
             }
+        }
+
+        // Signal guest once for entire batch
+        if signal_needed
+            && let Some(vring_state) = state.vrings.get(VHOST_RX_QUEUE)
+            && let Err(e) = vring_state.signal_used_queue()
+        {
+            warn!(?e, "Failed to signal vhost RX used queue");
         }
     }
 
