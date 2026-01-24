@@ -44,7 +44,9 @@ jobs:
 
       # Use native target for tests (sudo needed for TUN/TAP tests)
       - name: Test
-        run: sudo -E cargo test --workspace --target x86_64-unknown-linux-gnu
+        run: |
+          sudo -E cargo test --workspace --target x86_64-unknown-linux-gnu
+          sudo chown -R $(id -u):$(id -g) target/
 
   build:
     name: Build ISO
