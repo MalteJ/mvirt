@@ -45,4 +45,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 # Tell cc-rs to use musl-gcc for musl target
 ENV CC_x86_64_unknown_linux_musl=musl-gcc
 
+# Limit parallel jobs to reduce memory usage
+ENV CARGO_BUILD_JOBS=2
+
 WORKDIR /work
