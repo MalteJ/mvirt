@@ -15,7 +15,6 @@ use crate::virtqueue::{DescriptorChain, RxVirtqueue, TxPacket, TxVirtqueue};
 use io_uring::{IoUring, opcode, types};
 use nix::libc;
 use nix::sys::eventfd::{EfdFlags, EventFd};
-use smallvec::SmallVec;
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, Icmpv4Message, Icmpv4Packet,
     Icmpv4Repr, IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6Packet,
@@ -77,59 +76,102 @@ const ETHERNET_HDR_SIZE: usize = 14;
 /// Must be large enough for DHCP packets (12 + 14 + 20 + 8 + ~548 = ~600 bytes).
 const PEEK_BUF_SIZE: usize = 600;
 
-/// Stack-allocated iovec buffer for typical packet processing (2-3 segments).
-/// Falls back to heap only when more than 4 iovecs are needed.
-type IovecVec = SmallVec<[libc::iovec; 4]>;
+/// Maximum number of iovec segments for vhost TX packets.
+/// Descriptor chains rarely exceed 4 segments; 8 provides headroom.
+const MAX_TX_IOVECS: usize = 8;
 
-/// Strip Ethernet header from iovecs for L3 TUN transmission.
+/// Copies `dst.len()` bytes starting at `offset` from scattered iovecs into `dst`.
+/// Returns false if insufficient data available.
+fn copy_from_iovecs(
+    iovecs: &[libc::iovec],
+    iovecs_len: usize,
+    offset: usize,
+    dst: &mut [u8],
+) -> bool {
+    let len = dst.len();
+    let mut pos = 0usize;
+    let mut written = 0usize;
+
+    for iov in iovecs.iter().take(iovecs_len) {
+        let iov_end = pos + iov.iov_len;
+        if iov_end > offset && written < len {
+            let start_in_iov = offset.saturating_sub(pos);
+            let bytes_avail = iov.iov_len - start_in_iov;
+            let bytes_to_copy = bytes_avail.min(len - written);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    (iov.iov_base as *const u8).add(start_in_iov),
+                    dst.as_mut_ptr().add(written),
+                    bytes_to_copy,
+                );
+            }
+            written += bytes_to_copy;
+        }
+        pos = iov_end;
+        if written >= len {
+            break;
+        }
+    }
+    written >= len
+}
+
+/// Adjusts virtio_net_hdr.csum_start when stripping Ethernet header.
+/// When removing the 14-byte Ethernet header, csum_start must be reduced
+/// by 14 because subsequent offsets shift backward.
+#[inline]
+fn patch_virtio_hdr_for_eth_stripping(virtio_hdr: &mut [u8; VIRTIO_NET_HDR_SIZE]) {
+    const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+    if virtio_hdr[0] & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+        let csum_start = u16::from_le_bytes([virtio_hdr[6], virtio_hdr[7]]);
+        let adjusted = csum_start.saturating_sub(ETHERNET_HDR_SIZE as u16);
+        virtio_hdr[6..8].copy_from_slice(&adjusted.to_le_bytes());
+    }
+}
+
+/// Prepares VhostTxInFlight for TUN transmission by:
+/// 1. Copying and patching the virtio_net_hdr
+/// 2. Building iovecs that skip the Ethernet header (pointing to guest memory)
 ///
-/// Input:  iovecs containing [virtio_net_hdr (12)][ethernet (14)][IP packet...]
-/// Output: new iovecs containing [virtio_net_hdr (12)][IP packet...]
-///
-/// Returns None if the packet is too short or malformed.
-fn strip_ethernet_header(iovecs: &[libc::iovec]) -> Option<IovecVec> {
-    const SKIP_START: usize = VIRTIO_NET_HDR_SIZE; // 12
+/// Returns false if packet is malformed (too short).
+fn prepare_tun_iovecs(
+    src_iovecs: &[libc::iovec; MAX_TX_IOVECS],
+    src_len: usize,
+    in_flight: &mut VhostTxInFlight,
+) -> bool {
     const SKIP_END: usize = VIRTIO_NET_HDR_SIZE + ETHERNET_HDR_SIZE; // 26
 
-    let mut result: IovecVec = SmallVec::new();
+    // 1. Copy virtio_net_hdr from source iovecs
+    if !copy_from_iovecs(src_iovecs, src_len, 0, &mut in_flight.patched_virtio_hdr) {
+        return false;
+    }
+
+    // 2. Patch csum_start for Ethernet stripping
+    patch_virtio_hdr_for_eth_stripping(&mut in_flight.patched_virtio_hdr);
+
+    // 3. First iovec points to our local patched header
+    in_flight.iovecs[0] = libc::iovec {
+        iov_base: in_flight.patched_virtio_hdr.as_mut_ptr() as *mut _,
+        iov_len: VIRTIO_NET_HDR_SIZE,
+    };
+    let mut iov_idx = 1usize;
+
+    // 4. Build payload iovecs (skip first 26 bytes = virtio_hdr + ethernet)
     let mut pos = 0usize;
-
-    for iov in iovecs {
-        let iov_start = pos;
+    for iov in src_iovecs.iter().take(src_len) {
         let iov_end = pos + iov.iov_len;
-
-        // Region before the skip zone (virtio_net_hdr: bytes 0-12)
-        if iov_start < SKIP_START && iov_end > iov_start {
-            let start_in_iov = 0;
-            let end_in_iov = (SKIP_START - iov_start).min(iov.iov_len);
-            if end_in_iov > start_in_iov {
-                result.push(libc::iovec {
-                    iov_base: iov.iov_base,
-                    iov_len: end_in_iov - start_in_iov,
-                });
-            }
+        if iov_end > SKIP_END && iov_idx < MAX_TX_IOVECS {
+            let start_in_iov = SKIP_END.saturating_sub(pos);
+            in_flight.iovecs[iov_idx] = libc::iovec {
+                iov_base: unsafe { (iov.iov_base as *mut u8).add(start_in_iov) as *mut _ },
+                iov_len: iov.iov_len - start_in_iov,
+            };
+            iov_idx += 1;
         }
-
-        // Region after the skip zone (IP packet: bytes 26+)
-        if iov_end > SKIP_END {
-            let start_in_iov = SKIP_END.saturating_sub(iov_start);
-            let end_in_iov = iov.iov_len;
-            if end_in_iov > start_in_iov {
-                result.push(libc::iovec {
-                    iov_base: unsafe { (iov.iov_base as *mut u8).add(start_in_iov) as *mut _ },
-                    iov_len: end_in_iov - start_in_iov,
-                });
-            }
-        }
-
         pos = iov_end;
     }
 
-    if result.is_empty() {
-        None
-    } else {
-        Some(result)
-    }
+    in_flight.iovecs_len = iov_idx;
+    iov_idx > 1 // Must have at least header + some payload
 }
 
 /// vhost-user queue indices
@@ -142,12 +184,17 @@ struct VhostState {
     vrings: Vec<VringType>,
 }
 
-/// Tracks an in-flight vhost TX operation for zero-copy I/O
+/// Tracks an in-flight vhost TX operation for zero-copy I/O.
+/// Uses fixed-size arrays and is Box-allocated to ensure stable memory
+/// addresses for io_uring operations (HashMap insertion can move data).
 struct VhostTxInFlight {
     head_index: u16,
     total_len: u32,
-    iovecs: IovecVec,
+    iovecs: [libc::iovec; MAX_TX_IOVECS],
+    iovecs_len: usize,
     keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Local copy of virtio_net_hdr with patched csum_start for TUN transmission
+    patched_virtio_hdr: [u8; VIRTIO_NET_HDR_SIZE],
 }
 
 /// Tracks an in-flight VM-to-VM packet awaiting completion
@@ -517,7 +564,8 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             std::collections::HashMap::new();
 
         // Track in-flight vhost TX writes (to TUN)
-        let mut vhost_tx_in_flight: std::collections::HashMap<u64, VhostTxInFlight> =
+        // Box ensures stable memory addresses for io_uring (HashMap can move on grow)
+        let mut vhost_tx_in_flight: std::collections::HashMap<u64, Box<VhostTxInFlight>> =
             std::collections::HashMap::new();
         let mut vhost_tx_id: u64 = 0;
 
@@ -1128,19 +1176,28 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         info!("Reactor done");
     }
 
-    /// Convert vhost descriptor chain to iovecs for zero-copy I/O
+    /// Convert vhost descriptor chain to iovecs for zero-copy I/O.
+    /// Uses fixed-size arrays to avoid heap allocation and ensure memory stability.
     fn desc_chain_to_iovecs(
         desc_chain: &virtio_queue::DescriptorChain<&vm_memory::GuestMemoryMmap>,
         mem: &vm_memory::GuestMemoryMmap,
         keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Option<VhostTxInFlight> {
         let head_index = desc_chain.head_index();
-        let mut iovecs: IovecVec = SmallVec::new();
+        let mut iovecs = [libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        }; MAX_TX_IOVECS];
+        let mut iovecs_len = 0usize;
         let mut total_len = 0u32;
 
         for desc in desc_chain.clone() {
             if desc.is_write_only() {
                 continue; // TX: skip write-only descriptors
+            }
+            if iovecs_len >= MAX_TX_IOVECS {
+                warn!("Descriptor chain exceeds MAX_TX_IOVECS");
+                return None;
             }
             let gpa = desc.addr();
             let len = desc.len();
@@ -1148,13 +1205,14 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
             // Translate GPA → HVA
             let hva = mem.get_host_address(gpa).ok()?;
-            iovecs.push(libc::iovec {
+            iovecs[iovecs_len] = libc::iovec {
                 iov_base: hva as *mut libc::c_void,
                 iov_len: len as usize,
-            });
+            };
+            iovecs_len += 1;
         }
 
-        if iovecs.is_empty() {
+        if iovecs_len == 0 {
             return None;
         }
 
@@ -1162,7 +1220,9 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             head_index,
             total_len,
             iovecs,
+            iovecs_len,
             keep_alive,
+            patched_virtio_hdr: [0u8; VIRTIO_NET_HDR_SIZE],
         })
     }
 
@@ -1380,7 +1440,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         state: &VhostState,
         ring: &mut IoUring,
         tun_fd: types::Fd,
-        vhost_tx_in_flight: &mut std::collections::HashMap<u64, VhostTxInFlight>,
+        vhost_tx_in_flight: &mut std::collections::HashMap<u64, Box<VhostTxInFlight>>,
         vhost_tx_id: &mut u64,
         vhost_to_vhost_in_flight: &mut std::collections::HashMap<u64, VhostToVhostInFlight>,
     ) {
@@ -1410,7 +1470,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
                 debug!(
                     len = in_flight.total_len,
-                    iovecs = in_flight.iovecs.len(),
+                    iovecs = in_flight.iovecs_len,
                     "vhost TX processing"
                 );
 
@@ -1432,35 +1492,39 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 match routing_decision {
                     RoutingDecision::ToTun { if_index: _ } => {
                         // Route to TUN - strip Ethernet header for L3 TUN device
-                        let Some(tun_iovecs) = strip_ethernet_header(&in_flight.iovecs) else {
+                        // Box to ensure stable memory address for io_uring
+                        let mut boxed = Box::new(in_flight);
+
+                        // Save original iovecs before prepare_tun_iovecs modifies them
+                        let src_iovecs = boxed.iovecs;
+                        let src_len = boxed.iovecs_len;
+
+                        // Prepare TUN iovecs: copy+patch virtio header, skip Ethernet
+                        if !prepare_tun_iovecs(&src_iovecs, src_len, &mut boxed) {
                             warn!("Packet too short for Ethernet stripping");
-                            let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
+                            let _ = queue.add_used(&*mem_guard, boxed.head_index, 0);
                             descriptors_returned = true;
                             continue;
-                        };
+                        }
 
                         let user_data = *vhost_tx_id | USER_DATA_VHOST_TX_FLAG;
                         *vhost_tx_id = vhost_tx_id.wrapping_add(1);
 
-                        // Store modified iovecs in in_flight for the writev
-                        let mut in_flight = in_flight;
-                        in_flight.iovecs = tun_iovecs;
-
                         let writev = opcode::Writev::new(
                             tun_fd,
-                            in_flight.iovecs.as_ptr(),
-                            in_flight.iovecs.len() as u32,
+                            boxed.iovecs.as_ptr(),
+                            boxed.iovecs_len as u32,
                         )
                         .build()
                         .user_data(user_data);
 
                         unsafe {
                             if ring.submission().push(&writev).is_ok() {
-                                debug!(len = in_flight.total_len, "vhost TX -> TUN (zero-copy)");
-                                vhost_tx_in_flight.insert(user_data, in_flight);
+                                debug!(len = boxed.total_len, "vhost TX -> TUN (zero-copy)");
+                                vhost_tx_in_flight.insert(user_data, boxed);
                             } else {
                                 warn!("SQ full, dropping vhost TX");
-                                let _ = queue.add_used(&*mem_guard, in_flight.head_index, 0);
+                                let _ = queue.add_used(&*mem_guard, boxed.head_index, 0);
                                 descriptors_returned = true;
                             }
                         }
@@ -1482,7 +1546,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
                             let packet = PacketRef::new(
                                 packet_id,
-                                in_flight.iovecs.to_vec(),
+                                in_flight.iovecs[..in_flight.iovecs_len].to_vec(),
                                 source,
                                 in_flight.keep_alive.clone(),
                             );
@@ -1548,7 +1612,11 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
     /// Peek at packet headers from iovecs, returning a slice for routing decisions
     fn peek_packet_headers(in_flight: &VhostTxInFlight) -> Vec<u8> {
-        let first_iov_len = in_flight.iovecs.first().map(|v| v.iov_len).unwrap_or(0);
+        let first_iov_len = if in_flight.iovecs_len > 0 {
+            in_flight.iovecs[0].iov_len
+        } else {
+            0
+        };
 
         if first_iov_len >= PEEK_BUF_SIZE {
             // Fast path: direct slice from first iovec
@@ -1560,7 +1628,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             // Slow path: headers may span iovecs, copy to buffer
             let mut peek_buf = vec![0u8; PEEK_BUF_SIZE];
             let mut copied = 0usize;
-            for iov in &in_flight.iovecs {
+            for iov in in_flight.iovecs.iter().take(in_flight.iovecs_len) {
                 if copied >= PEEK_BUF_SIZE {
                     break;
                 }
@@ -2263,5 +2331,62 @@ mod tests {
         let csum_start = u16::from_le_bytes([hdr[6], hdr[7]]);
         // 0xFFF0 + 14 = 0xFFFE (no wrap)
         assert_eq!(csum_start, 0xFFFE);
+    }
+
+    // Tests for patch_virtio_hdr_for_eth_stripping (inverse of injection)
+
+    /// Test csum_start adjustment for Ethernet stripping (typical TCP over IPv4)
+    #[test]
+    fn test_patch_virtio_hdr_for_eth_stripping() {
+        // csum_start = 34 (typical for TCP over IPv4 with Ethernet: 14 Eth + 20 IP)
+        let mut hdr = [0u8; VIRTIO_NET_HDR_SIZE];
+        hdr[0] = 1; // NEEDS_CSUM
+        hdr[6..8].copy_from_slice(&34u16.to_le_bytes());
+
+        patch_virtio_hdr_for_eth_stripping(&mut hdr);
+
+        let csum_start = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(csum_start, 20); // 34 - 14 = 20
+    }
+
+    /// Test csum_start unchanged when NEEDS_CSUM flag is clear
+    #[test]
+    fn test_patch_virtio_hdr_for_eth_stripping_no_csum() {
+        let mut hdr = [0u8; VIRTIO_NET_HDR_SIZE];
+        hdr[0] = 0; // No NEEDS_CSUM
+        hdr[6..8].copy_from_slice(&34u16.to_le_bytes());
+
+        patch_virtio_hdr_for_eth_stripping(&mut hdr);
+
+        let csum_start = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(csum_start, 34); // Unchanged
+    }
+
+    /// Test saturating_sub clamps to 0 for edge case (csum_start < ETHERNET_HDR_SIZE)
+    #[test]
+    fn test_patch_virtio_hdr_for_eth_stripping_saturating() {
+        // Edge case: csum_start < ETHERNET_HDR_SIZE
+        let mut hdr = [0u8; VIRTIO_NET_HDR_SIZE];
+        hdr[0] = 1;
+        hdr[6..8].copy_from_slice(&5u16.to_le_bytes());
+
+        patch_virtio_hdr_for_eth_stripping(&mut hdr);
+
+        let csum_start = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(csum_start, 0); // saturating_sub clamps to 0
+    }
+
+    /// Test csum_start adjustment for IPv6 + TCP (csum_start = 54 with Ethernet)
+    #[test]
+    fn test_patch_virtio_hdr_for_eth_stripping_ipv6() {
+        // IPv6: 14 Eth + 40 IPv6 = 54, after stripping should be 40
+        let mut hdr = [0u8; VIRTIO_NET_HDR_SIZE];
+        hdr[0] = 1; // NEEDS_CSUM
+        hdr[6..8].copy_from_slice(&54u16.to_le_bytes());
+
+        patch_virtio_hdr_for_eth_stripping(&mut hdr);
+
+        let csum_start = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(csum_start, 40); // 54 - 14 = 40
     }
 }
