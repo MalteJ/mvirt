@@ -2,7 +2,7 @@
 
 use super::storage::{NetworkData, NicData, Storage};
 use crate::reactor::{ReactorId, ReactorRegistry};
-use crate::router::{Router, VhostConfig};
+use crate::router::{Router, TUN_BUFFER_COUNT, TUN_BUFFER_SIZE, VhostConfig};
 use crate::routing::{IpPrefix, RouteTarget};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nix::libc;
@@ -102,9 +102,9 @@ impl NetworkManager {
         let router = Router::with_shared_registry(
             tun_name,
             None, // No IP address on TUN device
-            4096,
-            4096,
-            4096,
+            TUN_BUFFER_SIZE,
+            TUN_BUFFER_COUNT,
+            TUN_BUFFER_COUNT,
             None,
             Arc::clone(&self.registry),
         )
@@ -235,9 +235,9 @@ impl NetworkManager {
         let router = Router::with_shared_registry(
             &tun_name,
             Some((tun_ip, prefix_len)),
-            4096,
-            4096,
-            4096,
+            TUN_BUFFER_SIZE,
+            TUN_BUFFER_COUNT,
+            TUN_BUFFER_COUNT,
             Some(vhost_config),
             Arc::clone(&self.registry),
         )

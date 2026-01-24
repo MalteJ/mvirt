@@ -121,7 +121,16 @@ async fn run_grpc_server() {
 async fn run_ping_mode() {
     let local_ip = Ipv4Addr::new(192, 168, 1, 1);
 
-    let router = match router::Router::with_config("tun0", local_ip, 24, 4096, 4096, 4096).await {
+    let router = match router::Router::with_config(
+        "tun0",
+        local_ip,
+        24,
+        router::TUN_BUFFER_SIZE,
+        router::TUN_BUFFER_COUNT,
+        router::TUN_BUFFER_COUNT,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             error!("Failed to start router: {}", e);

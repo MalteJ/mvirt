@@ -15,6 +15,14 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use tracing::info;
 
+/// Buffer size for TUN device reads/writes.
+/// This size is required to hold full 64 KiB GSO packets plus virtio/ethernet headers
+/// without truncation. Page-aligned for efficient DMA.
+pub const TUN_BUFFER_SIZE: usize = 68 * 1024; // 69632 bytes (68 KiB)
+
+/// Number of RX/TX buffers per queue.
+pub const TUN_BUFFER_COUNT: usize = 256;
+
 pub struct Router {
     reactor_handle: ReactorHandle,
     reactor_thread: JoinHandle<()>,

@@ -1825,7 +1825,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         return -libc::ENOSPC;
                     }
                     // Ran out of chains mid-packet
-                    warn!(
+                    debug!(
                         written,
                         total_out_len, "Ran out of RX buffers mid-packet (TunRx)"
                     );
@@ -1997,7 +1997,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                         return -libc::ENOSPC;
                     }
                     // Ran out of chains mid-packet
-                    warn!(
+                    debug!(
                         written,
                         total_packet_len, "Ran out of RX buffers mid-packet (VM-to-VM)"
                     );
@@ -2381,7 +2381,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     return;
                 }
                 // Ran out of chains mid-packet - return all chains with len=0
-                warn!(written, packet_len, "Ran out of RX buffers mid-packet");
+                debug!(written, packet_len, "Ran out of RX buffers mid-packet");
                 for (head_idx, _) in &chains_used {
                     let _ = queue.add_used(&*mem_guard, *head_idx, 0);
                 }
