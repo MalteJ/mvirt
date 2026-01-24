@@ -90,6 +90,10 @@ pub enum PacketSource {
         len: u32,
         /// Reactor that owns this packet.
         source_reactor: ReactorId,
+        /// Destination MAC address for Ethernet header injection.
+        dst_mac: [u8; 6],
+        /// EtherType for Ethernet header injection (0x0800 = IPv4, 0x86DD = IPv6).
+        ethertype: u16,
     },
     /// Packet from vhost TX destined for another vhost (VM-to-VM).
     VhostToVhost {
@@ -327,6 +331,8 @@ mod tests {
                 chain_id: 0,
                 len: 300,
                 source_reactor: ReactorId::new(),
+                dst_mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                ethertype: 0x0800,
             },
             None,
         );
