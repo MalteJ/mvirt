@@ -1000,6 +1000,24 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     };
 
                     if result < 0 {
+                        if result == -libc::EAGAIN {
+                            // No data ready - resubmit the same buffer without logging
+                            let read_e = opcode::ReadFixed::new(
+                                tun_fd,
+                                chain.buffer.ptr,
+                                chain.buffer.len,
+                                chain.buffer.buf_index,
+                            )
+                            .build()
+                            .user_data(chain.chain_id | USER_DATA_RX_FLAG);
+
+                            unsafe {
+                                if ring.submission().push(&read_e).is_ok() {
+                                    rx_in_flight.insert(chain.chain_id, chain);
+                                }
+                            }
+                            continue;
+                        }
                         error!(error = -result, chain_id, "RX read error");
                         self.rx_queue.push_used(chain_id, 0);
                         continue;
