@@ -24,27 +24,38 @@ let
     # Static linking flags
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS = "-C target-feature=+crt-static";
 
+    # Linker for musl target
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${pkgs.pkgsCross.musl64.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
+
+    # C compiler for musl (needed for -sys crates like libsqlite3-sys)
+    CC_x86_64_unknown_linux_musl = "${pkgs.pkgsCross.musl64.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
+    CXX_x86_64_unknown_linux_musl = "${pkgs.pkgsCross.musl64.stdenv.cc}/bin/x86_64-unknown-linux-musl-g++";
+    AR_x86_64_unknown_linux_musl = "${pkgs.pkgsCross.musl64.stdenv.cc}/bin/x86_64-unknown-linux-musl-ar";
+
     # Protobuf compiler
     PROTOC = "${pkgs.protobuf}/bin/protoc";
 
     nativeBuildInputs = with pkgs; [
       protobuf
       pkg-config
-      musl
+      pkgsCross.musl64.stdenv.cc
     ];
 
     buildInputs = with pkgs; [
       # OpenSSL for reqwest (mvirt-cli, mvirt-zfs)
-      pkgsStatic.openssl
+      pkgsCross.musl64.openssl
     ];
 
-    # Environment for static OpenSSL
+    # Environment for static OpenSSL (musl version)
     OPENSSL_STATIC = "1";
-    OPENSSL_LIB_DIR = "${pkgs.pkgsStatic.openssl.out}/lib";
-    OPENSSL_INCLUDE_DIR = "${pkgs.pkgsStatic.openssl.dev}/include";
+    OPENSSL_LIB_DIR = "${pkgs.pkgsCross.musl64.openssl.out}/lib";
+    OPENSSL_INCLUDE_DIR = "${pkgs.pkgsCross.musl64.openssl.dev}/include";
 
     # Disable running tests during build (they require runtime environment)
     doCheck = false;
+
+    # Use thin LTO to reduce memory usage during link (full LTO can OOM in sandbox)
+    cargoExtraArgs = "--config 'profile.release.lto=\"thin\"'";
   };
 
   # Build only dependencies (for caching)
@@ -78,7 +89,7 @@ let
     inherit cargoArtifacts;
 
     pname = name;
-    cargoExtraArgs = "-p ${name}";
+    cargoExtraArgs = "-p ${name} --config 'profile.release.lto=\"thin\"'";
 
     postInstall = pkgs.lib.optionalString (binName != null) ''
       # Keep only the specific binary
