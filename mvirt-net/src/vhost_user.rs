@@ -180,11 +180,11 @@ impl VhostUserBackendMut for VhostUserNetBackend {
             | VIRTIO_NET_F_GUEST_TSO4
             | VIRTIO_NET_F_GUEST_TSO6
             | VIRTIO_NET_F_GUEST_ECN
-        //    | VIRTIO_NET_F_GUEST_UFO
+            | VIRTIO_NET_F_GUEST_UFO
             | VIRTIO_NET_F_HOST_TSO4
             | VIRTIO_NET_F_HOST_TSO6
             | VIRTIO_NET_F_HOST_ECN
-        //    | VIRTIO_NET_F_HOST_UFO
+            | VIRTIO_NET_F_HOST_UFO
             | VIRTIO_NET_F_MRG_RXBUF
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
     }
