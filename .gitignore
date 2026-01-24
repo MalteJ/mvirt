@@ -37,3 +37,6 @@ target/
 /debian/*.substvars
 /debian/mvirt/
 /debian/mvirt-*/
+
+# Nix build output
+result

@@ -9,24 +9,66 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build and Release
+  build:
+    name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build with Docker
-        run: |
-          docker build -t mvirt-builder .
-          docker run --rm \
-            --user $(id -u):$(id -g) \
-            -v $PWD:/work \
-            mvirt-builder \
-            make iso deb
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Build ISO
+        run: nix build .#hypervisor-image -o iso-result
+
+      - name: Build binaries
+        run: nix build .#mvirt -o bin-result
 
       - name: Get version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p release
+          VERSION="${{ steps.version.outputs.VERSION }}"
+
+          # ISO
+          cp iso-result/iso/*.iso release/mvirt-hypervisor-${VERSION}.iso
+
+          # Binaries
+          cp bin-result/bin/mvirt release/
+          cp bin-result/bin/mvirt-vmm release/
+          cp bin-result/bin/mvirt-zfs release/
+          cp bin-result/bin/mvirt-net release/
+          cp bin-result/bin/mvirt-log release/
+
+          # Create tarball of binaries
+          tar -czvf release/mvirt-${VERSION}-linux-x86_64.tar.gz -C bin-result/bin .
+
+      - name: Build Debian packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debhelper devscripts
+
+          # Copy pre-built Nix binaries to where debian/rules expects them
+          mkdir -p target/x86_64-unknown-linux-musl/release
+          cp bin-result/bin/* target/x86_64-unknown-linux-musl/release/
+
+          # Update changelog version
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          VERSION_NUM="${VERSION#v}"
+          sed -i "1s/([^)]*)/($VERSION_NUM)/" debian/changelog
+
+          # Build .deb packages (skip cargo build since we have Nix binaries)
+          sed -i 's/cargo build --release --target $(MUSL_TARGET)/echo "Using pre-built Nix binaries"/' debian/rules
+          sed -i 's/$(MAKE) vmm-deps/echo "Skipping vmm-deps"/' debian/rules
+          dpkg-buildpackage -us -uc -b
+
+          # Move .deb files to release/
+          mv ../*.deb release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -36,8 +78,11 @@ jobs:
           prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-alpha') || contains(github.ref, '-beta') }}
           generate_release_notes: true
           files: |
-            mvirt-os/target/mvirt.efi
-            mvirt-os/target/mvirt-os.iso
-            target/x86_64-unknown-linux-musl/release/mvirt
-            target/x86_64-unknown-linux-musl/release/mvirt-vmm
-            deb-out/*.deb
+            release/mvirt-hypervisor-${{ steps.version.outputs.VERSION }}.iso
+            release/mvirt-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
+            release/mvirt
+            release/mvirt-vmm
+            release/mvirt-zfs
+            release/mvirt-net
+            release/mvirt-log
+            release/*.deb

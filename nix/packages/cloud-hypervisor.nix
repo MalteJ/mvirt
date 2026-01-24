@@ -11,7 +11,7 @@ pkgs.stdenv.mkDerivation {
 
   src = pkgs.fetchurl {
     url = "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${version}/cloud-hypervisor-static";
-    sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";  # Will be updated on first build
+    sha256 = "sha256-EL2PZzV9gQzwh8zxIfi3ON2N9XgVnKYkYKD6m+UNEog=";
   };
 
   dontUnpack = true;

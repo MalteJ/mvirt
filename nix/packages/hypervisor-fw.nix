@@ -16,7 +16,7 @@ in {
 
     src = pkgs.fetchurl {
       url = "https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/${hypervisorFwVersion}/hypervisor-fw";
-      sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";  # Update on first build
+      sha256 = "sha256-WMFGE7xmBnI/GBJNAPujRk+vMx1ssGp//lbeYtgHEkA=";
     };
 
     dontUnpack = true;

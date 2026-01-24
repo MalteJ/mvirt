@@ -3,14 +3,14 @@
 
 {
   imports = [
-    # Include the ISO image generator
+    # Include the ISO image generator (without base.nix bloat)
     "${modulesPath}/installer/cd-dvd/iso-image.nix"
-    "${modulesPath}/profiles/base.nix"
   ];
 
   # System identification
   system.stateVersion = "24.11";
   networking.hostName = "mvirt-hypervisor";
+  networking.hostId = "deadbeef";  # Required for ZFS
 
   # Boot configuration
   boot = {
@@ -95,7 +95,7 @@
     vmm.enable = true;
     log.enable = true;
     net.enable = true;
-    zfs.enable = false;  # Disabled by default (requires ZFS pool)
+    zfs.enable = true;
   };
 
   # SSH access
@@ -129,7 +129,6 @@
 
   # System packages
   environment.systemPackages = with pkgs; [
-    # Basics
     vim
     htop
     tmux
@@ -143,7 +142,7 @@
 
     # Disk tools
     parted
-    util-linux  # for lsblk
+    util-linux
 
     # mvirt CLI
     mvirtPkgs.mvirt-cli
@@ -155,10 +154,14 @@
     wantedBy = [ "multi-user.target" ];
   };
 
-  # Documentation
-  documentation.enable = true;
-  documentation.nixos.enable = true;
+  # Disable documentation (saves ~50 MB)
+  documentation.enable = false;
+  documentation.nixos.enable = false;
 
-  # Disable ZFS to avoid kernel compatibility issues with latest kernels
-  boot.supportedFilesystems.zfs = lib.mkForce false;
+  # Disable nix flake registry (saves ~200 MB nixpkgs source)
+  nix.registry = lib.mkForce {};
+  nix.channel.enable = false;
+
+  # Enable ZFS
+  boot.supportedFilesystems.zfs = true;
 }
