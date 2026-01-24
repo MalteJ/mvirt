@@ -647,6 +647,10 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 .map(|cqe| (cqe.user_data(), cqe.result()))
                 .collect();
 
+            // Track reactors that received packets this batch (for batched signaling)
+            let mut reactors_to_signal: std::collections::HashSet<ReactorId> =
+                std::collections::HashSet::new();
+
             // Process all completions
             for (user_data, result) in completions {
                 let is_event = (user_data & USER_DATA_EVENT_FLAG) != 0;
@@ -1068,12 +1072,14 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                                         None, // No keep_alive - buffer managed by rx_queue
                                     );
 
-                                    if registry.send_packet_to(&target_reactor, packet) {
+                                    if registry.send_packet_to_no_signal(&target_reactor, packet) {
                                         debug!(
                                             len,
                                             dst = %target_reactor,
                                             "TUN RX -> vhost (zero-copy)"
                                         );
+                                        // Track reactor for batched signaling
+                                        reactors_to_signal.insert(target_reactor);
                                         // Track in-flight - DON'T return buffer yet
                                         tun_rx_in_flight.insert(packet_id.raw(), chain_id);
                                         // Continue without returning the buffer
@@ -1132,6 +1138,13 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
                     // Return TX buffer
                     self.tx_queue.push_used(chain.chain_id);
+                }
+            }
+
+            // Signal all reactors that received packets this batch (batched signaling)
+            if let Some(ref registry) = self.registry {
+                for reactor_id in &reactors_to_signal {
+                    registry.signal_reactor(reactor_id);
                 }
             }
 

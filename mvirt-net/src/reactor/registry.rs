@@ -117,6 +117,11 @@ impl ReactorInfo {
         Ok(())
     }
 
+    /// Send a packet to this reactor without signaling (for batching).
+    pub fn send_packet_no_signal(&self, packet: PacketRef) -> Result<(), PacketRef> {
+        self.packet_tx.send(packet).map_err(|e| e.0)
+    }
+
     /// Send a completion notification to this reactor and signal it.
     pub fn send_completion(&self, completion: CompletionNotify) -> Result<(), CompletionNotify> {
         self.completion_tx.send(completion).map_err(|e| e.0)?;
@@ -208,6 +213,19 @@ impl ReactorRegistry {
         }
     }
 
+    /// Send a packet to a reactor by ID without signaling (for batching).
+    ///
+    /// Returns true if the packet was sent, false if reactor not found.
+    /// Caller must call `signal_reactor` after sending all packets.
+    pub fn send_packet_to_no_signal(&self, reactor_id: &ReactorId, packet: PacketRef) -> bool {
+        let reactors = self.reactors.read().unwrap();
+        if let Some(info) = reactors.get(reactor_id) {
+            info.send_packet_no_signal(packet).is_ok()
+        } else {
+            false
+        }
+    }
+
     /// Send a packet to a TUN reactor by interface index.
     ///
     /// Returns true if the packet was sent, false if reactor not found.
@@ -239,6 +257,14 @@ impl ReactorRegistry {
             info.send_completion(completion).is_ok()
         } else {
             false
+        }
+    }
+
+    /// Signal a reactor by ID (for use with batched packet sending).
+    pub fn signal_reactor(&self, reactor_id: &ReactorId) {
+        let reactors = self.reactors.read().unwrap();
+        if let Some(info) = reactors.get(reactor_id) {
+            info.signal();
         }
     }
 
