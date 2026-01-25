@@ -1,0 +1,382 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 20% 4%;
+    --foreground: 240 10% 95%;
+    --card: 240 15% 8%;
+    --card-foreground: 240 10% 95%;
+    --popover: 240 15% 8%;
+    --popover-foreground: 240 10% 95%;
+    --primary: 270 91% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 15% 12%;
+    --secondary-foreground: 240 10% 95%;
+    --muted: 240 15% 12%;
+    --muted-foreground: 240 10% 60%;
+    --accent: 270 91% 65%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 15% 18%;
+    --input: 240 15% 18%;
+    --ring: 270 91% 65%;
+    --radius: 0.5rem;
+  }
+
+  .light {
+    --background: 0 0% 98%;
+    --foreground: 220 15% 15%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 15% 15%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 15% 15%;
+    --primary: 220 80% 50%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 10% 94%;
+    --secondary-foreground: 220 15% 15%;
+    --muted: 220 10% 94%;
+    --muted-foreground: 220 10% 45%;
+    --accent: 220 80% 50%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 84% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 10% 88%;
+    --input: 220 10% 88%;
+    --ring: 220 80% 50%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* Animated gradient background - dark mode */
+.dark .bg-gradient-animated {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(168, 85, 247, 0.15), transparent),
+    radial-gradient(ellipse 60% 40% at 80% 20%, rgba(99, 102, 241, 0.1), transparent),
+    radial-gradient(ellipse 50% 30% at 50% 80%, rgba(34, 211, 238, 0.08), transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Animated gradient background - light mode (subtle blue tones) */
+.light .bg-gradient-animated {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(59, 130, 246, 0.06), transparent),
+    radial-gradient(ellipse 60% 40% at 80% 20%, rgba(34, 211, 238, 0.04), transparent),
+    radial-gradient(ellipse 50% 30% at 50% 80%, rgba(16, 185, 129, 0.03), transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+
+@layer utilities {
+  .text-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .text-gradient {
+    background: linear-gradient(135deg, #fff 0%, #c084fc 50%, #818cf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .light .text-gradient {
+    background: linear-gradient(135deg, #1e3a5f 0%, #3b82f6 50%, #0ea5e9 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .border-gradient {
+    border: 1px solid transparent;
+    background: linear-gradient(#12121a, #12121a) padding-box,
+                linear-gradient(135deg, rgba(168, 85, 247, 0.5), rgba(59, 130, 246, 0.5)) border-box;
+  }
+
+  .light .border-gradient {
+    background: linear-gradient(#fff, #fff) padding-box,
+                linear-gradient(135deg, rgba(59, 130, 246, 0.4), rgba(14, 165, 233, 0.4)) border-box;
+  }
+
+  .glow-purple {
+    box-shadow: 0 0 20px rgba(168, 85, 247, 0.4);
+  }
+
+  .light .glow-purple {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+  }
+
+  .glow-cyan {
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.3);
+  }
+}
+
+/* xterm.js styles */
+.xterm {
+  padding: 8px;
+}
+
+.xterm-viewport {
+  overflow-y: auto !important;
+}
+
+/* Custom scrollbar - dark mode */
+.dark ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: #12121a;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #3a3a4a;
+  border-radius: 4px;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #4a4a5a;
+}
+
+/* Custom scrollbar - light mode */
+.light ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.light ::-webkit-scrollbar-track {
+  background: #f5f5f5;
+}
+
+.light ::-webkit-scrollbar-thumb {
+  background: #c5c5d5;
+  border-radius: 4px;
+}
+
+.light ::-webkit-scrollbar-thumb:hover {
+  background: #a5a5b5;
+}
+
+/* State badge animations */
+.state-running {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 5px rgba(16, 185, 129, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 15px rgba(16, 185, 129, 0.8);
+  }
+}
+
+/* Light mode overrides for purple elements */
+.light .bg-purple\/20 {
+  background-color: rgba(59, 130, 246, 0.15);
+}
+
+.light .text-purple-light {
+  color: #3b82f6;
+}
+
+.light .border-purple\/30 {
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.light .hover\:bg-purple\/20:hover {
+  background-color: rgba(59, 130, 246, 0.15);
+}
+
+.light .hover\:text-purple-light:hover {
+  color: #3b82f6;
+}
+
+.light .from-purple {
+  --tw-gradient-from: #3b82f6;
+}
+
+.light .to-blue {
+  --tw-gradient-to: #0ea5e9;
+}
+
+/* Light mode: muted stat cards with slight blue tint */
+.light .from-purple\/20 {
+  --tw-gradient-from: rgba(147, 171, 203, 0.15);
+}
+.light .from-cyan\/20 {
+  --tw-gradient-from: rgba(147, 171, 203, 0.15);
+}
+.light .from-blue\/20 {
+  --tw-gradient-from: rgba(147, 171, 203, 0.15);
+}
+.light .from-state-running\/20 {
+  --tw-gradient-from: rgba(147, 171, 203, 0.15);
+}
+.light .to-pink\/10,
+.light .to-blue\/10,
+.light .to-purple\/10,
+.light .to-cyan\/10 {
+  --tw-gradient-to: rgba(219, 229, 241, 0.5);
+}
+.light .border-purple\/30,
+.light .border-cyan\/30,
+.light .border-blue\/30,
+.light .border-state-running\/30 {
+  border-color: rgba(172, 194, 220, 0.5);
+}
+
+/* Light mode: muted icon colors in stat cards */
+.light .text-cyan {
+  color: #5a7a9a;
+}
+.light .text-blue {
+  color: #5a7a9a;
+}
+
+/* Light mode: swap frame and content colors */
+.light .bg-card\/80 {
+  background-color: rgba(248, 250, 252, 0.95);
+}
+
+.light .main-content {
+  background-color: #fcfcfd;
+  border-radius: 0.5rem 0 0 0;
+}
+
+/* Light mode button glow - blue instead of purple */
+.light .hover\:shadow-\[0_0_20px_rgba\(168\,85\,247\,0\.5\)\]:hover {
+  --tw-shadow: 0 0 20px rgba(59, 130, 246, 0.4);
+  --tw-shadow-colored: 0 0 20px var(--tw-shadow-color);
+  box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
+}
+
+/* Primary button shimmer effect */
+.btn-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-shimmer::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.2) 50%,
+    transparent 100%
+  );
+  transition: none;
+}
+
+.btn-shimmer:hover::before {
+  animation: shimmer 1s ease-out;
+}
+
+@keyframes shimmer {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+/* Logo text shimmer effect */
+.logo-shimmer {
+  background: linear-gradient(
+    90deg,
+    #c084fc 0%,
+    #818cf8 25%,
+    #fff 50%,
+    #818cf8 75%,
+    #c084fc 100%
+  );
+  background-size: 200% 100%;
+  background-position: 100% 0;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  transition: background-position 0s;
+}
+
+.group:hover .logo-shimmer {
+  animation: logo-shimmer 1s ease-out forwards;
+}
+
+@keyframes logo-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0% 0;
+  }
+}
+
+/* Logo box shimmer effect */
+.logo-box-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.logo-box-shimmer::after {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -100%;
+  width: 50%;
+  height: 200%;
+  background: linear-gradient(
+    45deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.35) 50%,
+    transparent 100%
+  );
+  pointer-events: none;
+  transform: skewX(20deg);
+}
+
+.group:hover .logo-box-shimmer::after {
+  animation: box-shimmer 0.8s ease-out;
+}
+
+@keyframes box-shimmer {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 200%;
+  }
+}
+
+.light .logo-shimmer {
+  background: linear-gradient(135deg, #1e3a5f 0%, #3b82f6 50%, #0ea5e9 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
