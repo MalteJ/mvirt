@@ -15,12 +15,12 @@ use storage::LogManager;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Port to listen on
-    #[arg(short, long, default_value_t = 50052)]
-    port: u16,
+    /// Listen address (e.g., [::1]:50052)
+    #[arg(short, long, default_value = "[::1]:50052")]
+    listen: String,
 
     /// Data directory for logs
-    #[arg(long, default_value = "/var/lib/mvirt/log")]
+    #[arg(short, long, default_value = "/var/lib/mvirt/log")]
     data_dir: PathBuf,
 }
 
@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Opening log storage at {:?}", args.data_dir);
     let manager = Arc::new(LogManager::new(&args.data_dir)?);
 
-    let addr = format!("[::1]:{}", args.port).parse()?;
+    let addr = args.listen.parse()?;
     let service = MyLogService { manager };
 
     info!("mvirt-log listening on {}", addr);

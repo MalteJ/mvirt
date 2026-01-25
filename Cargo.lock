@@ -1697,7 +1697,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "mvirt-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "mvirt-log"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "mvirt-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "crc32fast",
@@ -1774,7 +1774,7 @@ dependencies = [
 
 [[package]]
 name = "mvirt-vmm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "mvirt-zfs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "pideisn"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dhcproto 0.14.0",
  "libc",

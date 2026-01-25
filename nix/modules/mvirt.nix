@@ -119,10 +119,10 @@ in {
 
     # Ensure data directory exists
     systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0750 mvirt mvirt -"
-      "d ${cfg.dataDir}/images 0750 mvirt mvirt -"
-      "d ${cfg.dataDir}/db 0750 mvirt mvirt -"
-      "d ${cfg.dataDir}/sockets 0750 mvirt mvirt -"
+      "d ${cfg.dataDir} 0755 root root -"
+      "d ${cfg.dataDir}/vmm 0755 root root -"
+      "d ${cfg.dataDir}/log 0750 mvirt mvirt -"
+      "d ${cfg.dataDir}/net 0755 root root -"
     ];
 
     # mvirt-log service (starts first, others depend on it)
@@ -135,7 +135,7 @@ in {
         Type = "simple";
         User = "mvirt";
         Group = "mvirt";
-        ExecStart = "${mvirtPkgs}/bin/mvirt-log --port ${toString cfg.log.port} --db ${cfg.dataDir}/db/log.db ${concatStringsSep " " cfg.log.extraArgs}";
+        ExecStart = "${mvirtPkgs}/bin/mvirt-log --listen [::1]:${toString cfg.log.port} --data-dir ${cfg.dataDir}/log ${concatStringsSep " " cfg.log.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
@@ -166,7 +166,7 @@ in {
       serviceConfig = {
         Type = "simple";
         User = "root";  # Needs root for KVM/TAP access
-        ExecStart = "${mvirtPkgs}/bin/mvirt-vmm --port ${toString cfg.vmm.port} --db ${cfg.dataDir}/db/vmm.db ${concatStringsSep " " cfg.vmm.extraArgs}";
+        ExecStart = "${mvirtPkgs}/bin/mvirt-vmm --listen [::1]:${toString cfg.vmm.port} --data-dir ${cfg.dataDir}/vmm ${concatStringsSep " " cfg.vmm.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
@@ -192,7 +192,7 @@ in {
       serviceConfig = {
         Type = "simple";
         User = "root";  # Needs root for ZFS operations
-        ExecStart = "${mvirtPkgs}/bin/mvirt-zfs --port ${toString cfg.zfs.port} --pool ${cfg.zfs.pool} --db ${cfg.dataDir}/db/zfs.db ${concatStringsSep " " cfg.zfs.extraArgs}";
+        ExecStart = "${mvirtPkgs}/bin/mvirt-zfs --listen [::1]:${toString cfg.zfs.port} --pool ${cfg.zfs.pool} --log-endpoint http://[::1]:${toString cfg.log.port} ${concatStringsSep " " cfg.zfs.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
@@ -217,21 +217,14 @@ in {
 
       serviceConfig = {
         Type = "simple";
-        User = "mvirt";
-        Group = "mvirt";
-        ExecStart = "${mvirtPkgs}/bin/mvirt-net --port ${toString cfg.net.port} --db ${cfg.dataDir}/db/net.db ${concatStringsSep " " cfg.net.extraArgs}";
+        User = "root";  # Needs root for TUN device
+        ExecStart = "${mvirtPkgs}/bin/mvirt-net ${concatStringsSep " " cfg.net.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
-        # Capabilities for network operations
-        AmbientCapabilities = [ "CAP_NET_ADMIN" "CAP_NET_RAW" ];
-        CapabilityBoundingSet = [ "CAP_NET_ADMIN" "CAP_NET_RAW" ];
-
-        # Hardening
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        ReadWritePaths = [ cfg.dataDir "/run" ];
+        # Hardening (limited due to root requirement for TUN)
+        NoNewPrivileges = false;
+        ProtectSystem = "full";
         PrivateTmp = true;
       };
     };

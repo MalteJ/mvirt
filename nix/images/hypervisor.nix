@@ -1,5 +1,5 @@
 # NixOS Hypervisor Image Configuration
-{ config, lib, pkgs, modulesPath, self, mvirtPkgs, ... }:
+{ config, lib, pkgs, modulesPath, self, mvirtPkgs, disko, ... }:
 
 {
   imports = [
@@ -118,6 +118,7 @@
   # Admin user
   users.users.admin = {
     isNormalUser = true;
+    initialPassword = "admin";
     extraGroups = [ "wheel" "mvirt" ];
     openssh.authorizedKeys.keys = [
       # Add your SSH public key here or override in your configuration
@@ -146,6 +147,10 @@
 
     # mvirt CLI
     mvirtPkgs.mvirt-cli
+
+    # NixOS installer
+    mvirtPkgs.nixos-wizard
+    disko.packages.${pkgs.system}.disko
   ];
 
   # Enable serial console for headless operation
