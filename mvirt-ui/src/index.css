@@ -101,7 +101,7 @@
   }
 
   .light .text-gradient {
-    background: linear-gradient(135deg, #1e3a5f 0%, #3b82f6 50%, #0ea5e9 100%);
+    background: linear-gradient(135deg, #1e40af 0%, #2563eb 50%, #0891b2 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -194,81 +194,87 @@
 
 /* Light mode overrides for purple elements */
 .light .bg-purple\/20 {
-  background-color: rgba(59, 130, 246, 0.15);
+  background-color: rgba(37, 99, 235, 0.12);
 }
 
 .light .text-purple-light {
-  color: #3b82f6;
+  color: #2563eb;
 }
 
 .light .border-purple\/30 {
-  border-color: rgba(59, 130, 246, 0.3);
+  border-color: rgba(37, 99, 235, 0.35);
 }
 
 .light .hover\:bg-purple\/20:hover {
-  background-color: rgba(59, 130, 246, 0.15);
+  background-color: rgba(37, 99, 235, 0.12);
 }
 
 .light .hover\:text-purple-light:hover {
-  color: #3b82f6;
+  color: #2563eb;
 }
 
 .light .from-purple {
-  --tw-gradient-from: #3b82f6;
+  --tw-gradient-from: #2563eb;
 }
 
 .light .to-blue {
-  --tw-gradient-to: #0ea5e9;
+  --tw-gradient-to: #0891b2;
 }
 
-/* Light mode: muted stat cards with slight blue tint */
+/* Light mode: stat cards with subtle colored tints */
 .light .from-purple\/20 {
-  --tw-gradient-from: rgba(147, 171, 203, 0.15);
+  --tw-gradient-from: rgba(37, 99, 235, 0.08);
 }
 .light .from-cyan\/20 {
-  --tw-gradient-from: rgba(147, 171, 203, 0.15);
+  --tw-gradient-from: rgba(6, 182, 212, 0.08);
 }
 .light .from-blue\/20 {
-  --tw-gradient-from: rgba(147, 171, 203, 0.15);
+  --tw-gradient-from: rgba(59, 130, 246, 0.08);
 }
 .light .from-state-running\/20 {
-  --tw-gradient-from: rgba(147, 171, 203, 0.15);
+  --tw-gradient-from: rgba(16, 185, 129, 0.08);
 }
 .light .to-pink\/10,
 .light .to-blue\/10,
 .light .to-purple\/10,
 .light .to-cyan\/10 {
-  --tw-gradient-to: rgba(219, 229, 241, 0.5);
+  --tw-gradient-to: rgba(240, 245, 255, 0.6);
 }
-.light .border-purple\/30,
-.light .border-cyan\/30,
-.light .border-blue\/30,
+.light .border-purple\/30 {
+  border-color: rgba(37, 99, 235, 0.25);
+}
+.light .border-cyan\/30 {
+  border-color: rgba(6, 182, 212, 0.25);
+}
+.light .border-blue\/30 {
+  border-color: rgba(59, 130, 246, 0.25);
+}
 .light .border-state-running\/30 {
-  border-color: rgba(172, 194, 220, 0.5);
+  border-color: rgba(16, 185, 129, 0.25);
 }
 
-/* Light mode: muted icon colors in stat cards */
+/* Light mode: saturated icon colors in stat cards */
 .light .text-cyan {
-  color: #5a7a9a;
+  color: #0891b2;
 }
 .light .text-blue {
-  color: #5a7a9a;
+  color: #2563eb;
 }
 
 /* Light mode: swap frame and content colors */
 .light .bg-card\/80 {
-  background-color: rgba(248, 250, 252, 0.95);
+  background-color: rgba(241, 245, 249, 0.95);
 }
 
 .light .main-content {
-  background-color: #fcfcfd;
+  background-color: #ffffff;
   border-radius: 0.5rem 0 0 0;
 }
 
-/* Light mode button glow - blue instead of purple */
-.light .hover\:shadow-\[0_0_20px_rgba\(168\,85\,247\,0\.5\)\]:hover {
-  --tw-shadow: 0 0 20px rgba(59, 130, 246, 0.4);
-  --tw-shadow-colored: 0 0 20px var(--tw-shadow-color);
+/* Light mode button glow - saturated blue */
+.light .hover\:shadow-\[0_0_25px_rgba\(168\,85\,247\,0\.7\)\]:hover {
+  --tw-shadow: 0 0 25px rgba(37, 99, 235, 0.5);
+  --tw-shadow-colored: 0 0 25px var(--tw-shadow-color);
   box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
@@ -390,7 +396,7 @@
     90deg,
     transparent 0%,
     transparent 40%,
-    rgba(59, 130, 246, 0.6) 50%,
+    rgba(37, 99, 235, 0.8) 50%,
     transparent 60%,
     transparent 100%
   );
