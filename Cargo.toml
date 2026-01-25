@@ -5,7 +5,7 @@ members = [
     "mvirt-cli",
     "mvirt-zfs",
     "mvirt-net",
-    "mvirt-os/pideisn",
+    "mvirt-uos/pideisn",
     "mvirt-log",
 ]
 

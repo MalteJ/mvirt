@@ -4,7 +4,7 @@ This guide explains how the kernel build works and how to customize it.
 
 ## Overview
 
-mvirt-os uses a minimal Linux kernel optimized for virtualization. The kernel configuration uses a **fragment-based approach** rather than a full `.config` file.
+mvirt-uos uses a minimal Linux kernel optimized for virtualization. The kernel configuration uses a **fragment-based approach** rather than a full `.config` file.
 
 ## Config Fragment Approach
 
@@ -22,15 +22,16 @@ Instead of maintaining a full kernel config (~8000+ lines), we use a small fragm
 
 ## Current Configuration
 
-The `mvirt-os/kernel.config` fragment includes:
+The `mvirt-uos/kernel.config` fragment includes:
 
 | Category | Options |
 |----------|---------|
-| **Virtio** | virtio-blk, virtio-net, virtio-console |
-| **Storage** | AHCI/SATA, NVMe, USB storage, SCSI |
-| **Network** | Intel (e1000e, igb, ice), Realtek (r8169), Broadcom, Mellanox |
-| **Input** | PS/2 keyboard/mouse, USB HID |
+| **Virtio** | virtio-blk, virtio-net, virtio-console, virtio-vsock |
 | **Filesystems** | ext4, tmpfs, proc, sysfs, devtmpfs |
+| **Networking** | IPv4, IPv6, Unix sockets |
+| **Serial** | 8250 UART for console |
+
+The kernel is optimized for MicroVMs - no hardware drivers needed.
 
 ## Customizing the Kernel
 
@@ -62,10 +63,10 @@ If the option works, add it to the fragment:
 
 ```bash
 # Add to kernel.config
-echo "CONFIG_MY_DRIVER=y" >> mvirt-os/kernel.config
+echo "CONFIG_MY_DRIVER=y" >> mvirt-uos/kernel.config
 ```
 
-Or edit `mvirt-os/kernel.config` directly.
+Or edit `mvirt-uos/kernel.config` directly.
 
 **Important:** Changes only in `.config` are lost after `make clean` or when `kernel.config` is modified, because `.config` is regenerated from the fragment.
 
@@ -111,10 +112,10 @@ Common dependencies to check:
 
 ## Kernel Version
 
-The kernel version is specified in `mvirt-os/kernel.version`:
+The kernel version is specified in `mvirt-uos/kernel.version`:
 
 ```bash
-cat mvirt-os/kernel.version
+cat mvirt-uos/kernel.version
 ```
 
 To update the kernel:
@@ -130,7 +131,7 @@ To update the kernel:
 Check if the option has unmet dependencies:
 
 ```bash
-cd mvirt-os/kernel
+cd mvirt-uos/kernel
 ./scripts/config --state CONFIG_MY_OPTION
 ```
 

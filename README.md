@@ -44,7 +44,7 @@ Lightweight VM manager in Rust as a modern alternative to libvirt.
 | `mvirt-log/`   | 50052 | Centralized audit logging service    |
 | `mvirt-zfs/`   | 50053 | ZFS storage management daemon        |
 | `mvirt-net/`   | 50054 | Virtual networking daemon            |
-| `mvirt-os/`    | -     | Linux kernel, initramfs, UKI builder |
+| `mvirt-uos/`   | -     | µOS - Minimal Linux for MicroVMs     |
 | `proto/`       | -     | gRPC protocol definitions            |
 
 ## Prerequisites
@@ -56,7 +56,7 @@ rustup target add x86_64-unknown-linux-musl
 # Build tools
 sudo apt install build-essential musl-tools
 
-# For mvirt-os (Kernel/UKI)
+# For mvirt-uos (Kernel/UKI)
 sudo apt install flex bison libncurses-dev libssl-dev libelf-dev bc dwarves
 sudo apt install systemd-ukify systemd-boot-efi genisoimage
 ```
@@ -64,17 +64,14 @@ sudo apt install systemd-ukify systemd-boot-efi genisoimage
 ## Build
 
 ```bash
-# Build everything (Rust + Kernel + initramfs + UKI)
+# Build everything (Rust + UKI)
 make
 
 # Rust binaries only
 make release
 
-# mvirt-os only (kernel + initramfs + UKI)
-make os
-
-# Bootable ISO (BIOS + UEFI)
-make iso
+# mvirt-uos only (UKI for direct boot)
+make uos
 
 # Build in Docker (no local dependencies needed)
 make docker
@@ -115,7 +112,7 @@ mvirt/
 ├── mvirt-log/              # Audit logging service
 ├── mvirt-zfs/              # ZFS storage daemon
 ├── mvirt-net/              # Networking daemon
-├── mvirt-os/               # Linux kernel + initramfs builder
+├── mvirt-uos/              # µOS - Minimal Linux for MicroVMs
 │   └── pideisn/            # Rust init (PID 1)
 ├── docs/                   # Documentation
 └── images/                 # VM disk images (not in git)
@@ -130,8 +127,7 @@ mvirt/
 | `target/x86_64-unknown-linux-musl/release/mvirt-log` | Logging service |
 | `target/x86_64-unknown-linux-musl/release/mvirt-zfs` | ZFS storage daemon |
 | `target/x86_64-unknown-linux-musl/release/mvirt-net` | Networking daemon |
-| `mvirt-os/target/mvirt.efi` | Bootable UKI |
-| `mvirt-os/target/mvirt-os.iso` | Bootable ISO |
+| `mvirt-uos/target/mvirt-uos.efi` | Bootable UKI (kernel + initramfs) |
 
 ## Documentation
 

@@ -4,7 +4,7 @@
 VMM_DIR := mvirt-vmm
 VMM_TARGET := $(VMM_DIR)/target
 
-# Versionen (sync mit mvirt-os.mk)
+# Versionen (sync mit mvirt-uos.mk)
 CH_VERSION := v50.0
 FW_VERSION := ch-a54f262b09
 

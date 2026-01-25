@@ -63,8 +63,7 @@ jobs:
         with:
           name: build-artifacts
           path: |
-            mvirt-os/target/mvirt.efi
-            mvirt-os/target/mvirt-os.iso
+            mvirt-uos/target/mvirt-uos.efi
             target/x86_64-unknown-linux-musl/release/mvirt
             target/x86_64-unknown-linux-musl/release/mvirt-vmm
           retention-days: 7

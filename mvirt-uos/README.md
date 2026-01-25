@@ -1,29 +1,25 @@
-# mvirt-os
+# mvirt-uos
 
-Build system for Linux kernel, initramfs, and UKI (Unified Kernel Image).
+µOS (Micro OS) - A minimal Linux guest OS for MicroVMs.
+
+Builds a UKI (Unified Kernel Image) containing kernel + initramfs + cmdline. Just ~3MB.
 
 ## Features
 
-- Minimal Linux kernel for cloud-hypervisor
-- initramfs with statically linked binaries
-- UKI for direct EFI booting
-- pideisn - Rust init (PID 1)
+- Minimal Linux kernel optimized for virtio
+- pideisn - Rust init (PID 1) with built-in DHCP
+- UKI for simple deployment (one file)
+- No unnecessary binaries - just init
 
 ## Usage
 
-All commands are run from the repository root:
-
 ```bash
-# Build everything (kernel + initramfs + UKI)
-make os
+# Build UKI
+make uos
 
 # Individual targets
 make kernel
 make initramfs
-make uki
-
-# Bootable ISO
-make iso
 
 # Configure kernel
 make menuconfig
@@ -32,63 +28,30 @@ make menuconfig
 ## Structure
 
 ```
-mvirt-os/
-├── kernel.version          # Kernel version (e.g. "6.18.4")
-├── kernel.config           # Kconfig fragment
-├── cmdline.txt             # Kernel cmdline
-├── mvirt-os.mk             # Main Makefile
-├── linux.mk                # Kernel build
+mvirt-uos/
+├── kernel.version          # Kernel version
+├── kernel.config           # Kconfig fragment (virtio-only)
+├── cmdline.txt             # Kernel cmdline (embedded in UKI)
+├── mvirt-uos.mk            # Makefile
 ├── initramfs/
 │   └── rootfs/             # initramfs skeleton
-│       ├── dev/
-│       ├── proc/
-│       ├── sys/
-│       ├── usr/bin/
-│       └── usr/sbin/
-├── pideisn/                # Rust init
+│       ├── etc/            # Basic config files
+│       └── init            # pideisn binary (built)
+├── pideisn/                # Rust init source
 │   ├── Cargo.toml
-│   └── src/main.rs
+│   └── src/
 └── target/                 # Build output
-    ├── cloud-hypervisor    # Downloaded binary
-    ├── initramfs.cpio.gz
-    └── mvirt.efi
+    ├── mvirt-uos.efi       # UKI (~3MB)
+    └── initramfs.cpio.gz   # Intermediate
 ```
 
-## Configuration
+## What's in the UKI
 
-### kernel.version
-
-```
-6.18.4
-```
-
-### kernel.config
-
-Kconfig fragment applied on top of `tinyconfig`:
-
-```
-CONFIG_64BIT=y
-CONFIG_VIRTIO_PCI=y
-CONFIG_VIRTIO_BLK=y
-CONFIG_VIRTIO_NET=y
-CONFIG_EXT4_FS=y
-...
-```
-
-### cmdline.txt
-
-```
-console=ttyS0 quiet
-```
-
-## initramfs Contents
-
-| Path | Source |
-|------|--------|
-| `/init` | `pideisn` (Rust init) |
-| `/usr/sbin/mvirt` | CLI |
-| `/usr/sbin/mvirt-vmm` | Daemon |
-| `/usr/bin/cloud-hypervisor` | cloud-hypervisor release |
+| Component | Size | Description |
+|-----------|------|-------------|
+| Kernel | ~2MB | Minimal Linux with virtio |
+| Initramfs | ~700KB | pideisn + /etc |
+| Cmdline | few bytes | `console=ttyS0` |
 
 ## pideisn
 
@@ -96,24 +59,25 @@ Minimal init process in Rust:
 
 1. Mounts `/proc`, `/sys`, `/dev`
 2. Sets hostname
-3. Starts `mvirt-vmm`
-4. Waits for shutdown signal
-5. Reboots
+3. Configures network (DHCP)
+4. Runs workload (TBD)
+5. Handles shutdown
 
-## Output
+## Testing
 
-| File | Description |
-|------|-------------|
-| `kernel/arch/x86/boot/bzImage` | Linux kernel |
-| `target/initramfs.cpio.gz` | Compressed initramfs |
-| `target/mvirt.efi` | Bootable UKI |
-| `target/cloud-hypervisor` | cloud-hypervisor binary |
+```bash
+# With cloud-hypervisor
+cloud-hypervisor \
+    --kernel mvirt-uos/target/mvirt-uos.efi \
+    --cpus boot=1 --memory size=128M \
+    --serial tty --console off
+```
 
 ## Cleanup
 
 ```bash
 make clean       # Delete build artifacts
-make distclean   # + kernel source + downloads
+make distclean   # + kernel source
 ```
 
 ## Dependencies
@@ -125,7 +89,4 @@ sudo apt install build-essential flex bison libncurses-dev \
 
 # UKI
 sudo apt install systemd-ukify systemd-boot-efi
-
-# cloud-init ISO
-sudo apt install genisoimage
 ```

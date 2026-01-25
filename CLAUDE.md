@@ -10,8 +10,8 @@ mvirt/
 ├── mvirt-vmm/       # Daemon (VM Manager)
 ├── mvirt-log/       # Centralized logging service
 ├── mvirt-zfs/       # ZFS storage management
-├── mvirt-os/        # Mini-Linux for VMs
-│   ├── pideins/     # Rust init process (PID 1)
+├── mvirt-uos/       # µOS - Minimal Linux for MicroVMs
+│   ├── pideisn/     # Rust init process (PID 1)
 │   └── initramfs/   # rootfs skeleton
 ├── proto/           # gRPC API definition
 └── images/          # Kernel and disk images (not in git)
@@ -164,7 +164,7 @@ audit.volume_created(&volume_id, &volume_name, size).await;
 - **Async channels** in TUI
 - **Console escape**: Ctrl+a t
 - **musl** for static linking
-- **UKI** for simple VM boot
+- **Direct kernel boot** for MicroVMs
 
 ## Common Issues
 

@@ -13,18 +13,13 @@
       url = "github:ipetkov/crane";
     };
 
-    nixos-wizard = {
-      url = "github:km-clay/nixos-wizard";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     disko = {
       url = "github:nix-community/disko/latest";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, crane, nixos-wizard, disko }:
+  outputs = { self, nixpkgs, rust-overlay, crane, disko }:
     let
       system = "x86_64-linux";
 
@@ -54,8 +49,6 @@
         inherit pkgs;
       };
 
-      nixosWizard = nixos-wizard.packages.${system}.default;
-
     in {
       # Individual packages
       packages.${system} = {
@@ -73,9 +66,6 @@
         cloud-hypervisor = cloudHypervisor;
         hypervisor-fw = hypervisorFw.hypervisor-fw;
         edk2-cloudhv = hypervisorFw.edk2-cloudhv;
-
-        # NixOS installer TUI
-        nixos-wizard = nixosWizard;
 
         # Hypervisor ISO image
         hypervisor-image = self.nixosConfigurations.hypervisor.config.system.build.isoImage;

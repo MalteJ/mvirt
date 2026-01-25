@@ -15,14 +15,14 @@ target/
 *.db-shm
 *.db-wal
 
-# mvirt-os build artifacts
-/mvirt-os/kernel/
-/mvirt-os/*.tar.*
-/mvirt-os/initramfs.cpio.gz
-/mvirt-os/mvirt.efi
-/mvirt-os/target/
-/mvirt-os/initramfs/rootfs/init
-/mvirt-os/initramfs/rootfs/usr/
+# mvirt-uos build artifacts
+/mvirt-uos/kernel/
+/mvirt-uos/*.tar.*
+/mvirt-uos/initramfs.cpio.gz
+/mvirt-uos/mvirt.efi
+/mvirt-uos/target/
+/mvirt-uos/initramfs/rootfs/init
+/mvirt-uos/initramfs/rootfs/usr/
 
 # mvirt-vmm downloads
 /mvirt-vmm/target/
