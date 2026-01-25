@@ -78,7 +78,7 @@ in {
 
       pool = mkOption {
         type = types.str;
-        default = "tank";
+        default = "mvirt";
         description = "ZFS pool to use for VM storage";
       };
 
@@ -123,6 +123,8 @@ in {
       "d ${cfg.dataDir}/vmm 0755 root root -"
       "d ${cfg.dataDir}/log 0750 mvirt mvirt -"
       "d ${cfg.dataDir}/net 0755 root root -"
+      "d /run/mvirt 0755 root root -"
+      "d /run/mvirt/net 0755 root root -"
     ];
 
     # mvirt-log service (starts first, others depend on it)

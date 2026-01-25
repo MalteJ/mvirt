@@ -3,17 +3,16 @@
 
 MUSL_TARGET := x86_64-unknown-linux-musl
 
-.PHONY: all build release os kernel initramfs uki iso menuconfig clean distclean check docker deb deb-clean install mvirt-log mvirt-zfs
-.PHONY: kernel-vm kernel-metal kernel-all uki-vm uki-metal uki-all iso-vm iso-metal iso-all
+.PHONY: all build release uos kernel initramfs menuconfig clean mrproper check docker deb deb-clean install iso
 
 # Include subsystems
-include mvirt-os/mvirt-os.mk
+include mvirt-uos/mvirt-uos.mk
 include mvirt-log/mvirt-log.mk
 include mvirt-zfs/mvirt-zfs.mk
 include mvirt-vmm/mvirt-vmm.mk
 
 # Default: build everything
-all: release os
+all: release uos
 
 # ============ RUST ============
 
@@ -27,27 +26,18 @@ release:
 $(RUST_TARGET_DIR)/pideisn $(RUST_TARGET_DIR)/mvirt $(RUST_TARGET_DIR)/mvirt-vmm:
 	cargo build --release --target $(MUSL_TARGET)
 
-# ============ MVIRT-OS ============
-
-os: uki
-
 # ============ CLEAN ============
 
-clean: os-clean
+clean: uos-clean
 	cargo clean
 
-distclean: os-distclean vmm-clean deb-clean
+mrproper: uos-mrproper vmm-clean deb-clean
 	cargo clean
 
 # ============ CHECK BUILD DEPENDENCIES ============
 
-REQUIRED_CMDS := cargo curl tar cpio gzip ukify xorriso qemu-img
+REQUIRED_CMDS := cargo curl tar cpio gzip qemu-img ukify
 REQUIRED_FILES := /usr/lib/systemd/boot/efi/linuxx64.efi.stub
-ISO_FILES := /usr/lib/ISOLINUX/isolinux.bin /usr/lib/ISOLINUX/isohdpfx.bin \
-             /usr/lib/syslinux/modules/bios/ldlinux.c32 \
-             /usr/lib/syslinux/modules/bios/libcom32.c32 \
-             /usr/lib/syslinux/modules/bios/libutil.c32 \
-             /usr/lib/syslinux/modules/bios/menu.c32
 
 check:
 	@echo "Checking build dependencies..."
@@ -72,15 +62,6 @@ check:
 		fi; \
 	done; \
 	echo ""; \
-	echo "ISO dependencies (optional):"; \
-	for f in $(ISO_FILES); do \
-		if [ -f "$$f" ]; then \
-			printf "  %-12s OK\n" "$$(basename $$f)"; \
-		else \
-			printf "  %-12s MISSING (apt install isolinux syslinux-common)\n" "$$(basename $$f)"; \
-		fi; \
-	done; \
-	echo ""; \
 	if [ $$ok -eq 1 ]; then \
 		echo "All required dependencies available."; \
 	else \
@@ -97,7 +78,12 @@ docker:
 		--user $$(id -u):$$(id -g) \
 		-v $(CURDIR):/work \
 		$(DOCKER_IMAGE) \
-		make iso
+		make uos
+
+# ============ NIX ISO ============
+
+iso:
+	nix build .#hypervisor-image -o nix/result
 
 # ============ DEBIAN PACKAGES ============
 

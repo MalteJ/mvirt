@@ -2,13 +2,15 @@
 { pkgs, craneLib }:
 
 let
-  # Source filtering - include Rust and proto files
+  # Source filtering - include Rust, proto, and SQL migration files
   src = pkgs.lib.cleanSourceWith {
     src = ../..;
     filter = path: type:
       (craneLib.filterCargoSources path type) ||
       (builtins.match ".*\.proto$" path != null) ||
-      (builtins.match ".*/proto/.*" path != null);
+      (builtins.match ".*/proto/.*" path != null) ||
+      (builtins.match ".*\.sql$" path != null) ||
+      (builtins.match ".*/migrations/.*" path != null);
   };
 
   # Common arguments for all builds
