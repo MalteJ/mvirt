@@ -64,7 +64,7 @@ jobs:
 
           # Build .deb packages (skip cargo build since we have Nix binaries)
           sed -i 's/cargo build --release --target $(MUSL_TARGET)/echo "Using pre-built Nix binaries"/' debian/rules
-          sed -i 's/$(MAKE) vmm-deps/echo "Skipping vmm-deps"/' debian/rules
+          sed -i 's/cargo clean/echo "Skipping cargo clean"/' debian/rules
           dpkg-buildpackage -us -uc -b
 
           # Move .deb files to release/
