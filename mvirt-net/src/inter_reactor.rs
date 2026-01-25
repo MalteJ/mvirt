@@ -11,9 +11,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 /// Maximum iovecs per packet.
-/// Descriptor chains rarely exceed 4 segments; 8 provides headroom.
+/// Linux virtio-net can use up to 18 segments for GSO packets.
+/// 32 provides ample headroom for edge cases.
 /// Using a fixed-size array avoids heap allocation in the hot path.
-pub const MAX_PACKET_IOVECS: usize = 8;
+pub const MAX_PACKET_IOVECS: usize = 32;
 
 /// Unique identifier for a reactor instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -275,6 +276,7 @@ impl CompletionNotify {
 /// Combines packet forwarding and completion notifications into a single
 /// type, allowing use of a single channel (and eventfd) per reactor.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // PacketRef is large but boxing would add heap allocation in hot path
 pub enum ReactorMessage {
     /// Incoming packet to be processed (forwarded from another reactor).
     Packet(PacketRef),
