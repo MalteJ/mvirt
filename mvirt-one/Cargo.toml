@@ -1,0 +1,69 @@
+[package]
+name = "mvirt-one"
+version = "0.1.0"
+edition = "2024"
+description = "MicroVM Init System for isolated Pods with container runtime"
+
+[lib]
+name = "mvirt_one"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mvirt-one"
+path = "src/main.rs"
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "process", "sync", "time", "macros", "fs", "signal"] }
+
+# vsock
+tokio-vsock = "0.5"
+
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+
+# System
+nix = { version = "0.29", features = ["mount", "net", "socket", "ioctl", "signal", "fs", "sched", "process"] }
+libc = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Network (from pideisn)
+rtnetlink = "0.14"
+netlink-packet-route = "0.21"
+dhcproto = "0.14"
+socket2 = "0.5"
+
+# OCI Image Pulling
+oci-distribution = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+flate2 = "1"
+tar = "0.4"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error Handling
+anyhow = "1"
+thiserror = "2"
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+
+# Streaming
+tokio-stream = "0.1"
+async-stream = "0.3"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+tonic = "0.12"
+nix = { version = "0.29", features = ["user", "process", "signal"] }

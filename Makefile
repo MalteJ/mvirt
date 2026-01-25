@@ -6,13 +6,13 @@ MUSL_TARGET := x86_64-unknown-linux-musl
 .PHONY: all build release uos kernel initramfs menuconfig clean mrproper check docker deb deb-clean install iso
 
 # Include subsystems
-include mvirt-uos/mvirt-uos.mk
+include mvirt-one/mvirt-one.mk
 include mvirt-log/mvirt-log.mk
 include mvirt-zfs/mvirt-zfs.mk
 include mvirt-vmm/mvirt-vmm.mk
 
 # Default: build everything
-all: release uos
+all: release one
 
 # ============ RUST ============
 
@@ -23,15 +23,15 @@ release:
 	cargo build --release --target $(MUSL_TARGET)
 
 # Rust binary targets (for dependency tracking)
-$(RUST_TARGET_DIR)/pideisn $(RUST_TARGET_DIR)/mvirt $(RUST_TARGET_DIR)/mvirt-vmm:
+$(RUST_TARGET_DIR)/mvirt-one $(RUST_TARGET_DIR)/mvirt $(RUST_TARGET_DIR)/mvirt-vmm:
 	cargo build --release --target $(MUSL_TARGET)
 
 # ============ CLEAN ============
 
-clean: uos-clean
+clean: one-clean
 	cargo clean
 
-mrproper: uos-mrproper vmm-clean deb-clean
+mrproper: one-mrproper vmm-clean deb-clean
 	cargo clean
 
 # ============ CHECK BUILD DEPENDENCIES ============

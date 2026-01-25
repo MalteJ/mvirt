@@ -9,8 +9,10 @@ use tracing_subscriber::EnvFilter;
 
 mod grpc;
 mod hypervisor;
+mod pod_service;
 mod store;
 mod system_info;
+mod vsock_client;
 
 pub mod proto {
     tonic::include_proto!("mvirt");
@@ -18,6 +20,8 @@ pub mod proto {
 
 use grpc::VmServiceImpl;
 use hypervisor::Hypervisor;
+use pod_service::PodServiceImpl;
+use proto::pod_service_server::PodServiceServer;
 use proto::vm_service_server::VmServiceServer;
 use store::VmStore;
 
@@ -62,14 +66,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create audit logger (connects lazily to mvirt-log)
     let audit = create_audit_logger("http://[::1]:50052", "vmm");
 
-    // Create gRPC service
-    let service = VmServiceImpl::new(store, hypervisor, audit);
+    // Create gRPC services
+    let vm_service = VmServiceImpl::new(store.clone(), hypervisor.clone(), audit.clone());
+    let pod_service = PodServiceImpl::new(store, hypervisor, audit);
 
     let addr = args.listen.parse()?;
     info!(addr = %addr, "Starting gRPC server");
 
     Server::builder()
-        .add_service(VmServiceServer::new(service))
+        .add_service(VmServiceServer::new(vm_service))
+        .add_service(PodServiceServer::new(pod_service))
         .serve(addr)
         .await?;
 

@@ -10,8 +10,9 @@ mvirt/
 ├── mvirt-vmm/       # Daemon (VM Manager)
 ├── mvirt-log/       # Centralized logging service
 ├── mvirt-zfs/       # ZFS storage management
-├── mvirt-uos/       # µOS - Minimal Linux for MicroVMs
-│   ├── pideisn/     # Rust init process (PID 1)
+├── mvirt-one/       # MicroVM Init System for isolated Pods
+│   ├── src/         # Rust init process (PID 1)
+│   ├── proto/       # uos gRPC API
 │   └── initramfs/   # rootfs skeleton
 ├── proto/           # gRPC API definition
 └── images/          # Kernel and disk images (not in git)

@@ -1,0 +1,168 @@
+syntax = "proto3";
+package mvirt.uos;
+
+// UosService provides the API for managing pods and containers in the MicroVM
+service UosService {
+  // Pod Management
+  rpc CreatePod(CreatePodRequest) returns (Pod);
+  rpc StartPod(StartPodRequest) returns (Pod);
+  rpc StopPod(StopPodRequest) returns (Pod);
+  rpc DeletePod(DeletePodRequest) returns (Empty);
+  rpc GetPod(GetPodRequest) returns (Pod);
+  rpc ListPods(Empty) returns (ListPodsResponse);
+
+  // Container Logs/Exec
+  rpc Logs(LogsRequest) returns (stream LogsResponse);
+  rpc Exec(stream ExecInput) returns (stream ExecOutput);
+
+  // System
+  rpc Shutdown(ShutdownRequest) returns (Empty);
+  rpc Health(Empty) returns (HealthResponse);
+}
+
+message Empty {}
+
+// Pod states
+enum PodState {
+  POD_STATE_UNSPECIFIED = 0;
+  POD_STATE_CREATED = 1;
+  POD_STATE_RUNNING = 2;
+  POD_STATE_STOPPED = 3;
+  POD_STATE_FAILED = 4;
+}
+
+// Container states
+enum ContainerState {
+  CONTAINER_STATE_UNSPECIFIED = 0;
+  CONTAINER_STATE_CREATING = 1;
+  CONTAINER_STATE_CREATED = 2;
+  CONTAINER_STATE_RUNNING = 3;
+  CONTAINER_STATE_STOPPED = 4;
+  CONTAINER_STATE_FAILED = 5;
+}
+
+// Pod represents a group of containers sharing network/IPC namespaces
+message Pod {
+  string id = 1;
+  string name = 2;
+  PodState state = 3;
+  repeated Container containers = 4;
+  string ip_address = 5;
+  string error_message = 6;
+}
+
+// Container represents a single OCI container within a pod
+message Container {
+  string id = 1;
+  string name = 2;
+  ContainerState state = 3;
+  int32 exit_code = 4;
+  string image = 5;
+  string error_message = 6;
+}
+
+// ContainerSpec defines how to create a container
+message ContainerSpec {
+  string id = 1;                     // Unique container ID
+  string name = 2;                   // Human-readable name
+  string image = 3;                  // OCI Image Reference (e.g., "docker.io/library/alpine:latest")
+  repeated string command = 4;       // Entrypoint command
+  repeated string args = 5;          // Command arguments
+  repeated string env = 6;           // Environment variables (KEY=VALUE format)
+  string working_dir = 7;            // Working directory inside container
+}
+
+// CreatePodRequest creates a new pod with the specified containers
+message CreatePodRequest {
+  string id = 1;                     // Unique pod ID
+  string name = 2;                   // Human-readable name
+  repeated ContainerSpec containers = 3;
+}
+
+// StartPodRequest starts a created pod
+message StartPodRequest {
+  string id = 1;
+}
+
+// StopPodRequest stops a running pod
+message StopPodRequest {
+  string id = 1;
+  uint32 timeout_seconds = 2;        // Grace period before force kill (default: 10)
+}
+
+// DeletePodRequest deletes a pod
+message DeletePodRequest {
+  string id = 1;
+  bool force = 2;                    // Force delete even if running
+}
+
+// GetPodRequest retrieves a pod by ID
+message GetPodRequest {
+  string id = 1;
+}
+
+// ListPodsResponse contains all pods
+message ListPodsResponse {
+  repeated Pod pods = 1;
+}
+
+// LogsRequest requests logs from a container
+message LogsRequest {
+  string pod_id = 1;
+  string container_id = 2;           // Optional: specific container, or all if empty
+  bool follow = 3;                   // Stream logs continuously
+  uint32 tail_lines = 4;             // Number of lines from end (0 = all)
+}
+
+// LogsResponse contains log data
+message LogsResponse {
+  string container_id = 1;
+  bytes data = 2;
+  bool is_stderr = 3;
+}
+
+// ExecInput is sent from client to container
+message ExecInput {
+  oneof input {
+    ExecStart start = 1;
+    bytes stdin = 2;
+    ExecResize resize = 3;
+  }
+}
+
+// ExecStart initiates an exec session
+message ExecStart {
+  string pod_id = 1;
+  string container_id = 2;
+  repeated string command = 3;
+  bool tty = 4;
+  repeated string env = 5;
+}
+
+// ExecResize changes terminal dimensions
+message ExecResize {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+// ExecOutput is sent from container to client
+message ExecOutput {
+  oneof output {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    int32 exit_code = 3;
+  }
+}
+
+// ShutdownRequest initiates graceful shutdown
+message ShutdownRequest {
+  uint32 timeout_seconds = 1;        // Grace period for container shutdown
+}
+
+// HealthResponse indicates system health
+message HealthResponse {
+  bool healthy = 1;
+  string version = 2;
+  uint32 running_pods = 3;
+  uint32 running_containers = 4;
+}

@@ -37,6 +37,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Audit logging
 mvirt-log = { path = "../mvirt-log" }
 
+# MicroVM Init System (for proto definitions)
+mvirt-one = { path = "../mvirt-one" }
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
@@ -49,6 +52,10 @@ nix = { version = "0.29", features = ["signal", "process"] }
 
 # System information
 sysinfo = "0.32"
+
+# vsock for Pod communication
+tokio-vsock = "0.5"
+tower = "0.5"
 
 [build-dependencies]
 tonic-build = "0.12"

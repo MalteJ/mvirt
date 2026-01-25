@@ -5,12 +5,12 @@ members = [
     "mvirt-cli",
     "mvirt-zfs",
     "mvirt-net",
-    "mvirt-uos/pideisn",
+    "mvirt-one",
     "mvirt-log",
 ]
 
-# Size optimization for pideins (VM init process)
-[profile.release.package.pideisn]
+# Size optimization for init process (MicroVM init)
+[profile.release.package.mvirt-one]
 opt-level = "z"
 codegen-units = 1
 strip = true
