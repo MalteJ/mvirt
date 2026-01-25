@@ -1593,12 +1593,13 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     "vhost TX processing"
                 );
 
-                // Peek at packet headers
-                let peek_slice = Self::peek_packet_headers(&in_flight);
+                // Peek at packet headers (stack buffer avoids heap allocation)
+                let mut peek_buf = [0u8; PEEK_BUF_SIZE];
+                let peek_slice = Self::peek_packet_headers(&in_flight, &mut peek_buf);
 
                 // First, try to handle protocol packets locally (ARP, DHCP, ICMPv6, DHCPv6)
                 // These need responses injected back to the VM
-                if self.handle_vhost_ethernet_protocols(state, &peek_slice) {
+                if self.handle_vhost_ethernet_protocols(state, peek_slice) {
                     // Protocol handler consumed the packet and injected a response
                     let _ = queue.add_used(&*mem_guard, in_flight.head_index, in_flight.total_len);
                     descriptors_returned = true;
@@ -1606,7 +1607,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 }
 
                 // Route the packet using Ethernet-aware routing
-                let routing_decision = self.peek_and_route_ethernet(&peek_slice);
+                let routing_decision = self.peek_and_route_ethernet(peek_slice);
 
                 match routing_decision {
                     RoutingDecision::ToTun { if_index: _ } => {
@@ -1738,23 +1739,25 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         }
     }
 
-    /// Peek at packet headers from iovecs, returning a slice for routing decisions
-    fn peek_packet_headers(in_flight: &VhostTxInFlight) -> Vec<u8> {
+    /// Peek at packet headers from iovecs, returning a slice for routing decisions.
+    /// Uses a caller-provided stack buffer to avoid heap allocation.
+    fn peek_packet_headers<'a>(
+        in_flight: &VhostTxInFlight,
+        buf: &'a mut [u8; PEEK_BUF_SIZE],
+    ) -> &'a [u8] {
         let first_iov_len = if in_flight.iovecs_len > 0 {
             in_flight.iovecs[0].iov_len
         } else {
-            0
+            return &[];
         };
 
         if first_iov_len >= PEEK_BUF_SIZE {
-            // Fast path: direct slice from first iovec
+            // Fast path: direct slice from first iovec (zero-copy)
             unsafe {
                 std::slice::from_raw_parts(in_flight.iovecs[0].iov_base as *const u8, PEEK_BUF_SIZE)
             }
-            .to_vec()
         } else if in_flight.total_len as usize > VIRTIO_NET_HDR_SIZE {
-            // Slow path: headers may span iovecs, copy to buffer
-            let mut peek_buf = vec![0u8; PEEK_BUF_SIZE];
+            // Slow path: headers may span iovecs, copy to provided buffer
             let mut copied = 0usize;
             for iov in in_flight.iovecs.iter().take(in_flight.iovecs_len) {
                 if copied >= PEEK_BUF_SIZE {
@@ -1763,13 +1766,12 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 let src =
                     unsafe { std::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len) };
                 let to_copy = (PEEK_BUF_SIZE - copied).min(src.len());
-                peek_buf[copied..copied + to_copy].copy_from_slice(&src[..to_copy]);
+                buf[copied..copied + to_copy].copy_from_slice(&src[..to_copy]);
                 copied += to_copy;
             }
-            peek_buf.truncate(copied);
-            peek_buf
+            &buf[..copied]
         } else {
-            Vec::new()
+            &[]
         }
     }
 
@@ -1854,13 +1856,12 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             {
                 let mut tmp_idx = 0usize;
                 let mut tmp_off = 0usize;
-                let hdr_data = Self::read_from_iovecs(
+                Self::read_from_iovecs_to_buf(
                     packet.iovecs(),
                     &mut tmp_idx,
                     &mut tmp_off,
-                    VIRTIO_NET_HDR_SIZE,
+                    &mut virtio_hdr_buf,
                 );
-                virtio_hdr_buf[..hdr_data.len()].copy_from_slice(&hdr_data);
             }
 
             // Adjust csum_start to account for injected Ethernet header
@@ -1969,6 +1970,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                             }
                             2 => {
                                 // Phase 2: IP Payload from source (skip virtio_hdr)
+                                // Copy directly from iovecs to guest memory (zero-copy)
                                 let ip_payload_len =
                                     total_src_len.saturating_sub(VIRTIO_NET_HDR_SIZE);
                                 let remaining_in_phase = ip_payload_len - phase_offset;
@@ -1976,29 +1978,50 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                                 let to_copy = remaining_in_phase.min(remaining_in_desc);
 
                                 if to_copy > 0 {
-                                    // Read from source iovecs (already past virtio_hdr)
-                                    let src_data = Self::read_from_iovecs(
-                                        packet.iovecs(),
-                                        &mut src_iov_idx,
-                                        &mut src_iov_offset,
-                                        to_copy,
-                                    );
-
                                     let dst_addr = desc
                                         .addr()
                                         .checked_add(desc_offset as u64)
                                         .expect("Address overflow");
 
-                                    if let Err(e) = mem_guard.write_slice(&src_data, dst_addr) {
-                                        warn!(?e, "Failed to write ip_payload to vhost RX buffer");
-                                        return_chains_on_error(
-                                            queue,
-                                            &mem_guard,
-                                            &chains_used,
-                                            Some(head_index),
-                                        );
-                                        let _ = vring_state.signal_used_queue();
-                                        return -libc::EIO;
+                                    // Copy directly from source iovecs to guest memory
+                                    match Self::copy_iovecs_to_guest(
+                                        packet.iovecs(),
+                                        &mut src_iov_idx,
+                                        &mut src_iov_offset,
+                                        &mem_guard,
+                                        dst_addr,
+                                        to_copy,
+                                    ) {
+                                        Ok(copied) if copied == to_copy => {}
+                                        Ok(copied) => {
+                                            warn!(
+                                                expected = to_copy,
+                                                actual = copied,
+                                                "Incomplete copy to vhost RX buffer"
+                                            );
+                                            return_chains_on_error(
+                                                queue,
+                                                &mem_guard,
+                                                &chains_used,
+                                                Some(head_index),
+                                            );
+                                            let _ = vring_state.signal_used_queue();
+                                            return -libc::EIO;
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                ?e,
+                                                "Failed to write ip_payload to vhost RX buffer"
+                                            );
+                                            return_chains_on_error(
+                                                queue,
+                                                &mem_guard,
+                                                &chains_used,
+                                                Some(head_index),
+                                            );
+                                            let _ = vring_state.signal_used_queue();
+                                            return -libc::EIO;
+                                        }
                                     }
                                 }
                                 to_copy
@@ -2183,27 +2206,29 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         written as i32
     }
 
-    /// Helper function to read data from iovecs, advancing position.
-    fn read_from_iovecs(
+    /// Read data from iovecs into a provided buffer, advancing position.
+    /// Returns the number of bytes copied.
+    fn read_from_iovecs_to_buf(
         iovecs: &[libc::iovec],
         iov_idx: &mut usize,
         iov_offset: &mut usize,
-        mut len: usize,
-    ) -> Vec<u8> {
-        let mut result = Vec::with_capacity(len);
+        buf: &mut [u8],
+    ) -> usize {
+        let mut copied = 0usize;
+        let len = buf.len();
 
-        while len > 0 && *iov_idx < iovecs.len() {
+        while copied < len && *iov_idx < iovecs.len() {
             let iov = &iovecs[*iov_idx];
             let remaining = iov.iov_len - *iov_offset;
-            let to_copy = remaining.min(len);
+            let to_copy = remaining.min(len - copied);
 
             if to_copy > 0 {
                 let src_ptr = unsafe { (iov.iov_base as *const u8).add(*iov_offset) };
                 let src_slice = unsafe { std::slice::from_raw_parts(src_ptr, to_copy) };
-                result.extend_from_slice(src_slice);
+                buf[copied..copied + to_copy].copy_from_slice(src_slice);
 
                 *iov_offset += to_copy;
-                len -= to_copy;
+                copied += to_copy;
             }
 
             if *iov_offset >= iov.iov_len {
@@ -2212,7 +2237,45 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             }
         }
 
-        result
+        copied
+    }
+
+    /// Copy data from iovecs directly to guest memory, avoiding intermediate allocation.
+    /// Returns the number of bytes written on success, or an error.
+    fn copy_iovecs_to_guest(
+        iovecs: &[libc::iovec],
+        iov_idx: &mut usize,
+        iov_offset: &mut usize,
+        mem: &vm_memory::GuestMemoryMmap,
+        dst_addr: vm_memory::GuestAddress,
+        len: usize,
+    ) -> Result<usize, vm_memory::GuestMemoryError> {
+        let mut written = 0usize;
+        let mut current_addr = dst_addr;
+
+        while written < len && *iov_idx < iovecs.len() {
+            let iov = &iovecs[*iov_idx];
+            let remaining = iov.iov_len - *iov_offset;
+            let to_copy = remaining.min(len - written);
+
+            if to_copy > 0 {
+                let src_ptr = unsafe { (iov.iov_base as *const u8).add(*iov_offset) };
+                let src_slice = unsafe { std::slice::from_raw_parts(src_ptr, to_copy) };
+                mem.write_slice(src_slice, current_addr)?;
+
+                *iov_offset += to_copy;
+                written += to_copy;
+                current_addr = current_addr.checked_add(to_copy as u64).ok_or(
+                    vm_memory::GuestMemoryError::InvalidGuestAddress(current_addr),
+                )?;
+            }
+
+            if *iov_offset >= iov.iov_len {
+                *iov_idx += 1;
+                *iov_offset = 0;
+            }
+        }
+        Ok(written)
     }
 
     /// Skip bytes in iovec array without copying (advance position only).
