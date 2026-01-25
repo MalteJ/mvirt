@@ -10,6 +10,11 @@ use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Maximum iovecs per packet.
+/// Descriptor chains rarely exceed 4 segments; 8 provides headroom.
+/// Using a fixed-size array avoids heap allocation in the hot path.
+pub const MAX_PACKET_IOVECS: usize = 8;
+
 /// Unique identifier for a reactor instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReactorId(pub Uuid);
@@ -126,14 +131,18 @@ impl PacketSource {
 /// Contains iovecs pointing to packet data in guest memory (vhost) or
 /// registered buffers (TUN). The receiving reactor performs I/O using
 /// these iovecs and sends a CompletionNotify back.
-#[derive(Debug, Clone)]
+///
+/// Uses a fixed-size array to avoid heap allocation in the hot path.
+#[derive(Clone)]
 pub struct PacketRef {
     /// Unique identifier for this packet.
     pub id: PacketId,
-    /// Scatter-gather list pointing to packet data.
+    /// Scatter-gather list pointing to packet data (fixed-size to avoid heap allocation).
     /// For vhost: HVAs from guest memory mapping.
     /// For TUN: pointers to registered buffer pool.
-    pub iovecs: Vec<libc::iovec>,
+    iovecs: [libc::iovec; MAX_PACKET_IOVECS],
+    /// Number of valid iovecs in the array.
+    iovecs_len: usize,
     /// Source information for completion handling.
     pub source: PacketSource,
     /// Keep-alive reference to prevent underlying memory from being unmapped.
@@ -141,25 +150,52 @@ pub struct PacketRef {
     pub keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
 
+impl std::fmt::Debug for PacketRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PacketRef")
+            .field("id", &self.id)
+            .field("iovecs_len", &self.iovecs_len)
+            .field("source", &self.source)
+            .field("keep_alive", &self.keep_alive.is_some())
+            .finish()
+    }
+}
+
 impl PacketRef {
-    /// Create a new PacketRef.
+    /// Create a new PacketRef with a fixed-size iovec array.
     pub fn new(
         id: PacketId,
-        iovecs: Vec<libc::iovec>,
+        iovecs: [libc::iovec; MAX_PACKET_IOVECS],
+        iovecs_len: usize,
         source: PacketSource,
         keep_alive: Option<Arc<dyn Any + Send + Sync>>,
     ) -> Self {
+        debug_assert!(iovecs_len <= MAX_PACKET_IOVECS);
         PacketRef {
             id,
             iovecs,
+            iovecs_len,
             source,
             keep_alive,
         }
     }
 
+    /// Get the valid iovecs as a slice.
+    #[inline]
+    pub fn iovecs(&self) -> &[libc::iovec] {
+        &self.iovecs[..self.iovecs_len]
+    }
+
+    /// Get the number of valid iovecs.
+    #[inline]
+    pub fn iovecs_len(&self) -> usize {
+        self.iovecs_len
+    }
+
     /// Get the total length of all iovecs.
+    #[inline]
     pub fn total_len(&self) -> usize {
-        self.iovecs.iter().map(|iov| iov.iov_len).sum()
+        self.iovecs().iter().map(|iov| iov.iov_len).sum()
     }
 }
 
@@ -318,19 +354,22 @@ mod tests {
 
     #[test]
     fn test_packet_ref_total_len() {
-        let iovecs = vec![
-            libc::iovec {
-                iov_base: std::ptr::null_mut(),
-                iov_len: 100,
-            },
-            libc::iovec {
-                iov_base: std::ptr::null_mut(),
-                iov_len: 200,
-            },
-        ];
+        let mut iovecs = [libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        }; MAX_PACKET_IOVECS];
+        iovecs[0] = libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 100,
+        };
+        iovecs[1] = libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 200,
+        };
         let packet = PacketRef::new(
             PacketId::new(1),
             iovecs,
+            2,
             PacketSource::TunRx {
                 chain_id: 0,
                 len: 300,
@@ -341,6 +380,7 @@ mod tests {
             None,
         );
         assert_eq!(packet.total_len(), 300);
+        assert_eq!(packet.iovecs_len(), 2);
     }
 
     #[test]

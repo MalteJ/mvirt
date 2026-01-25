@@ -111,6 +111,7 @@ impl ReactorInfo {
     }
 
     /// Send a packet to this reactor and signal it.
+    #[allow(clippy::result_large_err)] // PacketRef uses fixed-size array to avoid heap allocation in hot path
     pub fn send_packet(&self, packet: PacketRef) -> Result<(), PacketRef> {
         self.packet_tx.send(packet).map_err(|e| e.0)?;
         self.signal();
@@ -118,6 +119,7 @@ impl ReactorInfo {
     }
 
     /// Send a packet to this reactor without signaling (for batching).
+    #[allow(clippy::result_large_err)] // PacketRef uses fixed-size array to avoid heap allocation in hot path
     pub fn send_packet_no_signal(&self, packet: PacketRef) -> Result<(), PacketRef> {
         self.packet_tx.send(packet).map_err(|e| e.0)
     }

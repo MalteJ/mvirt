@@ -78,8 +78,8 @@ const ETHERNET_HDR_SIZE: usize = 14;
 const PEEK_BUF_SIZE: usize = 600;
 
 /// Maximum number of iovec segments for vhost TX packets.
-/// Descriptor chains rarely exceed 4 segments; 8 provides headroom.
-const MAX_TX_IOVECS: usize = 8;
+/// Synchronized with inter_reactor::MAX_PACKET_IOVECS for zero-copy forwarding.
+const MAX_TX_IOVECS: usize = crate::inter_reactor::MAX_PACKET_IOVECS;
 
 /// Copies `dst.len()` bytes starting at `offset` from scattered iovecs into `dst`.
 /// Returns false if insufficient data available.
@@ -122,7 +122,7 @@ fn copy_from_iovecs(
 #[inline]
 fn patch_virtio_hdr_for_eth_stripping(virtio_hdr: &mut [u8; VIRTIO_NET_HDR_SIZE]) {
     const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
-    
+
     // Debug-Ausgabe VOR der Änderung
     let flags = virtio_hdr[0];
     let old_csum_start = u16::from_le_bytes([virtio_hdr[6], virtio_hdr[7]]);
@@ -809,6 +809,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                                 &mut vhost_tx_in_flight,
                                 &mut vhost_tx_id,
                                 &mut vhost_to_vhost_in_flight,
+                                &mut reactors_to_signal,
                             );
                         }
 
@@ -1158,15 +1159,19 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                                         ethertype,
                                     };
 
-                                    // Point directly to TUN buffer
-                                    let iovec = libc::iovec {
+                                    // Point directly to TUN buffer using fixed-size array (no heap allocation)
+                                    let mut iovecs = [libc::iovec {
+                                        iov_base: std::ptr::null_mut(),
+                                        iov_len: 0,
+                                    };
+                                        MAX_TX_IOVECS];
+                                    iovecs[0] = libc::iovec {
                                         iov_base: chain.buffer.ptr as *mut _,
                                         iov_len: len,
                                     };
 
                                     let packet = PacketRef::new(
-                                        packet_id,
-                                        vec![iovec],
+                                        packet_id, iovecs, 1, // Single iovec
                                         source,
                                         None, // No keep_alive - buffer managed by rx_queue
                                     );
@@ -1547,6 +1552,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
     }
 
     /// Process packets from vhost TX queue (guest → network)
+    #[allow(clippy::too_many_arguments)]
     fn process_vhost_tx(
         &mut self,
         state: &VhostState,
@@ -1555,6 +1561,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
         vhost_tx_in_flight: &mut std::collections::HashMap<u64, Box<VhostTxInFlight>>,
         vhost_tx_id: &mut u64,
         vhost_to_vhost_in_flight: &mut std::collections::HashMap<u64, VhostToVhostInFlight>,
+        reactors_to_signal: &mut std::collections::HashSet<ReactorId>,
     ) {
         let mem_guard = state.mem.memory();
         let tx_vring = &state.vrings[VHOST_TX_QUEUE];
@@ -1665,7 +1672,8 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
 
                             let packet = PacketRef::new(
                                 packet_id,
-                                in_flight.iovecs[..in_flight.iovecs_len].to_vec(),
+                                in_flight.iovecs, // Direct array copy (stack, not heap)
+                                in_flight.iovecs_len,
                                 source,
                                 in_flight.keep_alive.clone(),
                             );
@@ -1679,7 +1687,8 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                                 "Sending packet to target reactor"
                             );
 
-                            if registry.send_packet_to(&target_reactor_id, packet) {
+                            if registry.send_packet_to_no_signal(&target_reactor_id, packet) {
+                                reactors_to_signal.insert(target_reactor_id);
                                 debug!(
                                     len = in_flight.total_len,
                                     dst = %target_reactor_id,
@@ -1827,7 +1836,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             eth_hdr[12..14].copy_from_slice(&ethertype.to_be_bytes());
 
             // Calculate total source length
-            let total_src_len: usize = packet.iovecs.iter().map(|iov| iov.iov_len).sum();
+            let total_src_len: usize = packet.iovecs().iter().map(|iov| iov.iov_len).sum();
 
             // Total output length = source + Ethernet header
             let total_out_len = total_src_len + ETHERNET_HDR_SIZE;
@@ -1846,7 +1855,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                 let mut tmp_idx = 0usize;
                 let mut tmp_off = 0usize;
                 let hdr_data = Self::read_from_iovecs(
-                    &packet.iovecs,
+                    packet.iovecs(),
                     &mut tmp_idx,
                     &mut tmp_off,
                     VIRTIO_NET_HDR_SIZE,
@@ -1862,7 +1871,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             let mut src_iov_offset = 0usize;
             // Skip past the virtio header in source iovecs
             Self::skip_in_iovecs(
-                &packet.iovecs,
+                packet.iovecs(),
                 &mut src_iov_idx,
                 &mut src_iov_offset,
                 VIRTIO_NET_HDR_SIZE,
@@ -1969,7 +1978,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                                 if to_copy > 0 {
                                     // Read from source iovecs (already past virtio_hdr)
                                     let src_data = Self::read_from_iovecs(
-                                        &packet.iovecs,
+                                        packet.iovecs(),
                                         &mut src_iov_idx,
                                         &mut src_iov_offset,
                                         to_copy,
@@ -2038,7 +2047,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             let mut src_iov_offset = 0usize;
 
             // Calculate total packet length
-            let total_packet_len: usize = packet.iovecs.iter().map(|iov| iov.iov_len).sum();
+            let total_packet_len: usize = packet.iovecs().iter().map(|iov| iov.iov_len).sum();
 
             // Pop descriptor chains until all packet data is written
             while written < total_packet_len {
@@ -2075,11 +2084,11 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
                     let mut desc_offset = 0usize;
 
                     while desc_offset < available && written < total_packet_len {
-                        if src_iov_idx >= packet.iovecs.len() {
+                        if src_iov_idx >= packet.iovecs_len() {
                             break;
                         }
 
-                        let src_iov = &packet.iovecs[src_iov_idx];
+                        let src_iov = &packet.iovecs()[src_iov_idx];
                         let src_remaining = src_iov.iov_len - src_iov_offset;
                         let dst_remaining = available - desc_offset;
                         let to_copy = src_remaining.min(dst_remaining);
@@ -2333,7 +2342,7 @@ impl<RX: RxVirtqueue, TX: TxVirtqueue> Reactor<RX, TX> {
             let total_len = packet.total_len();
             let mut packet_data = Vec::with_capacity(total_len);
 
-            for iov in &packet.iovecs {
+            for iov in packet.iovecs() {
                 let slice =
                     unsafe { std::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len) };
                 packet_data.extend_from_slice(slice);
