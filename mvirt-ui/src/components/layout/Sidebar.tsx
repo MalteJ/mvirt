@@ -20,7 +20,7 @@ export function Sidebar() {
   return (
     <div className="relative z-10 flex w-64 flex-col border-r border-border bg-card/80 backdrop-blur-xl">
       <Link to="/dashboard" className="group flex h-14 items-center border-b border-border px-4 hover:bg-secondary/50 transition-colors">
-        <div className="logo-box-shimmer mr-3 flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-purple to-blue text-white font-bold shadow-glow-purple">
+        <div className="logo-box-shimmer mr-3 flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-purple to-blue text-white text-lg font-bold shadow-glow-purple">
           m
         </div>
         <span className="logo-shimmer text-lg font-semibold">mvirt</span>

@@ -91,6 +91,10 @@ async fn main() {
         // Cluster routes
         .route("/api/v1/cluster", get(routes::cluster::get_cluster_info))
         .route("/api/v1/cluster/nodes", get(routes::cluster::get_nodes))
+        // Notification routes
+        .route("/api/v1/notifications", get(routes::notification::get_notifications))
+        .route("/api/v1/notifications/:id/read", post(routes::notification::mark_notification_read))
+        .route("/api/v1/notifications/read-all", post(routes::notification::mark_all_read))
         .layer(cors)
         .with_state(state);
 
