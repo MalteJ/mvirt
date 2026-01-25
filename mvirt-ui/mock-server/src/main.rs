@@ -88,6 +88,9 @@ async fn main() {
         .route("/api/v1/logs/stream", get(routes::log::log_stream))
         // System routes
         .route("/api/v1/system", get(routes::system::get_system_info))
+        // Cluster routes
+        .route("/api/v1/cluster", get(routes::cluster::get_cluster_info))
+        .route("/api/v1/cluster/nodes", get(routes::cluster::get_nodes))
         .layer(cors)
         .with_state(state);
 

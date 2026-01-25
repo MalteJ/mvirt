@@ -309,24 +309,35 @@
 
 /* Logo text shimmer effect */
 .logo-shimmer {
+  color: hsl(var(--foreground));
+  position: relative;
+  display: inline-block;
+}
+
+.logo-shimmer::after {
+  content: 'mvirt';
+  position: absolute;
+  left: 0;
+  top: 0;
   background: linear-gradient(
     90deg,
-    #c084fc 0%,
-    #818cf8 25%,
-    #fff 50%,
-    #818cf8 75%,
-    #c084fc 100%
+    transparent 0%,
+    transparent 40%,
+    rgba(255, 255, 255, 0.8) 50%,
+    transparent 60%,
+    transparent 100%
   );
-  background-size: 200% 100%;
+  background-size: 300% 100%;
   background-position: 100% 0;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
-  transition: background-position 0s;
+  opacity: 0;
 }
 
-.group:hover .logo-shimmer {
-  animation: logo-shimmer 1s ease-out forwards;
+.group:hover .logo-shimmer::after {
+  opacity: 1;
+  animation: logo-shimmer 1s ease-out;
 }
 
 @keyframes logo-shimmer {
@@ -374,8 +385,17 @@
   }
 }
 
-.light .logo-shimmer {
-  background: linear-gradient(135deg, #1e3a5f 0%, #3b82f6 50%, #0ea5e9 100%);
+.light .logo-shimmer::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    transparent 40%,
+    rgba(59, 130, 246, 0.6) 50%,
+    transparent 60%,
+    transparent 100%
+  );
+  background-size: 300% 100%;
+  background-position: 100% 0;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;

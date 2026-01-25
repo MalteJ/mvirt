@@ -4,6 +4,7 @@ import {
   HardDrive,
   Network,
   ScrollText,
+  Boxes,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -12,6 +13,7 @@ const navigation = [
   { name: 'Storage', href: '/storage', icon: HardDrive },
   { name: 'Network', href: '/network', icon: Network },
   { name: 'Logs', href: '/logs', icon: ScrollText },
+  { name: 'Cluster', href: '/cluster', icon: Boxes },
 ]
 
 export function Sidebar() {

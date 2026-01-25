@@ -181,6 +181,51 @@ pub struct SystemInfo {
     pub uptime: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NodeState {
+    Online,
+    Offline,
+    Maintenance,
+    Joining,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NodeRole {
+    Leader,
+    Follower,
+    Candidate,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Node {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub state: NodeState,
+    pub role: NodeRole,
+    pub version: String,
+    pub cpu_count: u32,
+    pub memory_total_bytes: u64,
+    pub memory_used_bytes: u64,
+    pub vm_count: u32,
+    pub uptime: u64,
+    pub last_seen: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterInfo {
+    pub id: String,
+    pub name: String,
+    pub node_count: u32,
+    pub leader_node_id: String,
+    pub term: u64,
+    pub created_at: String,
+}
+
 pub struct AppStateInner {
     pub vms: HashMap<String, Vm>,
     pub volumes: HashMap<String, Volume>,
