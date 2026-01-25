@@ -279,3 +279,164 @@ enum VmEventType {
   VM_EVENT_STOPPED = 3;
   VM_EVENT_DELETED = 4;
 }
+
+// ============================================
+// Pod Service - Container Pods in MicroVMs
+// ============================================
+
+service PodService {
+  // CRUD
+  rpc CreatePod(CreatePodRequest) returns (Pod);
+  rpc GetPod(GetPodRequest) returns (Pod);
+  rpc ListPods(ListPodsRequest) returns (ListPodsResponse);
+  rpc DeletePod(DeletePodRequest) returns (DeletePodResponse);
+
+  // Lifecycle
+  rpc StartPod(StartPodRequest) returns (Pod);
+  rpc StopPod(StopPodRequest) returns (Pod);
+
+  // Container interaction
+  rpc PodLogs(PodLogsRequest) returns (stream LogChunk);
+  rpc PodExec(stream PodExecInput) returns (stream PodExecOutput);
+}
+
+// ============================================
+// Pod Types
+// ============================================
+
+enum PodState {
+  POD_STATE_UNSPECIFIED = 0;
+  POD_STATE_CREATED = 1;
+  POD_STATE_STARTING = 2;
+  POD_STATE_RUNNING = 3;
+  POD_STATE_STOPPING = 4;
+  POD_STATE_STOPPED = 5;
+  POD_STATE_FAILED = 6;
+}
+
+enum ContainerState {
+  CONTAINER_STATE_UNSPECIFIED = 0;
+  CONTAINER_STATE_CREATING = 1;
+  CONTAINER_STATE_CREATED = 2;
+  CONTAINER_STATE_RUNNING = 3;
+  CONTAINER_STATE_STOPPED = 4;
+  CONTAINER_STATE_FAILED = 5;
+}
+
+message Pod {
+  string id = 1;
+  string name = 2;
+  PodState state = 3;
+  string vm_id = 4;                  // MicroVM hosting this pod
+  repeated Container containers = 5;
+  string ip_address = 6;
+  int64 created_at = 7;
+  optional int64 started_at = 8;
+  optional string error_message = 9;
+}
+
+message Container {
+  string id = 1;
+  string name = 2;
+  ContainerState state = 3;
+  string image = 4;
+  int32 exit_code = 5;
+  optional string error_message = 6;
+}
+
+message ContainerSpec {
+  string id = 1;                     // Unique container ID (auto-generated if empty)
+  string name = 2;                   // Human-readable name
+  string image = 3;                  // OCI Image Reference (e.g., "docker.io/library/alpine:latest")
+  repeated string command = 4;       // Entrypoint command
+  repeated string args = 5;          // Command arguments
+  repeated string env = 6;           // Environment variables (KEY=VALUE format)
+  string working_dir = 7;            // Working directory inside container
+}
+
+message PodResources {
+  uint32 vcpus = 1;                  // vCPUs for the MicroVM
+  uint64 memory_mb = 2;              // Memory for the MicroVM
+}
+
+// ============================================
+// Pod Request/Response Messages
+// ============================================
+
+message CreatePodRequest {
+  optional string name = 1;
+  repeated ContainerSpec containers = 2;
+  optional PodResources resources = 3;  // Defaults: 1 vCPU, 256MB
+}
+
+message GetPodRequest {
+  string id = 1;
+}
+
+message ListPodsRequest {}
+
+message ListPodsResponse {
+  repeated Pod pods = 1;
+}
+
+message DeletePodRequest {
+  string id = 1;
+  bool force = 2;                    // Force delete even if running
+}
+
+message DeletePodResponse {}
+
+message StartPodRequest {
+  string id = 1;
+}
+
+message StopPodRequest {
+  string id = 1;
+  uint32 timeout_seconds = 2;        // Grace period before force kill (default: 10)
+}
+
+// Container Logs
+
+message PodLogsRequest {
+  string pod_id = 1;
+  optional string container_id = 2;  // Specific container, or all if empty
+  bool follow = 3;                   // Stream logs continuously
+  uint32 tail_lines = 4;             // Number of lines from end (0 = all)
+}
+
+message LogChunk {
+  string container_id = 1;
+  bytes data = 2;
+  bool is_stderr = 3;
+}
+
+// Container Exec
+
+message PodExecInput {
+  oneof input {
+    PodExecStart start = 1;
+    bytes stdin = 2;
+    PodExecResize resize = 3;
+  }
+}
+
+message PodExecStart {
+  string pod_id = 1;
+  string container_id = 2;
+  repeated string command = 3;
+  bool tty = 4;
+  repeated string env = 5;
+}
+
+message PodExecResize {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+message PodExecOutput {
+  oneof output {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    int32 exit_code = 3;
+  }
+}
