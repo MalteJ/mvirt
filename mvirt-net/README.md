@@ -4,7 +4,7 @@ Virtual network daemon for mvirt. Provides L3 networking for VMs using vhost-use
 
 ## Documentation
 
-- **[Networking Concepts](../docs/network.md)** - User-facing documentation on networks, vNICs, and IP addressing
+- **[Networking Concepts](../docs/concepts/networking.md)** - User-facing documentation on networks, vNICs, and IP addressing
 - **[Architecture](architecture.md)** - Technical deep-dive into the implementation
 - **[Development](development.md)** - Test harness and how to write integration tests
 
@@ -16,6 +16,8 @@ Virtual network daemon for mvirt. Provides L3 networking for VMs using vhost-use
 - **Network Isolation**: VMs in different networks are isolated (multi-tenant)
 - **Routed Prefixes**: Additional prefixes can be routed to vNICs for VMs acting as routers
 - **vhost-user**: High-performance virtio-net using shared memory
+- **io_uring**: Asynchronous I/O for efficient packet processing
+- **Hugepages**: Optional hugepage-backed buffers for reduced TLB misses
 
 ## Architecture
 
@@ -106,14 +108,14 @@ ping <vm2-ip>
 
 ## Data Plane
 
-Each vNIC runs in its own dedicated thread (shared-nothing architecture):
+Each vNIC is handled by a Reactor using io_uring for efficient async I/O:
 
 - **ARP Responder**: Responds to ARP requests for gateway (169.254.0.1)
-- **NDP Responder**: Responds to Neighbor Solicitations for fe80::1
+- **ICMPv6/NDP Responder**: Responds to Neighbor Solicitations for fe80::1
 - **Router Advertisements**: Periodic RAs for IPv6 (M=1, O=1)
 - **DHCPv4 Server**: Assigns /32 addresses
 - **DHCPv6 Server**: Assigns /128 addresses
-- **L3 Router**: Routes packets between vNICs via message passing
+- **L3 Router**: Routes packets between vNICs via inter-reactor messaging
 
 ## Building
 
@@ -127,31 +129,22 @@ cargo build -p mvirt-net --release
 
 ## Testing
 
-### Integration Tests
-
-The vhost-user integration tests simulate the VM side using rust-vmm's `vhost` crate to test the backend without requiring actual VMs.
-
 ```bash
-# Run all integration tests
-cargo test -p mvirt-net --test vhost_integration
+# Run all tests
+cargo test -p mvirt-net
 
 # Run with output
-cargo test -p mvirt-net --test vhost_integration -- --nocapture
-
-# Run specific tests by keyword
-cargo test -p mvirt-net --test vhost_integration handshake  # vhost-user handshake
-cargo test -p mvirt-net --test vhost_integration config     # config space access
-cargo test -p mvirt-net --test vhost_integration send       # TX queue
-cargo test -p mvirt-net --test vhost_integration arp        # ARP request/reply
-cargo test -p mvirt-net --test vhost_integration dhcp       # DHCP flow
+cargo test -p mvirt-net -- --nocapture
 ```
 
-### Unit Tests
+See [development.md](development.md) for details on the test harness.
+
+## System Requirements
+
+- Linux kernel 5.6+ (io_uring support)
+- Hugepages recommended for production (2MB pages)
 
 ```bash
-cargo test -p mvirt-net --lib
+# Allocate hugepages
+echo 64 | sudo tee /proc/sys/vm/nr_hugepages
 ```
-
-## Development Status
-
-Work in progress. See the [architecture document](architecture.md) for implementation details.
