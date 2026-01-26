@@ -12,9 +12,8 @@ use utoipa::ToSchema;
 use crate::audit::CpAuditLogger;
 use crate::command::{NetworkData, NicData};
 use crate::store::{
-    CreateNetworkRequest as StoreCreateNetworkRequest,
-    CreateNicRequest as StoreCreateNicRequest, DataStore, StoreError,
-    UpdateNetworkRequest as StoreUpdateNetworkRequest,
+    CreateNetworkRequest as StoreCreateNetworkRequest, CreateNicRequest as StoreCreateNicRequest,
+    DataStore, StoreError, UpdateNetworkRequest as StoreUpdateNetworkRequest,
     UpdateNicRequest as StoreUpdateNicRequest,
 };
 

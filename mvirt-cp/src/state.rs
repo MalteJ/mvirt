@@ -518,7 +518,10 @@ mod tests {
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
 
         // Create NIC in network
-        apply(&mut state, create_nic_cmd("req-2", "nic-1", "net-1", Some("my-nic")));
+        apply(
+            &mut state,
+            create_nic_cmd("req-2", "nic-1", "net-1", Some("my-nic")),
+        );
 
         // Try to delete without force
         let delete_cmd = Command::DeleteNetwork {
@@ -621,7 +624,10 @@ mod tests {
     fn test_get_network_by_name() {
         let mut state = CpState::default();
 
-        apply(&mut state, create_network_cmd("req-1", "net-uuid-123", "my-network"));
+        apply(
+            &mut state,
+            create_network_cmd("req-1", "net-uuid-123", "my-network"),
+        );
 
         // Find by name
         let network = state.get_network_by_name("my-network");
@@ -637,12 +643,10 @@ mod tests {
         let mut state = CpState::default();
 
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
-        apply(&mut state, create_nic_cmd(
-            "req-2",
-            "nic-uuid-456",
-            "net-1",
-            Some("my-nic"),
-        ));
+        apply(
+            &mut state,
+            create_nic_cmd("req-2", "nic-uuid-456", "net-1", Some("my-nic")),
+        );
 
         // Find by name
         let nic = state.get_nic_by_name("my-nic");
@@ -760,8 +764,14 @@ mod tests {
         let mut state = CpState::default();
 
         // Create two networks
-        apply(&mut state, create_network_cmd("req-1", "net-1", "network-1"));
-        apply(&mut state, create_network_cmd("req-2", "net-2", "network-2"));
+        apply(
+            &mut state,
+            create_network_cmd("req-1", "net-1", "network-1"),
+        );
+        apply(
+            &mut state,
+            create_network_cmd("req-2", "net-2", "network-2"),
+        );
 
         // Create NICs in different networks
         apply(&mut state, create_nic_cmd("req-3", "nic-1", "net-1", None));
