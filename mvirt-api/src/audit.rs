@@ -1,15 +1,15 @@
 use mvirt_log::{AuditLogger, LogLevel};
 use std::sync::Arc;
 
-/// Control Plane specific audit logger
-pub struct CpAuditLogger {
+/// API Server audit logger
+pub struct ApiAuditLogger {
     inner: Arc<AuditLogger>,
 }
 
-impl CpAuditLogger {
+impl ApiAuditLogger {
     pub fn new(log_endpoint: &str) -> Self {
         Self {
-            inner: Arc::new(AuditLogger::new(log_endpoint, "cp")),
+            inner: Arc::new(AuditLogger::new(log_endpoint, "api")),
         }
     }
 
@@ -48,6 +48,23 @@ impl CpAuditLogger {
             LogLevel::Info,
             format!("Leader elected: node {} for term {}", node_id, term),
             vec![format!("node-{}", node_id)],
+        );
+    }
+
+    // Hypervisor node events
+    pub fn hypervisor_node_registered(&self, node_id: &str, node_name: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Hypervisor node registered: {} ({})", node_name, node_id),
+            vec![node_id.to_string()],
+        );
+    }
+
+    pub fn hypervisor_node_deregistered(&self, node_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Hypervisor node deregistered: {}", node_id),
+            vec![node_id.to_string()],
         );
     }
 
@@ -103,10 +120,43 @@ impl CpAuditLogger {
             vec![nic_id.to_string()],
         );
     }
+
+    // VM events
+    pub fn vm_created(&self, vm_id: &str, vm_name: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("VM created: {} ({})", vm_name, vm_id),
+            vec![vm_id.to_string()],
+        );
+    }
+
+    pub fn vm_spec_updated(&self, vm_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("VM spec updated: {}", vm_id),
+            vec![vm_id.to_string()],
+        );
+    }
+
+    pub fn vm_status_updated(&self, vm_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("VM status updated: {}", vm_id),
+            vec![vm_id.to_string()],
+        );
+    }
+
+    pub fn vm_deleted(&self, vm_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("VM deleted: {}", vm_id),
+            vec![vm_id.to_string()],
+        );
+    }
 }
 
-pub fn create_audit_logger(log_endpoint: &str) -> Arc<CpAuditLogger> {
-    Arc::new(CpAuditLogger::new(log_endpoint))
+pub fn create_audit_logger(log_endpoint: &str) -> Arc<ApiAuditLogger> {
+    Arc::new(ApiAuditLogger::new(log_endpoint))
 }
 
 #[cfg(test)]
@@ -115,7 +165,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_noop_logger_doesnt_panic() {
-        let logger = CpAuditLogger::new_noop();
+        let logger = ApiAuditLogger::new_noop();
 
         // Call all methods - none should panic
         logger.node_joined(1, "test-node", "127.0.0.1:6001");

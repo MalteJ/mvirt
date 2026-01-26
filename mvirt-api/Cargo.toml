@@ -1,14 +1,14 @@
 [package]
-name = "mvirt-cp"
+name = "mvirt-api"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "mvirt_cp"
+name = "mvirt_api"
 path = "src/lib.rs"
 
 [[bin]]
-name = "mvirt-cp"
+name = "mvirt-api"
 path = "src/main.rs"
 
 [dependencies]
@@ -33,6 +33,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mvirt-log = { path = "../mvirt-log" }
 
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+tokio-stream = "0.1"
+
 # Utils
 uuid = { version = "1", features = ["v4", "serde"] }
 clap = { version = "4", features = ["derive"] }
@@ -40,6 +45,9 @@ thiserror = "2"
 lru = "0.16"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
+
+[build-dependencies]
+tonic-build = "0.12"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }

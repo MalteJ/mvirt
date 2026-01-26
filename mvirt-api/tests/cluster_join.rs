@@ -1,4 +1,4 @@
-//! End-to-end cluster join tests for mvirt-cp.
+//! End-to-end cluster join tests for mvirt-api.
 //!
 //! These tests verify the complete cluster join flow using the REST API
 //! and Raft cluster operations.
@@ -6,9 +6,9 @@
 mod common;
 
 use mraft::{NodeConfig, RaftNode, StorageBackend};
-use mvirt_cp::rest::{AppState, create_router};
-use mvirt_cp::store::{Event, RaftStore};
-use mvirt_cp::{Command, CpAuditLogger, CpState, Response};
+use mvirt_api::rest::{AppState, create_router};
+use mvirt_api::store::{Event, RaftStore};
+use mvirt_api::{ApiAuditLogger, ApiState, Command, Response};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ struct TestNode {
     id: u64,
     raft_addr: String,
     rest_addr: String,
-    raft_node: Arc<RwLock<RaftNode<Command, Response, CpState>>>,
+    raft_node: Arc<RwLock<RaftNode<Command, Response, ApiState>>>,
     rest_client: reqwest::Client,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
 }
@@ -75,7 +75,7 @@ impl TestCluster {
             raft_config: None,
         };
 
-        let mut node: RaftNode<Command, Response, CpState> =
+        let mut node: RaftNode<Command, Response, ApiState> =
             RaftNode::new(config).await.expect("Failed to create node");
         node.start().await.expect("Failed to start node");
         node.generate_cluster_secret();
@@ -94,7 +94,7 @@ impl TestCluster {
 
         let app_state = Arc::new(AppState {
             store,
-            audit: Arc::new(CpAuditLogger::new_noop()),
+            audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
         });
 
@@ -140,7 +140,7 @@ impl TestCluster {
             raft_config: None,
         };
 
-        let mut node: RaftNode<Command, Response, CpState> =
+        let mut node: RaftNode<Command, Response, ApiState> =
             RaftNode::new(config).await.expect("Failed to create node");
         node.start().await.expect("Failed to start node");
 
@@ -159,7 +159,7 @@ impl TestCluster {
 
         let app_state = Arc::new(AppState {
             store,
-            audit: Arc::new(CpAuditLogger::new_noop()),
+            audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
         });
 
@@ -575,7 +575,7 @@ async fn test_e2e_invalid_token_rejected() {
         raft_config: None,
     };
 
-    let mut node: RaftNode<Command, Response, CpState> =
+    let mut node: RaftNode<Command, Response, ApiState> =
         RaftNode::new(config).await.expect("Failed to create node");
     node.start().await.expect("Failed to start node");
 

@@ -6,13 +6,37 @@
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
-use crate::command::{NetworkData, NicData};
+use crate::command::{
+    NetworkData, NicData, NodeData, NodeResources, NodeStatus, VmData, VmDesiredState, VmSpec,
+    VmStatus,
+};
+use std::collections::HashMap;
 
 use super::error::Result;
 use super::event::Event;
 
 // =============================================================================
-// Request DTOs
+// Node Request DTOs
+// =============================================================================
+
+/// Request to register a new node.
+#[derive(Debug, Clone)]
+pub struct RegisterNodeRequest {
+    pub name: String,
+    pub address: String,
+    pub resources: NodeResources,
+    pub labels: HashMap<String, String>,
+}
+
+/// Request to update node status.
+#[derive(Debug, Clone)]
+pub struct UpdateNodeStatusRequest {
+    pub status: NodeStatus,
+    pub resources: Option<NodeResources>,
+}
+
+// =============================================================================
+// Network Request DTOs
 // =============================================================================
 
 /// Request to create a new network.
@@ -61,6 +85,28 @@ pub struct UpdateNicRequest {
 }
 
 // =============================================================================
+// VM Request DTOs
+// =============================================================================
+
+/// Request to create a new VM.
+#[derive(Debug, Clone)]
+pub struct CreateVmRequest {
+    pub spec: VmSpec,
+}
+
+/// Request to update a VM's spec (desired state).
+#[derive(Debug, Clone)]
+pub struct UpdateVmSpecRequest {
+    pub desired_state: VmDesiredState,
+}
+
+/// Request to update a VM's status (from node).
+#[derive(Debug, Clone)]
+pub struct UpdateVmStatusRequest {
+    pub status: VmStatus,
+}
+
+// =============================================================================
 // Cluster DTOs
 // =============================================================================
 
@@ -94,6 +140,31 @@ pub struct MembershipNode {
 // =============================================================================
 // Domain Store Traits
 // =============================================================================
+
+/// Store trait for node (hypervisor agent) operations.
+#[async_trait]
+pub trait NodeStore: Send + Sync {
+    /// List all nodes.
+    async fn list_nodes(&self) -> Result<Vec<NodeData>>;
+
+    /// List online nodes only.
+    async fn list_online_nodes(&self) -> Result<Vec<NodeData>>;
+
+    /// Get a node by ID.
+    async fn get_node(&self, id: &str) -> Result<Option<NodeData>>;
+
+    /// Get a node by name.
+    async fn get_node_by_name(&self, name: &str) -> Result<Option<NodeData>>;
+
+    /// Register a new node.
+    async fn register_node(&self, req: RegisterNodeRequest) -> Result<NodeData>;
+
+    /// Update node status (heartbeat).
+    async fn update_node_status(&self, id: &str, req: UpdateNodeStatusRequest) -> Result<NodeData>;
+
+    /// Deregister a node.
+    async fn deregister_node(&self, id: &str) -> Result<()>;
+}
 
 /// Store trait for network operations.
 #[async_trait]
@@ -139,6 +210,40 @@ pub trait NicStore: Send + Sync {
     async fn delete_nic(&self, id: &str) -> Result<()>;
 }
 
+/// Store trait for VM operations.
+#[async_trait]
+pub trait VmStore: Send + Sync {
+    /// List all VMs.
+    async fn list_vms(&self) -> Result<Vec<VmData>>;
+
+    /// List VMs on a specific node.
+    async fn list_vms_by_node(&self, node_id: &str) -> Result<Vec<VmData>>;
+
+    /// Get a VM by ID.
+    async fn get_vm(&self, id: &str) -> Result<Option<VmData>>;
+
+    /// Get a VM by name.
+    async fn get_vm_by_name(&self, name: &str) -> Result<Option<VmData>>;
+
+    /// Create a new VM.
+    async fn create_vm(&self, req: CreateVmRequest) -> Result<VmData>;
+
+    /// Create a new VM and schedule it to a node.
+    ///
+    /// This combines VM creation with immediate scheduling.
+    /// The VM is created in Pending state, then scheduled to a node.
+    async fn create_and_schedule_vm(&self, req: CreateVmRequest) -> Result<VmData>;
+
+    /// Update a VM's spec (desired state).
+    async fn update_vm_spec(&self, id: &str, req: UpdateVmSpecRequest) -> Result<VmData>;
+
+    /// Update a VM's status (from node).
+    async fn update_vm_status(&self, id: &str, req: UpdateVmStatusRequest) -> Result<VmData>;
+
+    /// Delete a VM.
+    async fn delete_vm(&self, id: &str) -> Result<()>;
+}
+
 /// Store trait for cluster operations.
 #[async_trait]
 pub trait ClusterStore: Send + Sync {
@@ -162,11 +267,15 @@ pub trait ClusterStore: Send + Sync {
 /// Composite data store trait combining all domain stores.
 ///
 /// This is the main trait that handlers should use. It provides:
+/// - Node (hypervisor) registration and status
 /// - Network CRUD operations
 /// - NIC CRUD operations
+/// - VM CRUD operations
 /// - Cluster management operations
 /// - Event subscription for real-time updates
-pub trait DataStore: NetworkStore + NicStore + ClusterStore + Send + Sync {
+pub trait DataStore:
+    NodeStore + NetworkStore + NicStore + VmStore + ClusterStore + Send + Sync
+{
     /// Subscribe to state change events.
     ///
     /// Returns a broadcast receiver that will receive events when

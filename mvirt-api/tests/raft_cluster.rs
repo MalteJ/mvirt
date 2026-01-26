@@ -1,11 +1,11 @@
 //! Integration tests for Raft cluster functionality.
 //!
-//! These tests verify that the Raft consensus works correctly with mvirt-cp's
-//! Command/Response types and CpState state machine.
+//! These tests verify that the Raft consensus works correctly with mvirt-api's
+//! Command/Response types and ApiState state machine.
 
 use chrono::Utc;
 use mraft::{NodeConfig, RaftNode, StorageBackend};
-use mvirt_cp::{Command, CpState, Response};
+use mvirt_api::{ApiState, Command, Response};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -27,7 +27,7 @@ fn test_node_config(id: u64, port: u16, peers: &[(u64, u16)]) -> NodeConfig {
 
 /// Helper struct to manage a test cluster.
 struct TestCluster {
-    nodes: Vec<RaftNode<Command, Response, CpState>>,
+    nodes: Vec<RaftNode<Command, Response, ApiState>>,
 }
 
 impl TestCluster {
@@ -49,7 +49,7 @@ impl TestCluster {
         // Create nodes
         let mut nodes = Vec::new();
         for config in configs {
-            let node: RaftNode<Command, Response, CpState> =
+            let node: RaftNode<Command, Response, ApiState> =
                 RaftNode::new(config).await.expect("Failed to create node");
             nodes.push(node);
         }
@@ -90,7 +90,7 @@ impl TestCluster {
     }
 
     /// Get the leader node (if any).
-    fn leader(&self) -> Option<&RaftNode<Command, Response, CpState>> {
+    fn leader(&self) -> Option<&RaftNode<Command, Response, ApiState>> {
         for node in &self.nodes {
             if node.is_leader() {
                 return Some(node);
@@ -100,7 +100,7 @@ impl TestCluster {
     }
 
     /// Get a follower node (any non-leader).
-    fn follower(&self) -> Option<&RaftNode<Command, Response, CpState>> {
+    fn follower(&self) -> Option<&RaftNode<Command, Response, ApiState>> {
         for node in &self.nodes {
             if !node.is_leader() && node.current_leader().is_some() {
                 return Some(node);

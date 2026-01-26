@@ -21,6 +21,10 @@ pub enum StoreError {
     #[error("not leader, try node {leader_id:?}")]
     NotLeader { leader_id: Option<u64> },
 
+    /// Scheduling failed - no suitable node found.
+    #[error("scheduling failed: {0}")]
+    ScheduleFailed(String),
+
     /// Internal error.
     #[error("internal: {0}")]
     Internal(String),

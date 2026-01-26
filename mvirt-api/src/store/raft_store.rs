@@ -7,8 +7,11 @@ use chrono::Utc;
 use mraft::RaftNode;
 use tokio::sync::{RwLock, broadcast};
 
-use crate::command::{Command, NetworkData, NicData, Response};
-use crate::state::CpState;
+use crate::command::{
+    Command, NetworkData, NicData, NodeData, Response, VmData, VmPhase, VmStatus,
+};
+use crate::scheduler::Scheduler;
+use crate::state::ApiState;
 
 use super::error::{Result, StoreError};
 use super::event::Event;
@@ -19,7 +22,7 @@ use super::traits::*;
 /// This provides a clean abstraction over Raft operations, hiding the
 /// Command/Response types from handlers.
 pub struct RaftStore {
-    node: Arc<RwLock<RaftNode<Command, Response, CpState>>>,
+    node: Arc<RwLock<RaftNode<Command, Response, ApiState>>>,
     events: broadcast::Sender<Event>,
     node_id: u64,
 }
@@ -27,7 +30,7 @@ pub struct RaftStore {
 impl RaftStore {
     /// Create a new RaftStore wrapping the given RaftNode.
     pub fn new(
-        node: Arc<RwLock<RaftNode<Command, Response, CpState>>>,
+        node: Arc<RwLock<RaftNode<Command, Response, ApiState>>>,
         events: broadcast::Sender<Event>,
         node_id: u64,
     ) -> Self {
@@ -49,6 +52,83 @@ impl RaftStore {
         node.write_or_forward(cmd)
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))
+    }
+}
+
+#[async_trait]
+impl NodeStore for RaftStore {
+    async fn list_nodes(&self) -> Result<Vec<NodeData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_nodes().into_iter().cloned().collect())
+    }
+
+    async fn list_online_nodes(&self) -> Result<Vec<NodeData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_online_nodes().into_iter().cloned().collect())
+    }
+
+    async fn get_node(&self, id: &str) -> Result<Option<NodeData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_node(id).cloned())
+    }
+
+    async fn get_node_by_name(&self, name: &str) -> Result<Option<NodeData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_node_by_name(name).cloned())
+    }
+
+    async fn register_node(&self, req: RegisterNodeRequest) -> Result<NodeData> {
+        let cmd = Command::RegisterNode {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            name: req.name,
+            address: req.address,
+            resources: req.resources,
+            labels: req.labels,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Node(data) => Ok(data),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn update_node_status(&self, id: &str, req: UpdateNodeStatusRequest) -> Result<NodeData> {
+        let cmd = Command::UpdateNodeStatus {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            node_id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            status: req.status,
+            resources: req.resources,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Node(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn deregister_node(&self, id: &str) -> Result<()> {
+        let cmd = Command::DeregisterNode {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            node_id: id.to_string(),
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
     }
 }
 
@@ -194,6 +274,122 @@ impl NicStore for RaftStore {
 
     async fn delete_nic(&self, id: &str) -> Result<()> {
         let cmd = Command::DeleteNic {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+}
+
+#[async_trait]
+impl VmStore for RaftStore {
+    async fn list_vms(&self) -> Result<Vec<VmData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_vms(None).into_iter().cloned().collect())
+    }
+
+    async fn list_vms_by_node(&self, node_id: &str) -> Result<Vec<VmData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_vms(Some(node_id)).into_iter().cloned().collect())
+    }
+
+    async fn get_vm(&self, id: &str) -> Result<Option<VmData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_vm(id).cloned())
+    }
+
+    async fn get_vm_by_name(&self, name: &str) -> Result<Option<VmData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_vm_by_name(name).cloned())
+    }
+
+    async fn create_vm(&self, req: CreateVmRequest) -> Result<VmData> {
+        let cmd = Command::CreateVm {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            spec: req.spec,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Vm(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn create_and_schedule_vm(&self, req: CreateVmRequest) -> Result<VmData> {
+        // First, get all nodes to schedule
+        let nodes = self.list_nodes().await?;
+
+        // Use scheduler to pick a node
+        let scheduler = Scheduler::new();
+        let schedule_result = scheduler
+            .select_node(&nodes, &req.spec)
+            .map_err(|e| StoreError::ScheduleFailed(e.to_string()))?;
+
+        // Create the VM
+        let vm = self.create_vm(req).await?;
+
+        // Update the VM status with the scheduled node
+        let status_req = UpdateVmStatusRequest {
+            status: VmStatus {
+                phase: VmPhase::Scheduled,
+                node_id: Some(schedule_result.node_id),
+                ip_address: None,
+                message: Some(schedule_result.reason),
+            },
+        };
+
+        self.update_vm_status(&vm.id, status_req).await
+    }
+
+    async fn update_vm_spec(&self, id: &str, req: UpdateVmSpecRequest) -> Result<VmData> {
+        let cmd = Command::UpdateVmSpec {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            desired_state: req.desired_state,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Vm(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn update_vm_status(&self, id: &str, req: UpdateVmStatusRequest) -> Result<VmData> {
+        let cmd = Command::UpdateVmStatus {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            status: req.status,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Vm(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn delete_vm(&self, id: &str) -> Result<()> {
+        let cmd = Command::DeleteVm {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: id.to_string(),
         };

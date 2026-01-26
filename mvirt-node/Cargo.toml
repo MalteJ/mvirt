@@ -1,0 +1,45 @@
+[package]
+name = "mvirt-node"
+version = "0.1.0"
+edition = "2021"
+description = "mvirt Node Agent - reconciles desired state from mvirt-api with local hypervisor"
+
+[[bin]]
+name = "mvirt-node"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# gRPC client
+tonic = "0.12"
+prost = "0.13"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.4"
+async-trait = "0.1"
+
+# Audit logging
+mvirt-log = { path = "../mvirt-log" }
+
+[build-dependencies]
+tonic-build = "0.12"

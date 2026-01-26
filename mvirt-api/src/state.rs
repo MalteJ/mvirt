@@ -1,4 +1,4 @@
-//! Control Plane state machine.
+//! API Server state machine.
 
 use lru::LruCache;
 use mraft::StateMachine;
@@ -6,30 +6,68 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
-use crate::command::{Command, NetworkData, NicData, NicStateData, Response};
+use crate::command::{
+    Command, NetworkData, NicData, NicStateData, NodeData, NodeStatus, Response, VmData, VmPhase,
+    VmStatus,
+};
 use crate::store::Event;
 
-/// Control Plane state - replicated across all nodes via Raft.
+/// API Server state - replicated across all nodes via Raft.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CpState {
+pub struct ApiState {
+    pub nodes: HashMap<String, NodeData>,
     pub networks: HashMap<String, NetworkData>,
     pub nics: HashMap<String, NicData>,
+    pub vms: HashMap<String, VmData>,
     /// Idempotency cache for request deduplication
     #[serde(skip)]
     applied_requests: Option<LruCache<String, Response>>,
 }
 
-impl Default for CpState {
+impl Default for ApiState {
     fn default() -> Self {
         Self {
+            nodes: HashMap::new(),
             networks: HashMap::new(),
             nics: HashMap::new(),
+            vms: HashMap::new(),
             applied_requests: Some(LruCache::new(NonZeroUsize::new(1000).unwrap())),
         }
     }
 }
 
-impl CpState {
+impl ApiState {
+    // =========================================================================
+    // Node queries
+    // =========================================================================
+
+    /// Get a node by ID
+    pub fn get_node(&self, id: &str) -> Option<&NodeData> {
+        self.nodes.get(id)
+    }
+
+    /// Get a node by name
+    pub fn get_node_by_name(&self, name: &str) -> Option<&NodeData> {
+        self.nodes.values().find(|n| n.name == name)
+    }
+
+    /// List all nodes
+    pub fn list_nodes(&self) -> Vec<&NodeData> {
+        self.nodes.values().collect()
+    }
+
+    /// List online nodes only
+    pub fn list_online_nodes(&self) -> Vec<&NodeData> {
+        self.nodes
+            .values()
+            .filter(|n| n.status == NodeStatus::Online)
+            .collect()
+    }
+
+    // =========================================================================
+    // Network queries
+    // =========================================================================
+
     /// Get a network by ID
     pub fn get_network(&self, id: &str) -> Option<&NetworkData> {
         self.networks.get(id)
@@ -67,6 +105,40 @@ impl CpState {
         }
     }
 
+    // =========================================================================
+    // VM queries
+    // =========================================================================
+
+    /// Get a VM by ID
+    pub fn get_vm(&self, id: &str) -> Option<&VmData> {
+        self.vms.get(id)
+    }
+
+    /// Get a VM by name
+    pub fn get_vm_by_name(&self, name: &str) -> Option<&VmData> {
+        self.vms.values().find(|v| v.spec.name == name)
+    }
+
+    /// List all VMs, optionally filtered by node
+    pub fn list_vms(&self, node_id: Option<&str>) -> Vec<&VmData> {
+        match node_id {
+            Some(nid) => self
+                .vms
+                .values()
+                .filter(|v| v.status.node_id.as_deref() == Some(nid))
+                .collect(),
+            None => self.vms.values().collect(),
+        }
+    }
+
+    /// List VMs by phase
+    pub fn list_vms_by_phase(&self, phase: VmPhase) -> Vec<&VmData> {
+        self.vms
+            .values()
+            .filter(|v| v.status.phase == phase)
+            .collect()
+    }
+
     /// Ensure the idempotency cache is initialized (after deserialization)
     fn ensure_cache(&mut self) {
         if self.applied_requests.is_none() {
@@ -75,7 +147,7 @@ impl CpState {
     }
 }
 
-impl StateMachine<Command, Response> for CpState {
+impl StateMachine<Command, Response> for ApiState {
     type Event = Event;
 
     fn apply(&mut self, cmd: Command) -> (Response, Vec<Self::Event>) {
@@ -89,6 +161,106 @@ impl StateMachine<Command, Response> for CpState {
         }
 
         let (response, events) = match cmd.clone() {
+            // =================================================================
+            // Node Commands
+            // =================================================================
+            Command::RegisterNode {
+                id,
+                timestamp,
+                name,
+                address,
+                resources,
+                labels,
+                ..
+            } => {
+                // Check for duplicate name
+                if self.nodes.values().any(|n| n.name == name) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Node with name '{}' already exists", name),
+                        },
+                        vec![],
+                    );
+                }
+
+                // Check for duplicate ID (idempotency)
+                if self.nodes.contains_key(&id) {
+                    return (Response::Node(self.nodes.get(&id).unwrap().clone()), vec![]);
+                }
+
+                let node = NodeData {
+                    id: id.clone(),
+                    name,
+                    address,
+                    status: NodeStatus::Online,
+                    resources,
+                    labels,
+                    last_heartbeat: timestamp.clone(),
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                };
+
+                self.nodes.insert(id, node.clone());
+                (
+                    Response::Node(node.clone()),
+                    vec![Event::NodeRegistered(node)],
+                )
+            }
+
+            Command::UpdateNodeStatus {
+                node_id,
+                timestamp,
+                status,
+                resources,
+                ..
+            } => match self.nodes.get(&node_id).cloned() {
+                Some(old_node) => {
+                    let node = self.nodes.get_mut(&node_id).unwrap();
+                    node.status = status;
+                    if let Some(res) = resources {
+                        node.resources = res;
+                    }
+                    node.last_heartbeat = timestamp.clone();
+                    node.updated_at = timestamp;
+                    let new_node = node.clone();
+                    (
+                        Response::Node(new_node.clone()),
+                        vec![Event::NodeUpdated {
+                            id: node_id,
+                            old: old_node,
+                            new: new_node,
+                        }],
+                    )
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("Node '{}' not found", node_id),
+                    },
+                    vec![],
+                ),
+            },
+
+            Command::DeregisterNode { node_id, .. } => match self.nodes.remove(&node_id) {
+                Some(_) => (
+                    Response::Deleted {
+                        id: node_id.clone(),
+                    },
+                    vec![Event::NodeDeregistered { id: node_id }],
+                ),
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("Node '{}' not found", node_id),
+                    },
+                    vec![],
+                ),
+            },
+
+            // =================================================================
+            // Network Commands
+            // =================================================================
             Command::CreateNetwork {
                 id,
                 timestamp,
@@ -332,6 +504,129 @@ impl StateMachine<Command, Response> for CpState {
                     vec![],
                 ),
             },
+
+            // =================================================================
+            // VM Commands
+            // =================================================================
+            Command::CreateVm {
+                id,
+                timestamp,
+                spec,
+                ..
+            } => {
+                // Check for duplicate name
+                if self.vms.values().any(|v| v.spec.name == spec.name) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("VM with name '{}' already exists", spec.name),
+                        },
+                        vec![],
+                    );
+                }
+
+                // Check for duplicate ID (idempotency)
+                if self.vms.contains_key(&id) {
+                    return (Response::Vm(self.vms.get(&id).unwrap().clone()), vec![]);
+                }
+
+                // Check network exists
+                if !self.networks.contains_key(&spec.network_id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Network '{}' not found", spec.network_id),
+                        },
+                        vec![],
+                    );
+                }
+
+                let vm = VmData {
+                    id: id.clone(),
+                    spec,
+                    status: VmStatus {
+                        phase: VmPhase::Pending,
+                        ..Default::default()
+                    },
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                };
+
+                self.vms.insert(id, vm.clone());
+                (Response::Vm(vm.clone()), vec![Event::VmCreated(vm)])
+            }
+
+            Command::UpdateVmSpec {
+                id,
+                timestamp,
+                desired_state,
+                ..
+            } => match self.vms.get(&id).cloned() {
+                Some(old_vm) => {
+                    let vm = self.vms.get_mut(&id).unwrap();
+                    vm.spec.desired_state = desired_state;
+                    vm.updated_at = timestamp;
+                    let new_vm = vm.clone();
+                    (
+                        Response::Vm(new_vm.clone()),
+                        vec![Event::VmUpdated {
+                            id,
+                            old: old_vm,
+                            new: new_vm,
+                        }],
+                    )
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("VM '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
+
+            Command::UpdateVmStatus {
+                id,
+                timestamp,
+                status,
+                ..
+            } => match self.vms.get(&id).cloned() {
+                Some(old_vm) => {
+                    let vm = self.vms.get_mut(&id).unwrap();
+                    vm.status = status;
+                    vm.updated_at = timestamp;
+                    let new_vm = vm.clone();
+                    (
+                        Response::Vm(new_vm.clone()),
+                        vec![Event::VmStatusUpdated {
+                            id,
+                            old: old_vm,
+                            new: new_vm,
+                        }],
+                    )
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("VM '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
+
+            Command::DeleteVm { id, .. } => match self.vms.remove(&id) {
+                Some(_) => (
+                    Response::Deleted { id: id.clone() },
+                    vec![Event::VmDeleted { id }],
+                ),
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("VM '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
         };
 
         // Cache the response
@@ -367,7 +662,7 @@ mod tests {
     use mraft::StateMachine;
 
     /// Helper to get just the response from apply (ignoring events)
-    fn apply(state: &mut CpState, cmd: Command) -> Response {
+    fn apply(state: &mut ApiState, cmd: Command) -> Response {
         let (response, _events) = state.apply(cmd);
         response
     }
@@ -405,7 +700,7 @@ mod tests {
 
     #[test]
     fn test_create_network() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
         let cmd = create_network_cmd("req-1", "net-1", "test-network");
         let response = apply(&mut state, cmd);
 
@@ -429,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_create_network_duplicate_name() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // Create first network
         let cmd1 = create_network_cmd("req-1", "net-1", "duplicate-name");
@@ -451,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_idempotency_same_request_id() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // First request
         let cmd1 = create_network_cmd("req-same", "net-1", "network-a");
@@ -476,7 +771,7 @@ mod tests {
 
     #[test]
     fn test_idempotency_different_request_id() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // First request
         let cmd1 = create_network_cmd("req-1", "net-1", "network-a");
@@ -491,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_id_returns_existing() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // Create first network
         let cmd1 = create_network_cmd("req-1", "net-same-id", "network-a");
@@ -512,7 +807,7 @@ mod tests {
 
     #[test]
     fn test_delete_network_with_nics_no_force() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // Create network
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
@@ -545,7 +840,7 @@ mod tests {
 
     #[test]
     fn test_delete_network_with_nics_force() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // Create network
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
@@ -578,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_nic_increments_network_counter() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // Create network
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
@@ -595,7 +890,7 @@ mod tests {
 
     #[test]
     fn test_nic_decrements_network_counter() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // Create network and NICs
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
@@ -622,7 +917,7 @@ mod tests {
 
     #[test]
     fn test_get_network_by_name() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         apply(
             &mut state,
@@ -640,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_get_nic_by_name() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
         apply(
@@ -659,7 +954,7 @@ mod tests {
 
     #[test]
     fn test_create_nic_network_not_found() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // Try to create NIC in non-existent network
         let cmd = create_nic_cmd("req-1", "nic-1", "non-existent-network", None);
@@ -676,7 +971,7 @@ mod tests {
 
     #[test]
     fn test_create_nic_auto_generates_mac() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
         let response = apply(&mut state, create_nic_cmd("req-2", "nic-1", "net-1", None));
@@ -694,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_update_network() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // Create network
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
@@ -720,7 +1015,7 @@ mod tests {
 
     #[test]
     fn test_update_network_not_found() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         let update_cmd = Command::UpdateNetwork {
             request_id: "req-1".to_string(),
@@ -736,7 +1031,7 @@ mod tests {
 
     #[test]
     fn test_update_nic() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         apply(&mut state, create_network_cmd("req-1", "net-1", "test-net"));
         apply(&mut state, create_nic_cmd("req-2", "nic-1", "net-1", None));
@@ -761,7 +1056,7 @@ mod tests {
 
     #[test]
     fn test_list_nics_filter_by_network() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         // Create two networks
         apply(
@@ -795,7 +1090,7 @@ mod tests {
 
     #[test]
     fn test_delete_network_not_found() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         let delete_cmd = Command::DeleteNetwork {
             request_id: "req-1".to_string(),
@@ -809,7 +1104,7 @@ mod tests {
 
     #[test]
     fn test_delete_nic_not_found() {
-        let mut state = CpState::default();
+        let mut state = ApiState::default();
 
         let delete_cmd = Command::DeleteNic {
             request_id: "req-1".to_string(),

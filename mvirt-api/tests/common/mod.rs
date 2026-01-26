@@ -1,9 +1,9 @@
-//! Shared test utilities for mvirt-cp integration tests.
+//! Shared test utilities for mvirt-api integration tests.
 
 use mraft::{NodeConfig, RaftNode, StorageBackend};
-use mvirt_cp::rest::{AppState, create_router};
-use mvirt_cp::store::{Event, RaftStore};
-use mvirt_cp::{Command, CpAuditLogger, CpState, Response};
+use mvirt_api::rest::{AppState, create_router};
+use mvirt_api::store::{Event, RaftStore};
+use mvirt_api::{ApiAuditLogger, ApiState, Command, Response};
 use reqwest::{Client, Response as ReqwestResponse};
 use serde::Serialize;
 use std::net::SocketAddr;
@@ -20,7 +20,7 @@ pub fn allocate_port() -> u16 {
 pub struct TestServer {
     pub addr: SocketAddr,
     pub client: Client,
-    pub raft_node: Arc<RwLock<RaftNode<Command, Response, CpState>>>,
+    pub raft_node: Arc<RwLock<RaftNode<Command, Response, ApiState>>>,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -40,7 +40,7 @@ impl TestServer {
         };
 
         // Create and start Raft node
-        let mut node: RaftNode<Command, Response, CpState> =
+        let mut node: RaftNode<Command, Response, ApiState> =
             RaftNode::new(config).await.expect("Failed to create node");
         node.start().await.expect("Failed to start node");
 
@@ -66,7 +66,7 @@ impl TestServer {
         // Create app state with noop audit logger
         let app_state = Arc::new(AppState {
             store,
-            audit: Arc::new(CpAuditLogger::new_noop()),
+            audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
         });
 

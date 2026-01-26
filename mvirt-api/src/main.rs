@@ -9,14 +9,19 @@ use tokio::sync::{RwLock, broadcast};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use mvirt_cp::audit::create_audit_logger;
-use mvirt_cp::rest::{AppState, create_router};
-use mvirt_cp::store::{Event, RaftStore};
-use mvirt_cp::{Command, CpAuditLogger, CpState, NodeId, Response};
+use tonic::transport::Server as TonicServer;
+
+use mvirt_api::audit::create_audit_logger;
+use mvirt_api::rest::{AppState, create_router};
+use mvirt_api::store::{Event, RaftStore};
+use mvirt_api::{
+    ApiAuditLogger, ApiState, Command, DataStore, NodeId, NodeServiceImpl, NodeServiceServer,
+    Response,
+};
 
 #[derive(Parser)]
-#[command(name = "mvirt-cp")]
-#[command(about = "mvirt Cluster Control Plane - Raft-based distributed state management")]
+#[command(name = "mvirt-api")]
+#[command(about = "mvirt API Server - Raft-based distributed control plane")]
 struct Args {
     /// Node ID for this instance (auto-detected from token when using --join)
     #[arg(long)]
@@ -33,6 +38,10 @@ struct Args {
     /// Listen address for REST API (client)
     #[arg(short, long, default_value = "[::1]:50055")]
     listen: String,
+
+    /// Listen address for gRPC API (mvirt-node agents)
+    #[arg(long, default_value = "[::1]:50056")]
+    grpc_listen: String,
 
     /// Peer nodes (format: id:addr, can be repeated)
     #[arg(long, value_parser = parse_peer)]
@@ -75,7 +84,7 @@ fn parse_peer(s: &str) -> Result<(NodeId, String), String> {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize tracing
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("mvirt_cp=info".parse()?))
+        .with_env_filter(EnvFilter::from_default_env().add_directive("mvirt_api=info".parse()?))
         .init();
 
     let args = Args::parse();
@@ -105,8 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     info!(
-        "Starting mvirt-cp node {} ({}) - Raft: {}, REST: {}",
-        node_id, name, args.raft_listen, args.listen
+        "Starting mvirt-api node {} ({}) - Raft: {}, REST: {}, gRPC: {}",
+        node_id, name, args.raft_listen, args.listen, args.grpc_listen
     );
 
     // Build peers map
@@ -128,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     // Create and start the Raft node
-    let mut node: RaftNode<Command, Response, CpState> = RaftNode::new(config).await?;
+    let mut node: RaftNode<Command, Response, ApiState> = RaftNode::new(config).await?;
     node.start().await?;
 
     // Handle cluster membership
@@ -161,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Create audit logger
     let audit = if args.dev {
-        Arc::new(CpAuditLogger::new_noop())
+        Arc::new(ApiAuditLogger::new_noop())
     } else {
         create_audit_logger(&args.log_endpoint)
     };
@@ -179,31 +188,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Create REST API state
     let app_state = Arc::new(AppState {
-        store,
-        audit,
+        store: store.clone(),
+        audit: audit.clone(),
         node_id,
     });
 
     // Create REST router
     let router = create_router(app_state.clone());
 
+    // Create gRPC NodeService (wrapped in Arc for sharing with event listener)
+    let node_service = Arc::new(NodeServiceImpl::new(store.clone(), audit));
+
+    // Start event listener to forward specs to nodes
+    let event_rx = store.subscribe();
+    Arc::clone(&node_service).start_event_listener(event_rx);
+
+    // Create gRPC server with the Arc-wrapped service
+    let grpc_service = NodeServiceServer::from_arc(node_service);
+
     // Start REST server
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     info!("REST API listening on {}", args.listen);
 
-    // Run server with graceful shutdown
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let ctrl_c = signal::ctrl_c();
-            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("Failed to install SIGTERM handler");
+    // Parse gRPC address
+    let grpc_addr = args.grpc_listen.parse()?;
 
-            tokio::select! {
-                _ = ctrl_c => info!("Received SIGINT"),
-                _ = sigterm.recv() => info!("Received SIGTERM"),
-            }
-        })
-        .await?;
+    // Create shutdown signal channel
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut shutdown_rx2 = shutdown_tx.subscribe();
+
+    // Spawn REST server
+    let rest_handle = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                shutdown_rx.changed().await.ok();
+            })
+            .await
+    });
+
+    // Spawn gRPC server
+    let grpc_handle = tokio::spawn(async move {
+        info!("gRPC API listening on {}", grpc_addr);
+        TonicServer::builder()
+            .add_service(grpc_service)
+            .serve_with_shutdown(grpc_addr, async move {
+                shutdown_rx2.changed().await.ok();
+            })
+            .await
+    });
+
+    // Wait for shutdown signal
+    let ctrl_c = signal::ctrl_c();
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .expect("Failed to install SIGTERM handler");
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received SIGINT"),
+        _ = sigterm.recv() => info!("Received SIGTERM"),
+    }
+
+    // Signal shutdown to both servers
+    let _ = shutdown_tx.send(true);
+
+    // Wait for servers to finish
+    let _ = rest_handle.await;
+    let _ = grpc_handle.await;
 
     // Shutdown Raft node
     info!("Shutting down Raft node...");
