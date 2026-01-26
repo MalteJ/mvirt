@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State, WebSocketUpgrade},
+    extract::{Path, Query, State, WebSocketUpgrade},
     http::StatusCode,
     response::{sse::Event, IntoResponse, Sse},
     Json,
@@ -13,15 +13,36 @@ use uuid::Uuid;
 
 use crate::state::{AppState, LogEntry, LogLevel, Vm, VmConfig, VmState};
 
+#[derive(Debug, Deserialize)]
+pub struct ListVmsQuery {
+    #[serde(alias = "projectId")]
+    project_id: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VmListResponse {
     vms: Vec<Vm>,
 }
 
-pub async fn list_vms(State(state): State<AppState>) -> Json<VmListResponse> {
+pub async fn list_vms(
+    State(state): State<AppState>,
+    Query(query): Query<ListVmsQuery>,
+) -> Json<VmListResponse> {
+    println!("list_vms query: {:?}", query);
     let inner = state.inner.read().await;
-    let vms: Vec<Vm> = inner.vms.values().cloned().collect();
+    let vms: Vec<Vm> = inner
+        .vms
+        .values()
+        .filter(|vm| {
+            query
+                .project_id
+                .as_ref()
+                .map_or(true, |pid| &vm.project_id == pid)
+        })
+        .cloned()
+        .collect();
+    println!("Returning {} vms", vms.len());
     Json(VmListResponse { vms })
 }
 
@@ -42,6 +63,7 @@ pub async fn get_vm(
 #[serde(rename_all = "camelCase")]
 pub struct CreateVmRequest {
     name: String,
+    project_id: String,
     config: VmConfig,
 }
 
@@ -53,6 +75,7 @@ pub async fn create_vm(
 
     let vm = Vm {
         id: Uuid::new_v4().to_string(),
+        project_id: req.project_id,
         name: req.name.clone(),
         state: VmState::Stopped,
         config: req.config,
@@ -62,6 +85,7 @@ pub async fn create_vm(
 
     let log_entry = LogEntry {
         id: Uuid::new_v4().to_string(),
+        project_id: vm.project_id.clone(),
         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
         message: format!("VM '{}' created", req.name),
         level: LogLevel::Audit,
@@ -84,6 +108,7 @@ pub async fn delete_vm(
     if let Some(vm) = inner.vms.remove(&id) {
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: vm.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!("VM '{}' deleted", vm.name),
             level: LogLevel::Audit,
@@ -124,6 +149,7 @@ pub async fn start_vm(
 
                     let log_entry = LogEntry {
                         id: Uuid::new_v4().to_string(),
+                        project_id: vm.project_id.clone(),
                         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                         message: format!("VM '{}' started", vm.name),
                         level: LogLevel::Audit,
@@ -168,6 +194,7 @@ pub async fn stop_vm(
 
                     let log_entry = LogEntry {
                         id: Uuid::new_v4().to_string(),
+                        project_id: vm.project_id.clone(),
                         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                         message: format!("VM '{}' stopped", vm.name),
                         level: LogLevel::Audit,
@@ -202,6 +229,7 @@ pub async fn kill_vm(
 
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: vm.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!("VM '{}' killed", vm.name),
             level: LogLevel::Audit,

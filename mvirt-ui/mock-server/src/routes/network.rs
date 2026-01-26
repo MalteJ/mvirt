@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -8,15 +8,34 @@ use uuid::Uuid;
 
 use crate::state::{AppState, LogEntry, LogLevel, Network, Nic, NicState};
 
+#[derive(Debug, Deserialize)]
+pub struct ListNetworksQuery {
+    #[serde(alias = "projectId")]
+    project_id: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkListResponse {
     networks: Vec<Network>,
 }
 
-pub async fn list_networks(State(state): State<AppState>) -> Json<NetworkListResponse> {
+pub async fn list_networks(
+    State(state): State<AppState>,
+    Query(query): Query<ListNetworksQuery>,
+) -> Json<NetworkListResponse> {
     let inner = state.inner.read().await;
-    let networks: Vec<Network> = inner.networks.values().cloned().collect();
+    let networks: Vec<Network> = inner
+        .networks
+        .values()
+        .filter(|n| {
+            query
+                .project_id
+                .as_ref()
+                .map_or(true, |pid| &n.project_id == pid)
+        })
+        .cloned()
+        .collect();
     Json(NetworkListResponse { networks })
 }
 
@@ -37,6 +56,7 @@ pub async fn get_network(
 #[serde(rename_all = "camelCase")]
 pub struct CreateNetworkRequest {
     name: String,
+    project_id: String,
     ipv4_subnet: Option<String>,
     ipv6_prefix: Option<String>,
 }
@@ -49,6 +69,7 @@ pub async fn create_network(
 
     let network = Network {
         id: Uuid::new_v4().to_string(),
+        project_id: req.project_id,
         name: req.name.clone(),
         ipv4_subnet: req.ipv4_subnet,
         ipv6_prefix: req.ipv6_prefix,
@@ -57,6 +78,7 @@ pub async fn create_network(
 
     let log_entry = LogEntry {
         id: Uuid::new_v4().to_string(),
+        project_id: network.project_id.clone(),
         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
         message: format!("Network '{}' created", req.name),
         level: LogLevel::Audit,
@@ -79,6 +101,7 @@ pub async fn delete_network(
     if let Some(net) = inner.networks.remove(&id) {
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: net.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!("Network '{}' deleted", net.name),
             level: LogLevel::Audit,
@@ -94,15 +117,34 @@ pub async fn delete_network(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListNicsQuery {
+    #[serde(alias = "projectId")]
+    project_id: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NicListResponse {
     nics: Vec<Nic>,
 }
 
-pub async fn list_nics(State(state): State<AppState>) -> Json<NicListResponse> {
+pub async fn list_nics(
+    State(state): State<AppState>,
+    Query(query): Query<ListNicsQuery>,
+) -> Json<NicListResponse> {
     let inner = state.inner.read().await;
-    let nics: Vec<Nic> = inner.nics.values().cloned().collect();
+    let nics: Vec<Nic> = inner
+        .nics
+        .values()
+        .filter(|n| {
+            query
+                .project_id
+                .as_ref()
+                .map_or(true, |pid| &n.project_id == pid)
+        })
+        .cloned()
+        .collect();
     Json(NicListResponse { nics })
 }
 
@@ -134,6 +176,7 @@ fn generate_mac() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct CreateNicRequest {
     name: String,
+    project_id: String,
     network_id: String,
     mac_address: Option<String>,
 }
@@ -151,6 +194,7 @@ pub async fn create_nic(
 
     let nic = Nic {
         id: Uuid::new_v4().to_string(),
+        project_id: req.project_id,
         name: req.name.clone(),
         mac_address: req.mac_address.unwrap_or_else(generate_mac),
         network_id: req.network_id.clone(),
@@ -167,6 +211,7 @@ pub async fn create_nic(
 
     let log_entry = LogEntry {
         id: Uuid::new_v4().to_string(),
+        project_id: nic.project_id.clone(),
         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
         message: format!("NIC '{}' created", req.name),
         level: LogLevel::Audit,
@@ -194,6 +239,7 @@ pub async fn delete_nic(
 
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: nic.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!("NIC '{}' deleted", nic.name),
             level: LogLevel::Audit,
@@ -234,6 +280,7 @@ pub async fn attach_nic(
 
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: nic.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!("NIC '{}' attached to VM", nic.name),
             level: LogLevel::Audit,
@@ -262,6 +309,7 @@ pub async fn detach_nic(
 
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: nic.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!("NIC '{}' detached", nic.name),
             level: LogLevel::Audit,

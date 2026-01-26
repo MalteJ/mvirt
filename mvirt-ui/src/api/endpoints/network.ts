@@ -1,8 +1,9 @@
 import { get, post, del } from '../client'
 import type { Network, Nic, CreateNetworkRequest, CreateNicRequest } from '@/types'
 
-export async function listNetworks(): Promise<Network[]> {
-  const response = await get<{ networks: Network[] }>('/networks')
+export async function listNetworks(projectId?: string): Promise<Network[]> {
+  const params = projectId ? `?projectId=${projectId}` : ''
+  const response = await get<{ networks: Network[] }>(`/networks${params}`)
   return response.networks
 }
 
@@ -18,8 +19,9 @@ export async function deleteNetwork(id: string): Promise<void> {
   await del<void>(`/networks/${id}`)
 }
 
-export async function listNics(): Promise<Nic[]> {
-  const response = await get<{ nics: Nic[] }>('/nics')
+export async function listNics(projectId?: string): Promise<Nic[]> {
+  const params = projectId ? `?projectId=${projectId}` : ''
+  const response = await get<{ nics: Nic[] }>(`/nics${params}`)
   return response.nics
 }
 

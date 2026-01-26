@@ -1,20 +1,23 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { listVms, getVm, createVm, deleteVm, startVm, stopVm, killVm } from '@/api/endpoints'
+import { useProject } from '@/hooks/useProject'
 import type { CreateVmRequest } from '@/types'
 
 export const vmKeys = {
   all: ['vms'] as const,
   lists: () => [...vmKeys.all, 'list'] as const,
-  list: () => [...vmKeys.lists()] as const,
+  list: (projectId?: string) => [...vmKeys.lists(), projectId] as const,
   details: () => [...vmKeys.all, 'detail'] as const,
   detail: (id: string) => [...vmKeys.details(), id] as const,
 }
 
 export function useVms() {
+  const { currentProject } = useProject()
   return useQuery({
-    queryKey: vmKeys.list(),
-    queryFn: listVms,
+    queryKey: vmKeys.list(currentProject?.id),
+    queryFn: () => listVms(currentProject?.id),
     refetchInterval: 5000,
+    enabled: !!currentProject,
   })
 }
 

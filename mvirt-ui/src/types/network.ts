@@ -1,5 +1,6 @@
 export interface Network {
   id: string
+  projectId: string
   name: string
   ipv4Subnet?: string
   ipv6Prefix?: string
@@ -13,6 +14,7 @@ export enum NicState {
 
 export interface Nic {
   id: string
+  projectId: string
   name: string
   macAddress: string
   networkId: string
@@ -24,12 +26,14 @@ export interface Nic {
 
 export interface CreateNetworkRequest {
   name: string
+  projectId: string
   ipv4Subnet?: string
   ipv6Prefix?: string
 }
 
 export interface CreateNicRequest {
   name: string
+  projectId: string
   networkId: string
   macAddress?: string
 }

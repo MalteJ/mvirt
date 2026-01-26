@@ -1,8 +1,9 @@
 import { get, post, del } from '../client'
 import type { Pod, CreatePodRequest, PodListResponse } from '@/types'
 
-export async function listPods(): Promise<Pod[]> {
-  const response = await get<PodListResponse>('/pods')
+export async function listPods(projectId?: string): Promise<Pod[]> {
+  const params = projectId ? `?projectId=${projectId}` : ''
+  const response = await get<PodListResponse>(`/pods${params}`)
   return response.pods
 }
 

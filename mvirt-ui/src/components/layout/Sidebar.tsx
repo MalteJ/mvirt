@@ -2,7 +2,6 @@ import { NavLink, Link } from 'react-router-dom'
 import {
   Server,
   Container,
-  Database,
   HardDrive,
   Network,
   ScrollText,
@@ -13,10 +12,12 @@ import { cn } from '@/lib/utils'
 const navigation = [
   { name: 'Virtual Machines', href: '/vms', icon: Server },
   { name: 'Containers', href: '/containers', icon: Container },
-  { name: 'Databases', href: '/databases', icon: Database },
   { name: 'Storage', href: '/storage', icon: HardDrive },
   { name: 'Network', href: '/network', icon: Network },
   { name: 'Logs', href: '/logs', icon: ScrollText },
+]
+
+const adminNavigation = [
   { name: 'Cluster', href: '/cluster', icon: Boxes },
 ]
 
@@ -48,6 +49,25 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+      <div className="border-t border-border p-2">
+        {adminNavigation.map((item) => (
+          <NavLink
+            key={item.name}
+            to={item.href}
+            className={({ isActive }) =>
+              cn(
+                'flex items-center rounded-md px-3 py-2 text-sm font-medium transition-all duration-200 border',
+                isActive
+                  ? 'bg-purple/20 text-purple-light border-purple/30'
+                  : 'text-foreground/80 border-transparent hover:bg-secondary hover:text-foreground'
+              )
+            }
+          >
+            <item.icon className="mr-3 h-4 w-4" />
+            {item.name}
+          </NavLink>
+        ))}
+      </div>
       <div className="border-t border-border p-4">
         <div className="flex items-center gap-2 text-xs text-foreground/60">
           <div className="h-2 w-2 rounded-full bg-state-running animate-pulse" />

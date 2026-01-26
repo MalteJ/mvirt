@@ -11,11 +11,13 @@ import {
   getImportJob,
   getPoolStats,
 } from '@/api/endpoints'
+import { useProject } from '@/hooks/useProject'
 import type { CreateVolumeRequest, ImportTemplateRequest } from '@/types'
 
 export const storageKeys = {
   all: ['storage'] as const,
   volumes: () => [...storageKeys.all, 'volumes'] as const,
+  volumeList: (projectId?: string) => [...storageKeys.volumes(), 'list', projectId] as const,
   volume: (id: string) => [...storageKeys.volumes(), id] as const,
   templates: () => [...storageKeys.all, 'templates'] as const,
   importJobs: () => [...storageKeys.all, 'import-jobs'] as const,
@@ -24,9 +26,11 @@ export const storageKeys = {
 }
 
 export function useVolumes() {
+  const { currentProject } = useProject()
   return useQuery({
-    queryKey: storageKeys.volumes(),
-    queryFn: listVolumes,
+    queryKey: storageKeys.volumeList(currentProject?.id),
+    queryFn: () => listVolumes(currentProject?.id),
+    enabled: !!currentProject,
   })
 }
 

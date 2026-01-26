@@ -9,20 +9,25 @@ import {
   attachNic,
   detachNic,
 } from '@/api/endpoints'
+import { useProject } from '@/hooks/useProject'
 import type { CreateNetworkRequest, CreateNicRequest } from '@/types'
 
 export const networkKeys = {
   all: ['network'] as const,
   networks: () => [...networkKeys.all, 'networks'] as const,
+  networkList: (projectId?: string) => [...networkKeys.networks(), 'list', projectId] as const,
   network: (id: string) => [...networkKeys.networks(), id] as const,
   nics: () => [...networkKeys.all, 'nics'] as const,
+  nicList: (projectId?: string) => [...networkKeys.nics(), 'list', projectId] as const,
   nic: (id: string) => [...networkKeys.nics(), id] as const,
 }
 
 export function useNetworks() {
+  const { currentProject } = useProject()
   return useQuery({
-    queryKey: networkKeys.networks(),
-    queryFn: listNetworks,
+    queryKey: networkKeys.networkList(currentProject?.id),
+    queryFn: () => listNetworks(currentProject?.id),
+    enabled: !!currentProject,
   })
 }
 
@@ -47,9 +52,11 @@ export function useDeleteNetwork() {
 }
 
 export function useNics() {
+  const { currentProject } = useProject()
   return useQuery({
-    queryKey: networkKeys.nics(),
-    queryFn: listNics,
+    queryKey: networkKeys.nicList(currentProject?.id),
+    queryFn: () => listNics(currentProject?.id),
+    enabled: !!currentProject,
   })
 }
 

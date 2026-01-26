@@ -1,8 +1,8 @@
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
-import { VmState, PodState, ContainerState, DatabaseState } from '@/types'
+import { VmState, PodState, ContainerState } from '@/types'
 
-type State = VmState | PodState | ContainerState | DatabaseState
+type State = VmState | PodState | ContainerState
 
 interface StateIndicatorProps {
   state: State

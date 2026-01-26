@@ -1,6 +1,6 @@
 export * from './useVms'
 export * from './usePods'
-export * from './useDatabases'
+export * from './useProjects'
 export * from './useStorage'
 export * from './useNetwork'
 export * from './useLogs'

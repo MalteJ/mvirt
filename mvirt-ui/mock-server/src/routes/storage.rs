@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -10,15 +10,34 @@ use crate::state::{
     AppState, ImportJob, ImportJobState, LogEntry, LogLevel, PoolStats, Snapshot, Template, Volume,
 };
 
+#[derive(Debug, Deserialize)]
+pub struct ListVolumesQuery {
+    #[serde(alias = "projectId")]
+    project_id: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeListResponse {
     volumes: Vec<Volume>,
 }
 
-pub async fn list_volumes(State(state): State<AppState>) -> Json<VolumeListResponse> {
+pub async fn list_volumes(
+    State(state): State<AppState>,
+    Query(query): Query<ListVolumesQuery>,
+) -> Json<VolumeListResponse> {
     let inner = state.inner.read().await;
-    let volumes: Vec<Volume> = inner.volumes.values().cloned().collect();
+    let volumes: Vec<Volume> = inner
+        .volumes
+        .values()
+        .filter(|v| {
+            query
+                .project_id
+                .as_ref()
+                .map_or(true, |pid| &v.project_id == pid)
+        })
+        .cloned()
+        .collect();
     Json(VolumeListResponse { volumes })
 }
 
@@ -39,6 +58,7 @@ pub async fn get_volume(
 #[serde(rename_all = "camelCase")]
 pub struct CreateVolumeRequest {
     name: String,
+    project_id: String,
     size_bytes: u64,
     template_id: Option<String>,
 }
@@ -51,6 +71,7 @@ pub async fn create_volume(
 
     let volume = Volume {
         id: Uuid::new_v4().to_string(),
+        project_id: req.project_id,
         name: req.name.clone(),
         path: format!("tank/vm/{}", req.name),
         volsize_bytes: req.size_bytes,
@@ -61,6 +82,7 @@ pub async fn create_volume(
 
     let log_entry = LogEntry {
         id: Uuid::new_v4().to_string(),
+        project_id: volume.project_id.clone(),
         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
         message: format!("Volume '{}' created", req.name),
         level: LogLevel::Audit,
@@ -83,6 +105,7 @@ pub async fn delete_volume(
     if let Some(vol) = inner.volumes.remove(&id) {
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: vol.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!("Volume '{}' deleted", vol.name),
             level: LogLevel::Audit,
@@ -117,6 +140,7 @@ pub async fn resize_volume(
 
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: volume.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!(
                 "Volume '{}' resized to {} bytes",
@@ -160,6 +184,7 @@ pub async fn create_snapshot(
 
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: volume.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!(
                 "Snapshot '{}' created for volume '{}'",
@@ -241,6 +266,7 @@ pub async fn import_template(
 
                     let log_entry = LogEntry {
                         id: Uuid::new_v4().to_string(),
+                        project_id: String::new(), // Templates are global
                         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                         message: format!("Template '{}' imported", template_name),
                         level: LogLevel::Audit,

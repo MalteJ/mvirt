@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -11,15 +11,36 @@ use crate::state::{
     AppState, Container, ContainerSpec, ContainerState, LogEntry, LogLevel, Pod, PodState,
 };
 
+#[derive(Debug, Deserialize)]
+pub struct ListPodsQuery {
+    #[serde(alias = "projectId")]
+    project_id: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodListResponse {
     pods: Vec<Pod>,
 }
 
-pub async fn list_pods(State(state): State<AppState>) -> Json<PodListResponse> {
+pub async fn list_pods(
+    State(state): State<AppState>,
+    Query(query): Query<ListPodsQuery>,
+) -> Json<PodListResponse> {
+    println!("list_pods query: {:?}", query);
     let inner = state.inner.read().await;
-    let pods: Vec<Pod> = inner.pods.values().cloned().collect();
+    let pods: Vec<Pod> = inner
+        .pods
+        .values()
+        .filter(|pod| {
+            query
+                .project_id
+                .as_ref()
+                .map_or(true, |pid| &pod.project_id == pid)
+        })
+        .cloned()
+        .collect();
+    println!("Returning {} pods", pods.len());
     Json(PodListResponse { pods })
 }
 
@@ -40,6 +61,7 @@ pub async fn get_pod(
 #[serde(rename_all = "camelCase")]
 pub struct CreatePodRequest {
     name: String,
+    project_id: String,
     network_id: String,
     containers: Vec<ContainerSpec>,
 }
@@ -65,6 +87,7 @@ pub async fn create_pod(
 
     let pod = Pod {
         id: Uuid::new_v4().to_string(),
+        project_id: req.project_id,
         name: req.name.clone(),
         state: PodState::Created,
         network_id: req.network_id.clone(),
@@ -78,6 +101,7 @@ pub async fn create_pod(
 
     let log_entry = LogEntry {
         id: Uuid::new_v4().to_string(),
+        project_id: pod.project_id.clone(),
         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
         message: format!("Pod '{}' created", req.name),
         level: LogLevel::Audit,
@@ -100,6 +124,7 @@ pub async fn delete_pod(
     if let Some(pod) = inner.pods.remove(&id) {
         let log_entry = LogEntry {
             id: Uuid::new_v4().to_string(),
+            project_id: pod.project_id.clone(),
             timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             message: format!("Pod '{}' deleted", pod.name),
             level: LogLevel::Audit,
@@ -149,6 +174,7 @@ pub async fn start_pod(
 
                     let log_entry = LogEntry {
                         id: Uuid::new_v4().to_string(),
+                        project_id: pod.project_id.clone(),
                         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                         message: format!("Pod '{}' started", pod.name),
                         level: LogLevel::Audit,
@@ -198,6 +224,7 @@ pub async fn stop_pod(
 
                     let log_entry = LogEntry {
                         id: Uuid::new_v4().to_string(),
+                        project_id: pod.project_id.clone(),
                         timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                         message: format!("Pod '{}' stopped", pod.name),
                         level: LogLevel::Audit,

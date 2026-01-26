@@ -35,6 +35,7 @@ export interface ContainerSpec {
 
 export interface Pod {
   id: string
+  projectId: string
   name: string
   state: PodState
   networkId: string
@@ -48,6 +49,7 @@ export interface Pod {
 
 export interface CreatePodRequest {
   name: string
+  projectId: string
   networkId: string
   containers: ContainerSpec[]
 }

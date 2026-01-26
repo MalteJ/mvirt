@@ -8,8 +8,9 @@ import type {
   ImportTemplateRequest,
 } from '@/types'
 
-export async function listVolumes(): Promise<Volume[]> {
-  const response = await get<{ volumes: Volume[] }>('/storage/volumes')
+export async function listVolumes(projectId?: string): Promise<Volume[]> {
+  const params = projectId ? `?projectId=${projectId}` : ''
+  const response = await get<{ volumes: Volume[] }>(`/storage/volumes${params}`)
   return response.volumes
 }
 

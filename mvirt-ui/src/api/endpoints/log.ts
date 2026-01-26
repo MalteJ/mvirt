@@ -3,6 +3,7 @@ import type { LogEntry, LogQueryRequest } from '@/types'
 
 export async function queryLogs(request: LogQueryRequest): Promise<LogEntry[]> {
   const params = new URLSearchParams()
+  if (request.projectId) params.set('projectId', request.projectId)
   if (request.objectId) params.set('objectId', request.objectId)
   if (request.level) params.set('level', request.level)
   if (request.component) params.set('component', request.component)

@@ -14,10 +14,13 @@ use crate::state::{AppState, LogEntry, LogLevel};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogQueryParams {
+    #[serde(alias = "projectId")]
+    project_id: Option<String>,
     object_id: Option<String>,
     level: Option<String>,
     component: Option<String>,
     limit: Option<usize>,
+    #[allow(dead_code)]
     before_id: Option<String>,
 }
 
@@ -37,6 +40,13 @@ pub async fn query_logs(
         .logs
         .iter()
         .filter(|log| {
+            // Filter by project_id
+            if let Some(ref pid) = params.project_id {
+                if &log.project_id != pid {
+                    return false;
+                }
+            }
+
             // Filter by object_id
             if let Some(ref obj_id) = params.object_id {
                 if !log.related_object_ids.contains(obj_id) {

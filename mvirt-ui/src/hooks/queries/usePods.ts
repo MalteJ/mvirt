@@ -1,20 +1,23 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { listPods, getPod, createPod, deletePod, startPod, stopPod } from '@/api/endpoints'
+import { useProject } from '@/hooks/useProject'
 import type { CreatePodRequest } from '@/types'
 
 export const podKeys = {
   all: ['pods'] as const,
   lists: () => [...podKeys.all, 'list'] as const,
-  list: () => [...podKeys.lists()] as const,
+  list: (projectId?: string) => [...podKeys.lists(), projectId] as const,
   details: () => [...podKeys.all, 'detail'] as const,
   detail: (id: string) => [...podKeys.details(), id] as const,
 }
 
 export function usePods() {
+  const { currentProject } = useProject()
   return useQuery({
-    queryKey: podKeys.list(),
-    queryFn: listPods,
+    queryKey: podKeys.list(currentProject?.id),
+    queryFn: () => listPods(currentProject?.id),
     refetchInterval: 5000,
+    enabled: !!currentProject,
   })
 }
 

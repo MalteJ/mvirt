@@ -29,6 +29,7 @@ export interface VmConfig {
 
 export interface Vm {
   id: string
+  projectId: string
   name: string
   state: VmState
   config: VmConfig
@@ -38,6 +39,7 @@ export interface Vm {
 
 export interface CreateVmRequest {
   name: string
+  projectId: string
   config: VmConfig
 }
 

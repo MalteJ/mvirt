@@ -20,6 +20,9 @@ async fn main() {
         .allow_headers(Any);
 
     let app = Router::new()
+        // Project routes
+        .route("/api/v1/projects", get(routes::project::list_projects))
+        .route("/api/v1/projects/:id", get(routes::project::get_project))
         // VM routes
         .route(
             "/api/v1/vms",
@@ -45,23 +48,6 @@ async fn main() {
         )
         .route("/api/v1/pods/:id/start", post(routes::pod::start_pod))
         .route("/api/v1/pods/:id/stop", post(routes::pod::stop_pod))
-        // Database routes
-        .route(
-            "/api/v1/databases",
-            get(routes::database::list_databases).post(routes::database::create_database),
-        )
-        .route(
-            "/api/v1/databases/:id",
-            get(routes::database::get_database).delete(routes::database::delete_database),
-        )
-        .route(
-            "/api/v1/databases/:id/start",
-            post(routes::database::start_database),
-        )
-        .route(
-            "/api/v1/databases/:id/stop",
-            post(routes::database::stop_database),
-        )
         // Storage routes
         .route(
             "/api/v1/storage/volumes",

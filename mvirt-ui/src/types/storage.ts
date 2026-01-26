@@ -7,6 +7,7 @@ export interface Snapshot {
 
 export interface Volume {
   id: string
+  projectId: string
   name: string
   path: string
   volsizeBytes: number
@@ -47,6 +48,7 @@ export interface PoolStats {
 
 export interface CreateVolumeRequest {
   name: string
+  projectId: string
   sizeBytes: number
   templateId?: string
 }

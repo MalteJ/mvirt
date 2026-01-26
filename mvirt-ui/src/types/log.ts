@@ -8,6 +8,7 @@ export enum LogLevel {
 
 export interface LogEntry {
   id: string
+  projectId: string
   timestampNs: number
   message: string
   level: LogLevel
@@ -16,6 +17,7 @@ export interface LogEntry {
 }
 
 export interface LogQueryRequest {
+  projectId?: string
   objectId?: string
   level?: LogLevel
   component?: string
