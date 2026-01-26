@@ -108,3 +108,32 @@ impl CpAuditLogger {
 pub fn create_audit_logger(log_endpoint: &str) -> Arc<CpAuditLogger> {
     Arc::new(CpAuditLogger::new(log_endpoint))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_noop_logger_doesnt_panic() {
+        let logger = CpAuditLogger::new_noop();
+
+        // Call all methods - none should panic
+        logger.node_joined(1, "test-node", "127.0.0.1:6001");
+        logger.node_removed(1);
+        logger.leader_elected(1, 1);
+        logger.network_created("net-123", "test-network");
+        logger.network_updated("net-123");
+        logger.network_deleted("net-123");
+        logger.nic_created("nic-456", "net-123", "52:54:00:11:22:33");
+        logger.nic_updated("nic-456");
+        logger.nic_deleted("nic-456");
+    }
+
+    #[tokio::test]
+    async fn test_create_audit_logger_with_invalid_endpoint() {
+        // Should not panic even with invalid endpoint
+        // The logger will just fail silently on log attempts
+        let logger = create_audit_logger("http://invalid-endpoint:99999");
+        logger.network_created("net-1", "test");
+    }
+}

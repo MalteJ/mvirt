@@ -1,29 +1,30 @@
 use clap::Parser;
-use mraft::{NodeConfig, RaftNode, StorageBackend};
+use mraft::{JoinToken, NodeConfig, RaftNode, StorageBackend};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use mvirt_cp::audit::create_audit_logger;
 use mvirt_cp::rest::{AppState, create_router};
+use mvirt_cp::store::{Event, RaftStore};
 use mvirt_cp::{Command, CpAuditLogger, CpState, NodeId, Response};
 
 #[derive(Parser)]
 #[command(name = "mvirt-cp")]
 #[command(about = "mvirt Cluster Control Plane - Raft-based distributed state management")]
 struct Args {
-    /// Node ID for this instance
-    #[arg(long, default_value = "1")]
-    node_id: NodeId,
+    /// Node ID for this instance (auto-detected from token when using --join)
+    #[arg(long)]
+    node_id: Option<NodeId>,
 
     /// Node name for display
-    #[arg(long, default_value = "node1")]
-    name: String,
+    #[arg(long)]
+    name: Option<String>,
 
     /// Listen address for Raft gRPC (node-to-node)
     #[arg(long, default_value = "127.0.0.1:6001")]
@@ -52,6 +53,14 @@ struct Args {
     /// Log service endpoint for audit logging
     #[arg(long, default_value = "http://[::1]:50052")]
     log_endpoint: String,
+
+    /// Join an existing cluster (leader's Raft gRPC address)
+    #[arg(long)]
+    join: Option<String>,
+
+    /// Join token (required with --join)
+    #[arg(long)]
+    token: Option<String>,
 }
 
 fn parse_peer(s: &str) -> Result<(NodeId, String), String> {
@@ -71,9 +80,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let args = Args::parse();
 
+    // Resolve node_id: from --node-id, or extract from token when joining
+    let node_id: NodeId = if let Some(id) = args.node_id {
+        id
+    } else if let Some(token) = &args.token {
+        JoinToken::peek_node_id(token).ok_or("Invalid token format: cannot extract node ID")?
+    } else {
+        return Err("--node-id is required (or use --join with --token)".into());
+    };
+
+    // Default name if not provided
+    let name = args.name.unwrap_or_else(|| format!("node-{}", node_id));
+
     // Validate arguments
-    if !args.dev && !args.bootstrap {
-        warn!("Neither --bootstrap nor --dev specified. Node will wait for cluster membership.");
+    if args.join.is_none() && !args.dev && !args.bootstrap {
+        warn!(
+            "Neither --bootstrap, --dev, nor --join specified. Node will wait for cluster membership."
+        );
     }
 
     // Create data directory
@@ -83,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!(
         "Starting mvirt-cp node {} ({}) - Raft: {}, REST: {}",
-        args.node_id, args.name, args.raft_listen, args.listen
+        node_id, name, args.raft_listen, args.listen
     );
 
     // Build peers map
@@ -91,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Create node configuration
     let config = NodeConfig {
-        id: args.node_id,
+        id: node_id,
         listen_addr: args.raft_listen.clone(),
         peers,
         storage: if args.dev {
@@ -108,9 +131,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut node: RaftNode<Command, Response, CpState> = RaftNode::new(config).await?;
     node.start().await?;
 
-    // Bootstrap or wait
-    if args.bootstrap || args.dev {
+    // Handle cluster membership
+    if let Some(leader_addr) = &args.join {
+        // Join existing cluster
+        let token = args
+            .token
+            .as_ref()
+            .ok_or("--token is required when using --join")?;
+
+        info!("Joining cluster via {}", leader_addr);
+        node.join_cluster(leader_addr, token)
+            .await
+            .map_err(|e| format!("Failed to join cluster: {}", e))?;
+        info!("Successfully joined cluster");
+    } else if args.bootstrap || args.dev {
+        // Bootstrap new cluster
         info!("Bootstrapping new cluster");
+        node.generate_cluster_secret();
         node.initialize_cluster().await?;
     }
 
@@ -129,11 +166,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         create_audit_logger(&args.log_endpoint)
     };
 
+    // Create event channel for state machine events
+    let (event_tx, _) = broadcast::channel::<Event>(256);
+
+    // Wrap RaftNode with RaftStore for DataStore interface
+    let raft_node = Arc::new(RwLock::new(node));
+    let store = Arc::new(RaftStore::new(raft_node.clone(), event_tx, node_id));
+
     // Create REST API state
     let app_state = Arc::new(AppState {
-        node: Arc::new(RwLock::new(node)),
+        store,
         audit,
-        node_id: args.node_id,
+        node_id,
     });
 
     // Create REST router
@@ -159,7 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Shutdown Raft node
     info!("Shutting down Raft node...");
-    let mut node = app_state.node.write().await;
+    let mut node = raft_node.write().await;
     node.shutdown().await?;
 
     info!("Shutdown complete");

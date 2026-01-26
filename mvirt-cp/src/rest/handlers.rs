@@ -4,19 +4,23 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use mraft::{NodeId, RaftNode};
+use mraft::NodeId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use utoipa::ToSchema;
 
 use crate::audit::CpAuditLogger;
-use crate::command::{Command, NetworkData, NicData, Response as CmdResponse};
-use crate::state::CpState;
+use crate::command::{NetworkData, NicData};
+use crate::store::{
+    CreateNetworkRequest as StoreCreateNetworkRequest,
+    CreateNicRequest as StoreCreateNicRequest, DataStore, StoreError,
+    UpdateNetworkRequest as StoreUpdateNetworkRequest,
+    UpdateNicRequest as StoreUpdateNicRequest,
+};
 
 /// Shared application state
 pub struct AppState {
-    pub node: Arc<RwLock<RaftNode<Command, CmdResponse, CpState>>>,
+    pub store: Arc<dyn DataStore>,
     pub audit: Arc<CpAuditLogger>,
     pub node_id: NodeId,
 }
@@ -38,6 +42,33 @@ impl IntoResponse for ApiError {
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
+    }
+}
+
+impl From<StoreError> for ApiError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::NotFound(msg) => ApiError {
+                error: msg,
+                code: 404,
+            },
+            StoreError::Conflict(msg) => ApiError {
+                error: msg,
+                code: 409,
+            },
+            StoreError::NotLeader { .. } => ApiError {
+                error: "Not leader".to_string(),
+                code: 503,
+            },
+            StoreError::Internal(msg) => ApiError {
+                error: msg,
+                code: 500,
+            },
+            StoreError::VersionMismatch { expected, actual } => ApiError {
+                error: format!("Version mismatch: expected {}, got {}", expected, actual),
+                code: 409,
+            },
+        }
     }
 }
 
@@ -98,35 +129,171 @@ pub struct NodeInfo {
 pub async fn get_cluster_info(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ClusterInfo>, ApiError> {
-    let node = state.node.read().await;
-    let metrics = node.metrics();
+    let info = state.store.get_cluster_info().await?;
+    let membership = state.store.get_membership().await?;
 
-    let nodes: Vec<NodeInfo> = metrics
-        .membership_config
-        .membership()
-        .nodes()
-        .map(|(id, n)| {
-            let is_leader = Some(*id) == metrics.current_leader;
-            NodeInfo {
-                id: *id,
-                name: format!("node-{}", id),
-                address: n.addr.clone(),
-                state: if is_leader {
-                    "leader".to_string()
-                } else {
-                    "follower".to_string()
-                },
-                is_leader,
-            }
+    let nodes: Vec<NodeInfo> = membership
+        .nodes
+        .into_iter()
+        .map(|n| NodeInfo {
+            id: n.id,
+            name: format!("node-{}", n.id),
+            address: n.address,
+            state: if Some(n.id) == info.leader_id {
+                "leader".to_string()
+            } else {
+                "follower".to_string()
+            },
+            is_leader: Some(n.id) == info.leader_id,
         })
         .collect();
 
     Ok(Json(ClusterInfo {
-        cluster_id: "mvirt-cluster".to_string(),
-        leader_id: metrics.current_leader,
-        current_term: metrics.current_term,
-        commit_index: metrics.last_applied.map(|l| l.index).unwrap_or(0),
+        cluster_id: info.cluster_id,
+        leader_id: info.leader_id,
+        current_term: info.current_term,
+        commit_index: info.commit_index,
         nodes,
+    }))
+}
+
+// === Cluster Membership Management ===
+
+/// Cluster membership information
+#[derive(Serialize, ToSchema)]
+pub struct ClusterMembership {
+    pub voters: Vec<u64>,
+    pub learners: Vec<u64>,
+    pub nodes: Vec<MembershipNode>,
+}
+
+/// Node in membership
+#[derive(Serialize, ToSchema)]
+pub struct MembershipNode {
+    pub id: u64,
+    pub address: String,
+    pub role: String,
+}
+
+/// Get cluster membership
+#[utoipa::path(
+    get,
+    path = "/api/v1/cluster/membership",
+    responses(
+        (status = 200, description = "Cluster membership", body = ClusterMembership)
+    ),
+    tag = "cluster"
+)]
+pub async fn get_membership(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ClusterMembership>, ApiError> {
+    let membership = state.store.get_membership().await?;
+
+    let nodes: Vec<MembershipNode> = membership
+        .nodes
+        .into_iter()
+        .map(|n| MembershipNode {
+            id: n.id,
+            address: n.address,
+            role: n.role,
+        })
+        .collect();
+
+    Ok(Json(ClusterMembership {
+        voters: membership.voters,
+        learners: membership.learners,
+        nodes,
+    }))
+}
+
+/// Request to create a join token
+#[derive(Deserialize, ToSchema)]
+pub struct CreateJoinTokenRequest {
+    /// Node ID that will use this token
+    pub node_id: u64,
+    /// Token validity in seconds (default: 3600 = 1 hour)
+    pub valid_for_secs: Option<u64>,
+}
+
+/// Join token response
+#[derive(Serialize, ToSchema)]
+pub struct CreateJoinTokenResponse {
+    pub token: String,
+    pub node_id: u64,
+    pub valid_for_secs: u64,
+}
+
+/// Create a join token for a new node
+#[utoipa::path(
+    post,
+    path = "/api/v1/cluster/join-token",
+    request_body = CreateJoinTokenRequest,
+    responses(
+        (status = 200, description = "Join token created", body = CreateJoinTokenResponse),
+        (status = 503, description = "Not the leader or cluster secret not configured", body = ApiError)
+    ),
+    tag = "cluster"
+)]
+pub async fn create_join_token(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateJoinTokenRequest>,
+) -> Result<Json<CreateJoinTokenResponse>, ApiError> {
+    let valid_for = req.valid_for_secs.unwrap_or(3600);
+    let token = state
+        .store
+        .create_join_token(req.node_id, valid_for)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to create join token: {}", e),
+            code: 503,
+        })?;
+
+    Ok(Json(CreateJoinTokenResponse {
+        token,
+        node_id: req.node_id,
+        valid_for_secs: valid_for,
+    }))
+}
+
+/// Request to remove a node from the cluster
+#[derive(Deserialize, ToSchema)]
+#[allow(dead_code)]
+pub struct RemoveNodeRequest {
+    /// Force remove even if it would break quorum (not yet implemented)
+    pub force: Option<bool>,
+}
+
+/// Response for remove node
+#[derive(Serialize, ToSchema)]
+pub struct RemoveNodeResponse {
+    pub removed: bool,
+    pub node_id: u64,
+}
+
+/// Remove a node from the cluster
+#[utoipa::path(
+    delete,
+    path = "/api/v1/cluster/nodes/{id}",
+    params(
+        ("id" = u64, Path, description = "Node ID to remove")
+    ),
+    responses(
+        (status = 200, description = "Node removed", body = RemoveNodeResponse),
+        (status = 404, description = "Node not found", body = ApiError),
+        (status = 503, description = "Not the leader", body = ApiError)
+    ),
+    tag = "cluster"
+)]
+pub async fn remove_node(
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<u64>,
+) -> Result<Json<RemoveNodeResponse>, ApiError> {
+    state.store.remove_node(node_id).await?;
+    state.audit.node_removed(node_id);
+
+    Ok(Json(RemoveNodeResponse {
+        removed: true,
+        node_id,
     }))
 }
 
@@ -224,9 +391,7 @@ pub async fn create_network(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateNetworkRequest>,
 ) -> Result<Json<Network>, ApiError> {
-    let cmd = Command::CreateNetwork {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        id: uuid::Uuid::new_v4().to_string(),
+    let store_req = StoreCreateNetworkRequest {
         name: req.name.clone(),
         ipv4_enabled: req.ipv4_enabled.unwrap_or(true),
         ipv4_subnet: req.ipv4_subnet,
@@ -237,20 +402,9 @@ pub async fn create_network(
         is_public: req.is_public.unwrap_or(false),
     };
 
-    match write_command(&state, cmd).await? {
-        CmdResponse::Network(data) => {
-            state.audit.network_created(&data.id, &data.name);
-            Ok(Json(data.into()))
-        }
-        CmdResponse::Error { code, message } => Err(ApiError {
-            error: message,
-            code,
-        }),
-        _ => Err(ApiError {
-            error: "Unexpected response".to_string(),
-            code: 500,
-        }),
-    }
+    let data = state.store.create_network(store_req).await?;
+    state.audit.network_created(&data.id, &data.name);
+    Ok(Json(data.into()))
 }
 
 /// Get a network by ID or name
@@ -270,13 +424,12 @@ pub async fn get_network(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Network>, ApiError> {
-    let node = state.node.read().await;
-    let cp_state = node.get_state().await;
-
     // Try by ID first, then by name
-    let network = cp_state
+    let network = state
+        .store
         .get_network(&id)
-        .or_else(|| cp_state.get_network_by_name(&id));
+        .await?
+        .or(state.store.get_network_by_name(&id).await?);
 
     match network {
         Some(data) => Ok(Json(data.into())),
@@ -299,9 +452,7 @@ pub async fn get_network(
 pub async fn list_networks(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Network>>, ApiError> {
-    let node = state.node.read().await;
-    let cp_state = node.get_state().await;
-    let networks = cp_state.list_networks();
+    let networks = state.store.list_networks().await?;
     Ok(Json(networks.into_iter().map(|n| n.into()).collect()))
 }
 
@@ -334,27 +485,14 @@ pub async fn update_network(
     Path(id): Path<String>,
     Json(req): Json<UpdateNetworkRequest>,
 ) -> Result<Json<Network>, ApiError> {
-    let cmd = Command::UpdateNetwork {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        id,
+    let store_req = StoreUpdateNetworkRequest {
         dns_servers: req.dns_servers.unwrap_or_default(),
         ntp_servers: req.ntp_servers.unwrap_or_default(),
     };
 
-    match write_command(&state, cmd).await? {
-        CmdResponse::Network(data) => {
-            state.audit.network_updated(&data.id);
-            Ok(Json(data.into()))
-        }
-        CmdResponse::Error { code, message } => Err(ApiError {
-            error: message,
-            code,
-        }),
-        _ => Err(ApiError {
-            error: "Unexpected response".to_string(),
-            code: 500,
-        }),
-    }
+    let data = state.store.update_network(&id, store_req).await?;
+    state.audit.network_updated(&data.id);
+    Ok(Json(data.into()))
 }
 
 /// Query parameters for delete network
@@ -392,36 +530,13 @@ pub async fn delete_network(
     Path(id): Path<String>,
     Query(query): Query<DeleteNetworkQuery>,
 ) -> Result<Json<DeleteNetworkResponse>, ApiError> {
-    let cmd = Command::DeleteNetwork {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        id: id.clone(),
-        force: query.force.unwrap_or(false),
-    };
-
-    match write_command(&state, cmd).await? {
-        CmdResponse::Deleted { .. } => {
-            state.audit.network_deleted(&id);
-            Ok(Json(DeleteNetworkResponse {
-                deleted: true,
-                nics_deleted: 0,
-            }))
-        }
-        CmdResponse::DeletedWithCount { nics_deleted, .. } => {
-            state.audit.network_deleted(&id);
-            Ok(Json(DeleteNetworkResponse {
-                deleted: true,
-                nics_deleted,
-            }))
-        }
-        CmdResponse::Error { code, message } => Err(ApiError {
-            error: message,
-            code,
-        }),
-        _ => Err(ApiError {
-            error: "Unexpected response".to_string(),
-            code: 500,
-        }),
-    }
+    let force = query.force.unwrap_or(false);
+    let result = state.store.delete_network(&id, force).await?;
+    state.audit.network_deleted(&id);
+    Ok(Json(DeleteNetworkResponse {
+        deleted: true,
+        nics_deleted: result.nics_deleted,
+    }))
 }
 
 // === NIC CRUD ===
@@ -516,9 +631,7 @@ pub async fn create_nic(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateNicRequest>,
 ) -> Result<Json<Nic>, ApiError> {
-    let cmd = Command::CreateNic {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        id: uuid::Uuid::new_v4().to_string(),
+    let store_req = StoreCreateNicRequest {
         network_id: req.network_id,
         name: req.name,
         mac_address: req.mac_address,
@@ -528,22 +641,11 @@ pub async fn create_nic(
         routed_ipv6_prefixes: req.routed_ipv6_prefixes.unwrap_or_default(),
     };
 
-    match write_command(&state, cmd).await? {
-        CmdResponse::Nic(data) => {
-            state
-                .audit
-                .nic_created(&data.id, &data.network_id, &data.mac_address);
-            Ok(Json(data.into()))
-        }
-        CmdResponse::Error { code, message } => Err(ApiError {
-            error: message,
-            code,
-        }),
-        _ => Err(ApiError {
-            error: "Unexpected response".to_string(),
-            code: 500,
-        }),
-    }
+    let data = state.store.create_nic(store_req).await?;
+    state
+        .audit
+        .nic_created(&data.id, &data.network_id, &data.mac_address);
+    Ok(Json(data.into()))
 }
 
 /// Get a NIC by ID or name
@@ -563,13 +665,12 @@ pub async fn get_nic(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Nic>, ApiError> {
-    let node = state.node.read().await;
-    let cp_state = node.get_state().await;
-
     // Try by ID first, then by name
-    let nic = cp_state
+    let nic = state
+        .store
         .get_nic(&id)
-        .or_else(|| cp_state.get_nic_by_name(&id));
+        .await?
+        .or(state.store.get_nic_by_name(&id).await?);
 
     match nic {
         Some(data) => Ok(Json(data.into())),
@@ -603,9 +704,7 @@ pub async fn list_nics(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListNicsQuery>,
 ) -> Result<Json<Vec<Nic>>, ApiError> {
-    let node = state.node.read().await;
-    let cp_state = node.get_state().await;
-    let nics = cp_state.list_nics(query.network_id.as_deref());
+    let nics = state.store.list_nics(query.network_id.as_deref()).await?;
     Ok(Json(nics.into_iter().map(|n| n.into()).collect()))
 }
 
@@ -638,27 +737,14 @@ pub async fn update_nic(
     Path(id): Path<String>,
     Json(req): Json<UpdateNicRequest>,
 ) -> Result<Json<Nic>, ApiError> {
-    let cmd = Command::UpdateNic {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        id,
+    let store_req = StoreUpdateNicRequest {
         routed_ipv4_prefixes: req.routed_ipv4_prefixes.unwrap_or_default(),
         routed_ipv6_prefixes: req.routed_ipv6_prefixes.unwrap_or_default(),
     };
 
-    match write_command(&state, cmd).await? {
-        CmdResponse::Nic(data) => {
-            state.audit.nic_updated(&data.id);
-            Ok(Json(data.into()))
-        }
-        CmdResponse::Error { code, message } => Err(ApiError {
-            error: message,
-            code,
-        }),
-        _ => Err(ApiError {
-            error: "Unexpected response".to_string(),
-            code: 500,
-        }),
-    }
+    let data = state.store.update_nic(&id, store_req).await?;
+    state.audit.nic_updated(&data.id);
+    Ok(Json(data.into()))
 }
 
 /// Response for delete NIC
@@ -685,38 +771,7 @@ pub async fn delete_nic(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<DeleteNicResponse>, ApiError> {
-    let cmd = Command::DeleteNic {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        id: id.clone(),
-    };
-
-    match write_command(&state, cmd).await? {
-        CmdResponse::Deleted { .. } => {
-            state.audit.nic_deleted(&id);
-            Ok(Json(DeleteNicResponse { deleted: true }))
-        }
-        CmdResponse::Error { code, message } => Err(ApiError {
-            error: message,
-            code,
-        }),
-        _ => Err(ApiError {
-            error: "Unexpected response".to_string(),
-            code: 500,
-        }),
-    }
-}
-
-// === Helper Functions ===
-
-async fn write_command(state: &AppState, cmd: Command) -> Result<CmdResponse, ApiError> {
-    let node = state.node.read().await;
-
-    // Use write_or_forward to automatically handle leader forwarding
-    match node.write_or_forward(cmd).await {
-        Ok(resp) => Ok(resp),
-        Err(e) => Err(ApiError {
-            error: format!("Raft write error: {}", e),
-            code: 503,
-        }),
-    }
+    state.store.delete_nic(&id).await?;
+    state.audit.nic_deleted(&id);
+    Ok(Json(DeleteNicResponse { deleted: true }))
 }

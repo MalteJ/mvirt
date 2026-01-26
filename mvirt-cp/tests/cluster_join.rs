@@ -7,13 +7,14 @@ mod common;
 
 use mraft::{NodeConfig, RaftNode, StorageBackend};
 use mvirt_cp::rest::{AppState, create_router};
+use mvirt_cp::store::{Event, RaftStore};
 use mvirt_cp::{Command, CpAuditLogger, CpState, Response};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 /// Helper struct for managing multiple test nodes.
 struct TestCluster {
@@ -88,8 +89,11 @@ impl TestCluster {
 
         let node = Arc::new(RwLock::new(node));
 
+        let (event_tx, _) = broadcast::channel::<Event>(256);
+        let store = Arc::new(RaftStore::new(node.clone(), event_tx, node_id));
+
         let app_state = Arc::new(AppState {
-            node: node.clone(),
+            store,
             audit: Arc::new(CpAuditLogger::new_noop()),
             node_id,
         });
@@ -150,8 +154,11 @@ impl TestCluster {
 
         let node = Arc::new(RwLock::new(node));
 
+        let (event_tx, _) = broadcast::channel::<Event>(256);
+        let store = Arc::new(RaftStore::new(node.clone(), event_tx, node_id));
+
         let app_state = Arc::new(AppState {
-            node: node.clone(),
+            store,
             audit: Arc::new(CpAuditLogger::new_noop()),
             node_id,
         });

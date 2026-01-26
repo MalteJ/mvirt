@@ -25,6 +25,9 @@ use super::handlers::{self, AppState};
     paths(
         handlers::get_version,
         handlers::get_cluster_info,
+        handlers::get_membership,
+        handlers::create_join_token,
+        handlers::remove_node,
         handlers::create_network,
         handlers::get_network,
         handlers::list_networks,
@@ -40,6 +43,12 @@ use super::handlers::{self, AppState};
         handlers::VersionInfo,
         handlers::ClusterInfo,
         handlers::NodeInfo,
+        handlers::ClusterMembership,
+        handlers::MembershipNode,
+        handlers::CreateJoinTokenRequest,
+        handlers::CreateJoinTokenResponse,
+        handlers::RemoveNodeRequest,
+        handlers::RemoveNodeResponse,
         handlers::ApiError,
         handlers::CreateNetworkRequest,
         handlers::Network,
@@ -61,6 +70,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/version", get(handlers::get_version))
         // Cluster
         .route("/cluster", get(handlers::get_cluster_info))
+        .route("/cluster/membership", get(handlers::get_membership))
+        .route("/cluster/join-token", post(handlers::create_join_token))
+        .route("/cluster/nodes/{id}", delete(handlers::remove_node))
         // Networks
         .route("/networks", get(handlers::list_networks))
         .route("/networks", post(handlers::create_network))

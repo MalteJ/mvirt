@@ -39,6 +39,10 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 lru = "0.16"
 chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+reqwest = { version = "0.12", features = ["json"] }
+tokio-test = "0.4"
+portpicker = "0.1"

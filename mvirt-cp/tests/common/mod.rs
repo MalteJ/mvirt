@@ -2,13 +2,14 @@
 
 use mraft::{NodeConfig, RaftNode, StorageBackend};
 use mvirt_cp::rest::{AppState, create_router};
+use mvirt_cp::store::{Event, RaftStore};
 use mvirt_cp::{Command, CpAuditLogger, CpState, Response};
 use reqwest::{Client, Response as ReqwestResponse};
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 /// Allocate an available port for testing.
 pub fn allocate_port() -> u16 {
@@ -56,9 +57,15 @@ impl TestServer {
 
         let node = Arc::new(RwLock::new(node));
 
+        // Create event channel for state machine events
+        let (event_tx, _) = broadcast::channel::<Event>(256);
+
+        // Create RaftStore
+        let store = Arc::new(RaftStore::new(node.clone(), event_tx, node_id));
+
         // Create app state with noop audit logger
         let app_state = Arc::new(AppState {
-            node: node.clone(),
+            store,
             audit: Arc::new(CpAuditLogger::new_noop()),
             node_id,
         });
