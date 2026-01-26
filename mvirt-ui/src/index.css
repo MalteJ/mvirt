@@ -206,7 +206,12 @@
 }
 
 .light .hover\:bg-purple\/20:hover {
-  background-color: rgba(37, 99, 235, 0.12);
+  background-color: rgba(37, 99, 235, 0.18);
+}
+
+.light .bg-card\/80 .hover\:bg-secondary:hover,
+.light .bg-card\/80 .hover\:bg-secondary\/50:hover {
+  background-color: rgba(99, 102, 241, 0.12);
 }
 
 .light .hover\:text-purple-light:hover {
@@ -221,36 +226,36 @@
   --tw-gradient-to: #0891b2;
 }
 
-/* Light mode: stat cards with subtle colored tints */
+/* Light mode: stat cards with more saturated colored tints */
 .light .from-purple\/20 {
-  --tw-gradient-from: rgba(37, 99, 235, 0.08);
+  --tw-gradient-from: rgba(37, 99, 235, 0.15);
 }
 .light .from-cyan\/20 {
-  --tw-gradient-from: rgba(6, 182, 212, 0.08);
+  --tw-gradient-from: rgba(6, 182, 212, 0.15);
 }
 .light .from-blue\/20 {
-  --tw-gradient-from: rgba(59, 130, 246, 0.08);
+  --tw-gradient-from: rgba(59, 130, 246, 0.15);
 }
 .light .from-state-running\/20 {
-  --tw-gradient-from: rgba(16, 185, 129, 0.08);
+  --tw-gradient-from: rgba(16, 185, 129, 0.15);
 }
 .light .to-pink\/10,
 .light .to-blue\/10,
 .light .to-purple\/10,
 .light .to-cyan\/10 {
-  --tw-gradient-to: rgba(240, 245, 255, 0.6);
+  --tw-gradient-to: rgba(252, 240, 245, 0.5);
 }
 .light .border-purple\/30 {
-  border-color: rgba(37, 99, 235, 0.25);
+  border-color: rgba(37, 99, 235, 0.35);
 }
 .light .border-cyan\/30 {
-  border-color: rgba(6, 182, 212, 0.25);
+  border-color: rgba(6, 182, 212, 0.35);
 }
 .light .border-blue\/30 {
-  border-color: rgba(59, 130, 246, 0.25);
+  border-color: rgba(59, 130, 246, 0.35);
 }
 .light .border-state-running\/30 {
-  border-color: rgba(16, 185, 129, 0.25);
+  border-color: rgba(16, 185, 129, 0.35);
 }
 
 /* Light mode: saturated icon colors in stat cards */
@@ -263,11 +268,12 @@
 
 /* Light mode: swap frame and content colors */
 .light .bg-card\/80 {
-  background-color: rgba(241, 245, 249, 0.95);
+  background: linear-gradient(135deg, rgba(243, 243, 252, 0.97) 0%, rgba(247, 235, 235, 0.93) 100%);
+  box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.05);
 }
 
 .light .main-content {
-  background-color: #ffffff;
+  background-color: #f8fafc;
   border-radius: 0.5rem 0 0 0;
 }
 
