@@ -14,6 +14,74 @@ pub enum VmState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PodState {
+    Created,
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ContainerState {
+    Creating,
+    Created,
+    Running,
+    Stopped,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Container {
+    pub id: String,
+    pub name: String,
+    pub state: ContainerState,
+    pub image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerSpec {
+    pub name: String,
+    pub image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pod {
+    pub id: String,
+    pub name: String,
+    pub state: PodState,
+    pub network_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vm_id: Option<String>,
+    pub containers: Vec<Container>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskConfig {
     pub path: String,
@@ -142,6 +210,48 @@ pub struct Nic {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DatabaseState {
+    Creating,
+    Running,
+    Stopped,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DatabaseType {
+    Postgresql,
+    Redis,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Database {
+    pub id: String,
+    pub name: String,
+    pub state: DatabaseState,
+    #[serde(rename = "type")]
+    pub db_type: DatabaseType,
+    pub version: String,
+    pub network_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    pub username: String,
+    pub storage_size_gb: u32,
+    pub used_storage_gb: u32,
+    pub connections: u32,
+    pub max_connections: u32,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum LogLevel {
     Debug,
     Info,
@@ -228,6 +338,8 @@ pub struct ClusterInfo {
 
 pub struct AppStateInner {
     pub vms: HashMap<String, Vm>,
+    pub pods: HashMap<String, Pod>,
+    pub databases: HashMap<String, Database>,
     pub volumes: HashMap<String, Volume>,
     pub templates: HashMap<String, Template>,
     pub import_jobs: HashMap<String, ImportJob>,
@@ -252,6 +364,8 @@ impl AppState {
 
         let mut state = AppStateInner {
             vms: HashMap::new(),
+            pods: HashMap::new(),
+            databases: HashMap::new(),
             volumes: HashMap::new(),
             templates: HashMap::new(),
             import_jobs: HashMap::new(),
@@ -513,6 +627,151 @@ impl AppState {
                 state: NicState::Detached,
                 ipv4_address: None,
                 ipv6_address: None,
+            },
+        );
+
+        // Create mock pods
+        // Get first network ID for pods
+        let pod_network_id = state.networks.keys().next().cloned().unwrap_or_default();
+
+        let pod1_id = Uuid::new_v4().to_string();
+        state.pods.insert(
+            pod1_id.clone(),
+            Pod {
+                id: pod1_id.clone(),
+                name: "nginx-frontend".to_string(),
+                state: PodState::Running,
+                network_id: pod_network_id.clone(),
+                vm_id: Some(Uuid::new_v4().to_string()),
+                containers: vec![
+                    Container {
+                        id: Uuid::new_v4().to_string(),
+                        name: "nginx".to_string(),
+                        state: ContainerState::Running,
+                        image: "nginx:1.25".to_string(),
+                        exit_code: None,
+                        error_message: None,
+                    },
+                    Container {
+                        id: Uuid::new_v4().to_string(),
+                        name: "sidecar".to_string(),
+                        state: ContainerState::Running,
+                        image: "busybox:latest".to_string(),
+                        exit_code: None,
+                        error_message: None,
+                    },
+                ],
+                ip_address: Some("10.0.1.10".to_string()),
+                created_at: "2024-01-15T11:00:00Z".to_string(),
+                started_at: Some("2024-01-15T11:00:05Z".to_string()),
+                error_message: None,
+            },
+        );
+
+        let pod2_id = Uuid::new_v4().to_string();
+        state.pods.insert(
+            pod2_id.clone(),
+            Pod {
+                id: pod2_id.clone(),
+                name: "redis-cache".to_string(),
+                state: PodState::Running,
+                network_id: pod_network_id.clone(),
+                vm_id: Some(Uuid::new_v4().to_string()),
+                containers: vec![Container {
+                    id: Uuid::new_v4().to_string(),
+                    name: "redis".to_string(),
+                    state: ContainerState::Running,
+                    image: "redis:7-alpine".to_string(),
+                    exit_code: None,
+                    error_message: None,
+                }],
+                ip_address: Some("10.0.1.20".to_string()),
+                created_at: "2024-01-14T09:30:00Z".to_string(),
+                started_at: Some("2024-01-14T09:30:03Z".to_string()),
+                error_message: None,
+            },
+        );
+
+        let pod3_id = Uuid::new_v4().to_string();
+        state.pods.insert(
+            pod3_id.clone(),
+            Pod {
+                id: pod3_id.clone(),
+                name: "api-service".to_string(),
+                state: PodState::Stopped,
+                network_id: pod_network_id,
+                vm_id: None,
+                containers: vec![
+                    Container {
+                        id: Uuid::new_v4().to_string(),
+                        name: "api".to_string(),
+                        state: ContainerState::Stopped,
+                        image: "myapp/api:v2.1.0".to_string(),
+                        exit_code: Some(0),
+                        error_message: None,
+                    },
+                    Container {
+                        id: Uuid::new_v4().to_string(),
+                        name: "envoy".to_string(),
+                        state: ContainerState::Stopped,
+                        image: "envoyproxy/envoy:v1.28".to_string(),
+                        exit_code: Some(0),
+                        error_message: None,
+                    },
+                ],
+                ip_address: None,
+                created_at: "2024-01-12T16:00:00Z".to_string(),
+                started_at: None,
+                error_message: None,
+            },
+        );
+
+        // Create mock databases
+        let db_network_id = state.networks.keys().next().cloned().unwrap_or_default();
+
+        let db1_id = Uuid::new_v4().to_string();
+        state.databases.insert(
+            db1_id.clone(),
+            Database {
+                id: db1_id.clone(),
+                name: "main-postgres".to_string(),
+                state: DatabaseState::Running,
+                db_type: DatabaseType::Postgresql,
+                version: "16.1".to_string(),
+                network_id: db_network_id.clone(),
+                host: Some("10.0.2.10".to_string()),
+                port: Some(5432),
+                username: "admin".to_string(),
+                storage_size_gb: 100,
+                used_storage_gb: 23,
+                connections: 12,
+                max_connections: 100,
+                created_at: "2024-01-10T08:00:00Z".to_string(),
+                started_at: Some("2024-01-10T08:00:15Z".to_string()),
+                error_message: None,
+            },
+        );
+
+        let db2_id = Uuid::new_v4().to_string();
+        state.databases.insert(
+            db2_id.clone(),
+            Database {
+                id: db2_id.clone(),
+                name: "cache-redis".to_string(),
+                state: DatabaseState::Running,
+                db_type: DatabaseType::Redis,
+                version: "7.2".to_string(),
+                network_id: db_network_id,
+                host: Some("10.0.2.20".to_string()),
+                port: Some(6379),
+                username: "default".to_string(),
+                storage_size_gb: 16,
+                used_storage_gb: 4,
+                connections: 48,
+                max_connections: 1000,
+                created_at: "2024-01-11T10:30:00Z".to_string(),
+                started_at: Some("2024-01-11T10:30:05Z".to_string()),
+                error_message: None,
             },
         );
 

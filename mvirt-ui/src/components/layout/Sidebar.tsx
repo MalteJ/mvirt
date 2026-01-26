@@ -1,6 +1,8 @@
 import { NavLink, Link } from 'react-router-dom'
 import {
   Server,
+  Container,
+  Database,
   HardDrive,
   Network,
   ScrollText,
@@ -10,6 +12,8 @@ import { cn } from '@/lib/utils'
 
 const navigation = [
   { name: 'Virtual Machines', href: '/vms', icon: Server },
+  { name: 'Containers', href: '/containers', icon: Container },
+  { name: 'Databases', href: '/databases', icon: Database },
   { name: 'Storage', href: '/storage', icon: HardDrive },
   { name: 'Network', href: '/network', icon: Network },
   { name: 'Logs', href: '/logs', icon: ScrollText },

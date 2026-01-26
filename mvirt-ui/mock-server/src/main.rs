@@ -34,6 +34,34 @@ async fn main() {
         .route("/api/v1/vms/:id/kill", post(routes::vm::kill_vm))
         .route("/api/v1/vms/:id/console", get(routes::vm::console_ws))
         .route("/api/v1/events/vms", get(routes::vm::vm_events))
+        // Pod routes
+        .route(
+            "/api/v1/pods",
+            get(routes::pod::list_pods).post(routes::pod::create_pod),
+        )
+        .route(
+            "/api/v1/pods/:id",
+            get(routes::pod::get_pod).delete(routes::pod::delete_pod),
+        )
+        .route("/api/v1/pods/:id/start", post(routes::pod::start_pod))
+        .route("/api/v1/pods/:id/stop", post(routes::pod::stop_pod))
+        // Database routes
+        .route(
+            "/api/v1/databases",
+            get(routes::database::list_databases).post(routes::database::create_database),
+        )
+        .route(
+            "/api/v1/databases/:id",
+            get(routes::database::get_database).delete(routes::database::delete_database),
+        )
+        .route(
+            "/api/v1/databases/:id/start",
+            post(routes::database::start_database),
+        )
+        .route(
+            "/api/v1/databases/:id/stop",
+            post(routes::database::stop_database),
+        )
         // Storage routes
         .route(
             "/api/v1/storage/volumes",
@@ -92,9 +120,18 @@ async fn main() {
         .route("/api/v1/cluster", get(routes::cluster::get_cluster_info))
         .route("/api/v1/cluster/nodes", get(routes::cluster::get_nodes))
         // Notification routes
-        .route("/api/v1/notifications", get(routes::notification::get_notifications))
-        .route("/api/v1/notifications/:id/read", post(routes::notification::mark_notification_read))
-        .route("/api/v1/notifications/read-all", post(routes::notification::mark_all_read))
+        .route(
+            "/api/v1/notifications",
+            get(routes::notification::get_notifications),
+        )
+        .route(
+            "/api/v1/notifications/:id/read",
+            post(routes::notification::mark_notification_read),
+        )
+        .route(
+            "/api/v1/notifications/read-all",
+            post(routes::notification::mark_all_read),
+        )
         .layer(cors)
         .with_state(state);
 

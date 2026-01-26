@@ -1,22 +1,63 @@
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
-import { VmState } from '@/types'
+import { VmState, PodState, ContainerState, DatabaseState } from '@/types'
+
+type State = VmState | PodState | ContainerState | DatabaseState
 
 interface StateIndicatorProps {
-  state: VmState
+  state: State
   showLabel?: boolean
   className?: string
 }
 
-const stateConfig: Record<VmState, { variant: 'running' | 'starting' | 'stopped' | 'error'; label: string; pulse: boolean }> = {
-  [VmState.RUNNING]: { variant: 'running', label: 'Running', pulse: false },
-  [VmState.STARTING]: { variant: 'starting', label: 'Starting', pulse: true },
-  [VmState.STOPPING]: { variant: 'starting', label: 'Stopping', pulse: true },
-  [VmState.STOPPED]: { variant: 'stopped', label: 'Stopped', pulse: false },
+interface StateConfig {
+  variant: 'running' | 'starting' | 'stopped' | 'error'
+  label: string
+  pulse: boolean
+}
+
+function getStateConfig(state: State): StateConfig {
+  switch (state) {
+    // Running states
+    case VmState.RUNNING:
+    case PodState.RUNNING:
+    case ContainerState.RUNNING:
+      return { variant: 'running', label: 'Running', pulse: false }
+
+    // Starting/transitioning states
+    case VmState.STARTING:
+    case PodState.STARTING:
+      return { variant: 'starting', label: 'Starting', pulse: true }
+
+    case VmState.STOPPING:
+    case PodState.STOPPING:
+      return { variant: 'starting', label: 'Stopping', pulse: true }
+
+    case ContainerState.CREATING:
+      return { variant: 'starting', label: 'Creating', pulse: true }
+
+    // Stopped/created states
+    case VmState.STOPPED:
+    case PodState.STOPPED:
+    case ContainerState.STOPPED:
+      return { variant: 'stopped', label: 'Stopped', pulse: false }
+
+    case PodState.CREATED:
+    case ContainerState.CREATED:
+      return { variant: 'stopped', label: 'Created', pulse: false }
+
+    // Error states
+    case PodState.FAILED:
+    case ContainerState.FAILED:
+      return { variant: 'error', label: 'Failed', pulse: false }
+
+    default:
+      return { variant: 'stopped', label: String(state), pulse: false }
+  }
 }
 
 export function StateIndicator({ state, showLabel = true, className }: StateIndicatorProps) {
-  const config = stateConfig[state]
+  const config = getStateConfig(state)
 
   return (
     <Badge

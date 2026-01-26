@@ -6,6 +6,8 @@ import { DashboardPage } from './features/dashboard/DashboardPage'
 import { ClusterPage } from './features/cluster/ClusterPage'
 import { VmsPage } from './features/vms/VmsPage'
 import { VmDetailPage } from './features/vms/VmDetailPage'
+import { ContainersPage, CreatePodPage, PodDetailPage } from './features/containers'
+import { DatabasesPage, CreateDatabasePage, DatabaseDetailPage } from './features/databases'
 import { StoragePage } from './features/storage/StoragePage'
 import { NetworkPage } from './features/network/NetworkPage'
 import { LogsPage } from './features/logs/LogsPage'
@@ -42,6 +44,12 @@ function App() {
                 <Route path="/cluster" element={<ClusterPage />} />
                 <Route path="/vms" element={<VmsPage />} />
                 <Route path="/vms/:id" element={<VmDetailPage />} />
+                <Route path="/containers" element={<ContainersPage />} />
+                <Route path="/containers/new" element={<CreatePodPage />} />
+                <Route path="/containers/:id" element={<PodDetailPage />} />
+                <Route path="/databases" element={<DatabasesPage />} />
+                <Route path="/databases/new" element={<CreateDatabasePage />} />
+                <Route path="/databases/:id" element={<DatabaseDetailPage />} />
                 <Route path="/storage" element={<StoragePage />} />
                 <Route path="/network" element={<NetworkPage />} />
                 <Route path="/logs" element={<LogsPage />} />

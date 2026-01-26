@@ -54,7 +54,9 @@ pub async fn get_notifications() -> Json<Vec<Notification>> {
             id: "notif-004".to_string(),
             notification_type: NotificationType::Error,
             title: "Import Failed".to_string(),
-            message: "Template import from https://example.com/image.qcow2 failed: connection timeout".to_string(),
+            message:
+                "Template import from https://example.com/image.qcow2 failed: connection timeout"
+                    .to_string(),
             read: true,
             created_at: (now - chrono::Duration::hours(5)).to_rfc3339(),
         },
