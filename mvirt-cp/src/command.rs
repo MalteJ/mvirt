@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Commands that can be replicated through Raft
+///
+/// IMPORTANT: All timestamps must be set BEFORE the command is submitted to Raft.
+/// Using `Utc::now()` inside the state machine's `apply()` breaks Raft's determinism
+/// guarantee - different nodes would compute different timestamps, causing state divergence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     // Network operations
@@ -8,6 +12,8 @@ pub enum Command {
         request_id: String,
         /// Pre-generated ID for the network (deterministic across nodes)
         id: String,
+        /// Timestamp when command was created (set before Raft replication)
+        timestamp: String,
         name: String,
         ipv4_enabled: bool,
         ipv4_subnet: Option<String>,
@@ -20,6 +26,8 @@ pub enum Command {
     UpdateNetwork {
         request_id: String,
         id: String,
+        /// Timestamp when command was created (set before Raft replication)
+        timestamp: String,
         dns_servers: Vec<String>,
         ntp_servers: Vec<String>,
     },
@@ -34,6 +42,8 @@ pub enum Command {
         request_id: String,
         /// Pre-generated ID for the NIC (deterministic across nodes)
         id: String,
+        /// Timestamp when command was created (set before Raft replication)
+        timestamp: String,
         network_id: String,
         name: Option<String>,
         mac_address: Option<String>,
@@ -45,6 +55,8 @@ pub enum Command {
     UpdateNic {
         request_id: String,
         id: String,
+        /// Timestamp when command was created (set before Raft replication)
+        timestamp: String,
         routed_ipv4_prefixes: Vec<String>,
         routed_ipv6_prefixes: Vec<String>,
     },

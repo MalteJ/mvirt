@@ -3,6 +3,7 @@
 //! These tests verify that the Raft consensus works correctly with mvirt-cp's
 //! Command/Response types and CpState state machine.
 
+use chrono::Utc;
 use mraft::{NodeConfig, RaftNode, StorageBackend};
 use mvirt_cp::{Command, CpState, Response};
 use std::collections::BTreeMap;
@@ -263,6 +264,7 @@ async fn test_log_replication() {
         .write(Command::CreateNetwork {
             request_id: "req-1".to_string(),
             id: network_id.clone(),
+            timestamp: Utc::now().to_rfc3339(),
             name: "test-network".to_string(),
             ipv4_enabled: true,
             ipv4_subnet: Some("10.0.0.0/24".to_string()),
@@ -356,6 +358,7 @@ async fn test_read_from_follower() {
         .write(Command::CreateNetwork {
             request_id: "req-follower-read".to_string(),
             id: network_id.clone(),
+            timestamp: Utc::now().to_rfc3339(),
             name: "follower-read-test".to_string(),
             ipv4_enabled: true,
             ipv4_subnet: Some("10.1.0.0/24".to_string()),
@@ -424,6 +427,7 @@ async fn test_majority_write_during_minority_failure() {
         .write(Command::CreateNetwork {
             request_id: "req-before-failure".to_string(),
             id: before_id.clone(),
+            timestamp: Utc::now().to_rfc3339(),
             name: "before-failure".to_string(),
             ipv4_enabled: true,
             ipv4_subnet: None,
@@ -512,6 +516,7 @@ async fn test_majority_write_during_minority_failure() {
         .write(Command::CreateNetwork {
             request_id: "req-during-failure".to_string(),
             id: during_id.clone(),
+            timestamp: Utc::now().to_rfc3339(),
             name: "during-failure".to_string(),
             ipv4_enabled: true,
             ipv4_subnet: Some("192.168.0.0/24".to_string()),
@@ -589,6 +594,7 @@ async fn test_write_or_forward() {
         .write_or_forward(Command::CreateNetwork {
             request_id: "req-forwarded".to_string(),
             id: network_id.clone(),
+            timestamp: Utc::now().to_rfc3339(),
             name: "forwarded-write".to_string(),
             ipv4_enabled: true,
             ipv4_subnet: Some("172.16.0.0/16".to_string()),

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use mraft::RaftNode;
 use tokio::sync::{RwLock, broadcast};
 
@@ -75,6 +76,7 @@ impl NetworkStore for RaftStore {
         let cmd = Command::CreateNetwork {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
             name: req.name,
             ipv4_enabled: req.ipv4_enabled,
             ipv4_subnet: req.ipv4_subnet,
@@ -97,6 +99,7 @@ impl NetworkStore for RaftStore {
         let cmd = Command::UpdateNetwork {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
             dns_servers: req.dns_servers,
             ntp_servers: req.ntp_servers,
         };
@@ -153,6 +156,7 @@ impl NicStore for RaftStore {
         let cmd = Command::CreateNic {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
             network_id: req.network_id,
             name: req.name,
             mac_address: req.mac_address,
@@ -175,6 +179,7 @@ impl NicStore for RaftStore {
         let cmd = Command::UpdateNic {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
             routed_ipv4_prefixes: req.routed_ipv4_prefixes,
             routed_ipv6_prefixes: req.routed_ipv6_prefixes,
         };

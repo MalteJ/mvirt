@@ -91,6 +91,7 @@ impl StateMachine<Command, Response> for CpState {
         let (response, events) = match cmd.clone() {
             Command::CreateNetwork {
                 id,
+                timestamp,
                 name,
                 ipv4_enabled,
                 ipv4_subnet,
@@ -120,8 +121,7 @@ impl StateMachine<Command, Response> for CpState {
                     );
                 }
 
-                let now = chrono::Utc::now().to_rfc3339();
-
+                // Use timestamp from command (set before Raft replication for determinism)
                 let network = NetworkData {
                     id: id.clone(),
                     name,
@@ -133,8 +133,8 @@ impl StateMachine<Command, Response> for CpState {
                     ntp_servers,
                     is_public,
                     nic_count: 0,
-                    created_at: now.clone(),
-                    updated_at: now,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
                 };
 
                 self.networks.insert(id, network.clone());
@@ -146,6 +146,7 @@ impl StateMachine<Command, Response> for CpState {
 
             Command::UpdateNetwork {
                 id,
+                timestamp,
                 dns_servers,
                 ntp_servers,
                 ..
@@ -154,7 +155,7 @@ impl StateMachine<Command, Response> for CpState {
                     let network = self.networks.get_mut(&id).unwrap();
                     network.dns_servers = dns_servers;
                     network.ntp_servers = ntp_servers;
-                    network.updated_at = chrono::Utc::now().to_rfc3339();
+                    network.updated_at = timestamp; // Use timestamp from command for determinism
                     let new_network = network.clone();
                     (
                         Response::Network(new_network.clone()),
@@ -225,6 +226,7 @@ impl StateMachine<Command, Response> for CpState {
 
             Command::CreateNic {
                 id,
+                timestamp,
                 network_id,
                 name,
                 mac_address,
@@ -250,11 +252,10 @@ impl StateMachine<Command, Response> for CpState {
                     return (Response::Nic(self.nics.get(&id).unwrap().clone()), vec![]);
                 }
 
-                let now = chrono::Utc::now().to_rfc3339();
-
                 // Generate MAC if not provided - use id as seed for determinism
                 let mac = mac_address.unwrap_or_else(|| generate_mac_from_id(&id));
 
+                // Use timestamp from command for determinism
                 let nic = NicData {
                     id: id.clone(),
                     name,
@@ -266,8 +267,8 @@ impl StateMachine<Command, Response> for CpState {
                     routed_ipv6_prefixes,
                     socket_path: format!("/run/mvirt-net/nic-{}.sock", id),
                     state: NicStateData::Created,
-                    created_at: now.clone(),
-                    updated_at: now,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
                 };
 
                 self.nics.insert(id, nic.clone());
@@ -282,6 +283,7 @@ impl StateMachine<Command, Response> for CpState {
 
             Command::UpdateNic {
                 id,
+                timestamp,
                 routed_ipv4_prefixes,
                 routed_ipv6_prefixes,
                 ..
@@ -290,7 +292,7 @@ impl StateMachine<Command, Response> for CpState {
                     let nic = self.nics.get_mut(&id).unwrap();
                     nic.routed_ipv4_prefixes = routed_ipv4_prefixes;
                     nic.routed_ipv6_prefixes = routed_ipv6_prefixes;
-                    nic.updated_at = chrono::Utc::now().to_rfc3339();
+                    nic.updated_at = timestamp; // Use timestamp from command for determinism
                     let new_nic = nic.clone();
                     (
                         Response::Nic(new_nic.clone()),
@@ -374,6 +376,7 @@ mod tests {
         Command::CreateNetwork {
             request_id: request_id.to_string(),
             id: id.to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(), // Fixed timestamp for deterministic tests
             name: name.to_string(),
             ipv4_enabled: true,
             ipv4_subnet: Some("10.0.0.0/24".to_string()),
@@ -389,6 +392,7 @@ mod tests {
         Command::CreateNic {
             request_id: request_id.to_string(),
             id: id.to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(), // Fixed timestamp for deterministic tests
             network_id: network_id.to_string(),
             name: name.map(|s| s.to_string()),
             mac_address: None,
@@ -695,6 +699,7 @@ mod tests {
         let update_cmd = Command::UpdateNetwork {
             request_id: "req-2".to_string(),
             id: "net-1".to_string(),
+            timestamp: "2024-01-01T00:00:01Z".to_string(),
             dns_servers: vec!["1.1.1.1".to_string(), "8.8.4.4".to_string()],
             ntp_servers: vec!["pool.ntp.org".to_string()],
         };
@@ -716,6 +721,7 @@ mod tests {
         let update_cmd = Command::UpdateNetwork {
             request_id: "req-1".to_string(),
             id: "non-existent".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
             dns_servers: vec![],
             ntp_servers: vec![],
         };
@@ -734,6 +740,7 @@ mod tests {
         let update_cmd = Command::UpdateNic {
             request_id: "req-3".to_string(),
             id: "nic-1".to_string(),
+            timestamp: "2024-01-01T00:00:01Z".to_string(),
             routed_ipv4_prefixes: vec!["192.168.1.0/24".to_string()],
             routed_ipv6_prefixes: vec!["fd00::/64".to_string()],
         };

@@ -167,7 +167,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     // Create event channel for state machine events
+    // IMPORTANT: Create before wrapping node so we can wire up the event sink
     let (event_tx, _) = broadcast::channel::<Event>(256);
+
+    // Wire up event sink to mraft's Store (events emitted during apply())
+    node.set_event_sink(event_tx.clone());
 
     // Wrap RaftNode with RaftStore for DataStore interface
     let raft_node = Arc::new(RwLock::new(node));
