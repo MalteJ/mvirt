@@ -1,8 +1,8 @@
-# uos (microOS) - Design Document
+# mvirt-one - Design Document
 
 ## Overview
 
-uos is the init system for mvirt microVMs that run isolated pods (container groups sharing namespaces). It replaces the existing pideisn implementation.
+mvirt-one is the init system for mvirt microVMs that run isolated pods (container groups sharing namespaces).
 
 ## Architecture
 
