@@ -21,6 +21,7 @@ mod tui;
 
 use mvirt_log::LogServiceClient;
 use net_proto::net_service_client::NetServiceClient;
+use proto::pod_service_client::PodServiceClient;
 use proto::vm_service_client::VmServiceClient;
 use proto::*;
 use zfs_proto::zfs_service_client::ZfsServiceClient;
@@ -168,6 +169,10 @@ enum Commands {
     /// NIC operations
     #[command(subcommand)]
     Nic(NicCommands),
+
+    /// Pod operations (container pods in MicroVMs)
+    #[command(subcommand)]
+    Pod(PodCommands),
 }
 
 #[derive(Subcommand)]
@@ -363,6 +368,76 @@ enum NicCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum PodCommands {
+    /// Run a new pod (default: detached)
+    Run {
+        /// Attach to console (interactive mode)
+        #[arg(short, long)]
+        interactive: bool,
+
+        /// Pod name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Number of vCPUs
+        #[arg(long, default_value = "1")]
+        cpus: u32,
+
+        /// Memory size (e.g., 256M, 1G)
+        #[arg(long, default_value = "256M")]
+        memory: String,
+
+        /// Root disk size (e.g., 4G, 10G)
+        #[arg(long, default_value = "4G")]
+        disk: String,
+
+        /// Environment variables
+        #[arg(short, long, value_name = "KEY=VAL")]
+        env: Vec<String>,
+
+        /// Network name
+        #[arg(long)]
+        net: Option<String>,
+
+        /// Container image
+        image: String,
+
+        /// Command and arguments
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+
+    /// List pods
+    Ps,
+
+    /// Stop a pod
+    Stop {
+        /// Pod name or ID
+        name_or_id: String,
+
+        /// Timeout in seconds
+        #[arg(short, long, default_value = "10")]
+        timeout: u32,
+    },
+
+    /// Remove a pod (and its volume/nic)
+    Rm {
+        /// Pod name or ID
+        name_or_id: String,
+
+        /// Force remove running pod
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Attach to pod console
+    Attach {
+        /// Pod name or ID
+        name_or_id: String,
+    },
+}
+
 #[derive(Tabled)]
 struct VmRow {
     #[tabled(rename = "ID")]
@@ -418,6 +493,70 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+fn format_pod_state(state: PodState) -> String {
+    match state {
+        PodState::Unspecified => "unknown".to_string(),
+        PodState::Created => "created".to_string(),
+        PodState::Starting => "starting".to_string(),
+        PodState::Running => "running".to_string(),
+        PodState::Stopping => "stopping".to_string(),
+        PodState::Stopped => "stopped".to_string(),
+        PodState::Failed => "failed".to_string(),
+    }
+}
+
+/// Parse size string like "4G", "256M", "1024K" to bytes
+fn parse_size(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let s = s.trim().to_uppercase();
+    let (num_str, multiplier) = if s.ends_with('G') {
+        (&s[..s.len() - 1], 1024 * 1024 * 1024)
+    } else if s.ends_with('M') {
+        (&s[..s.len() - 1], 1024 * 1024)
+    } else if s.ends_with('K') {
+        (&s[..s.len() - 1], 1024)
+    } else {
+        (s.as_str(), 1)
+    };
+    let num: u64 = num_str.parse()?;
+    Ok(num * multiplier)
+}
+
+/// Parse memory string like "256M", "1G" to megabytes
+fn parse_memory_mb(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let bytes = parse_size(s)?;
+    Ok(bytes / (1024 * 1024))
+}
+
+/// Resolve pod name or ID to pod ID
+async fn resolve_pod_id(
+    client: &mut PodServiceClient<Channel>,
+    name_or_id: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    // First try to get by ID
+    if let Ok(response) = client
+        .get_pod(GetPodRequest {
+            id: name_or_id.to_string(),
+        })
+        .await
+    {
+        return Ok(response.into_inner().id);
+    }
+
+    // Otherwise search by name
+    let pods = client
+        .list_pods(ListPodsRequest {})
+        .await?
+        .into_inner()
+        .pods;
+    for pod in pods {
+        if pod.name == name_or_id {
+            return Ok(pod.id);
+        }
+    }
+
+    Err(format!("Pod '{}' not found", name_or_id).into())
 }
 
 async fn run_console(
@@ -538,7 +677,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_client = LogServiceClient::connect(cli.log_server.clone()).await.ok();
 
     // Try to connect to mvirt-net (optional - doesn't fail if unavailable)
-    let net_client = NetServiceClient::connect(cli.net_server.clone()).await.ok();
+    let mut net_client = NetServiceClient::connect(cli.net_server.clone()).await.ok();
 
     let Some(command) = cli.command else {
         // No subcommand: start TUI (works even without connections)
@@ -776,6 +915,269 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
 
             _ => unreachable!(),
+        }
+
+        return Ok(());
+    }
+
+    // Handle pod commands (require zfs, net, and pod clients)
+    if let Commands::Pod(ref pod_cmd) = command {
+        let Some(mut zfs_client) = zfs_client else {
+            eprintln!("Error: Cannot connect to mvirt-zfs at {}", cli.zfs_server);
+            std::process::exit(1);
+        };
+
+        let mut pod_client = PodServiceClient::connect(cli.server.clone())
+            .await
+            .map_err(|e| format!("Cannot connect to mvirt-vmm: {}", e))?;
+
+        match pod_cmd {
+            PodCommands::Run {
+                interactive,
+                name,
+                cpus,
+                memory,
+                disk,
+                env,
+                net,
+                image,
+                command: cmd_args,
+            } => {
+                let pod_name = name
+                    .clone()
+                    .unwrap_or_else(|| format!("pod-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+
+                // 1. Parse sizes
+                let disk_bytes = parse_size(disk)?;
+                let memory_mb = parse_memory_mb(memory)?;
+
+                // 2. Create ZFS volume
+                let volume_name = format!("{}-root", pod_name);
+                let volume = zfs_client
+                    .create_volume(zfs_proto::CreateVolumeRequest {
+                        name: volume_name.clone(),
+                        size_bytes: disk_bytes,
+                        volblocksize: None,
+                    })
+                    .await?;
+                let volume_path = volume.into_inner().path;
+
+                // 3. Write rootfs template to volume
+                let rootfs_template = "/usr/share/mvirt/one/rootfs.raw";
+                let dd_status = std::process::Command::new("dd")
+                    .args([
+                        &format!("if={}", rootfs_template),
+                        &format!("of={}", volume_path),
+                        "bs=4M",
+                        "conv=fsync",
+                    ])
+                    .status()?;
+                if !dd_status.success() {
+                    eprintln!("Error: Failed to write rootfs to volume");
+                    // Cleanup: delete volume
+                    let _ = zfs_client
+                        .delete_volume(zfs_proto::DeleteVolumeRequest { name: volume_name })
+                        .await;
+                    std::process::exit(1);
+                }
+
+                // 4. Resize filesystem to fill volume
+                let resize_status = std::process::Command::new("resize2fs")
+                    .arg(&volume_path)
+                    .status()?;
+                if !resize_status.success() {
+                    eprintln!("Warning: Failed to resize filesystem");
+                }
+
+                // 5. Create NIC if network specified
+                let nic_socket_path = if let Some(net_name) = net {
+                    let Some(ref mut net_client) = net_client else {
+                        eprintln!("Error: Cannot connect to mvirt-net at {}", cli.net_server);
+                        std::process::exit(1);
+                    };
+
+                    // Lookup network by name
+                    let networks = net_client
+                        .list_networks(net_proto::ListNetworksRequest {})
+                        .await?
+                        .into_inner()
+                        .networks;
+                    let network = networks
+                        .iter()
+                        .find(|n| n.name == *net_name || n.id == *net_name)
+                        .ok_or_else(|| format!("Network '{}' not found", net_name))?;
+
+                    // Create NIC
+                    let nic = net_client
+                        .create_nic(net_proto::CreateNicRequest {
+                            network_id: network.id.clone(),
+                            name: format!("{}-nic", pod_name),
+                            mac_address: String::new(),
+                            ipv4_address: String::new(),
+                            ipv6_address: String::new(),
+                            routed_ipv4_prefixes: vec![],
+                            routed_ipv6_prefixes: vec![],
+                        })
+                        .await?
+                        .into_inner();
+
+                    Some(nic.socket_path)
+                } else {
+                    None
+                };
+
+                // 6. Build container spec
+                let container_spec = ContainerSpec {
+                    id: String::new(),
+                    name: String::new(),
+                    image: image.clone(),
+                    command: if cmd_args.is_empty() {
+                        vec![]
+                    } else {
+                        vec![cmd_args[0].clone()]
+                    },
+                    args: cmd_args.iter().skip(1).cloned().collect(),
+                    env: env.clone(),
+                    working_dir: String::new(),
+                };
+
+                // 7. Create pod
+                let pod = pod_client
+                    .create_pod(CreatePodRequest {
+                        name: Some(pod_name.clone()),
+                        containers: vec![container_spec],
+                        resources: Some(PodResources {
+                            vcpus: *cpus,
+                            memory_mb: memory_mb as u64,
+                            disk_size_gb: disk_bytes / (1024 * 1024 * 1024),
+                        }),
+                        root_disk_path: Some(volume_path),
+                        nic_socket_path,
+                    })
+                    .await?
+                    .into_inner();
+
+                // 8. Start pod
+                let pod = pod_client
+                    .start_pod(StartPodRequest { id: pod.id.clone() })
+                    .await?
+                    .into_inner();
+
+                // 9. Output or attach
+                if *interactive {
+                    // Connect to VM console
+                    let mut vm_client = VmServiceClient::connect(cli.server.clone()).await?;
+                    let vm_id = format!("pod-{}", pod.id);
+                    run_console(&mut vm_client, vm_id).await?;
+                } else {
+                    println!("{}", pod.id);
+                }
+            }
+
+            PodCommands::Ps => {
+                let response = pod_client.list_pods(ListPodsRequest {}).await?;
+                let pods = response.into_inner().pods;
+
+                if pods.is_empty() {
+                    println!("No pods found");
+                } else {
+                    println!(
+                        "{:<36} {:<15} {:<10} {:<15} {:<20}",
+                        "ID", "NAME", "STATE", "IP", "IMAGE"
+                    );
+                    for pod in pods {
+                        let state = format_pod_state(
+                            PodState::try_from(pod.state).unwrap_or(PodState::Unspecified),
+                        );
+                        let image = pod
+                            .containers
+                            .first()
+                            .map(|c| c.image.as_str())
+                            .unwrap_or("-");
+                        println!(
+                            "{:<36} {:<15} {:<10} {:<15} {:<20}",
+                            pod.id,
+                            pod.name,
+                            state,
+                            if pod.ip_address.is_empty() {
+                                "-"
+                            } else {
+                                &pod.ip_address
+                            },
+                            image
+                        );
+                    }
+                }
+            }
+
+            PodCommands::Stop {
+                name_or_id,
+                timeout,
+            } => {
+                // Find pod by name or ID
+                let pod_id = resolve_pod_id(&mut pod_client, name_or_id).await?;
+                pod_client
+                    .stop_pod(StopPodRequest {
+                        id: pod_id.clone(),
+                        timeout_seconds: *timeout,
+                    })
+                    .await?;
+                println!("Stopped pod: {}", pod_id);
+            }
+
+            PodCommands::Rm { name_or_id, force } => {
+                // Find pod by name or ID
+                let pod_id = resolve_pod_id(&mut pod_client, name_or_id).await?;
+
+                // Get pod info to find volume name
+                let pod = pod_client
+                    .get_pod(GetPodRequest { id: pod_id.clone() })
+                    .await?
+                    .into_inner();
+
+                // Delete pod from VMM
+                pod_client
+                    .delete_pod(DeletePodRequest {
+                        id: pod_id.clone(),
+                        force: *force,
+                    })
+                    .await?;
+
+                // Delete ZFS volume (volume name is pod-name-root)
+                let volume_name = format!("{}-root", pod.name);
+                if let Err(e) = zfs_client
+                    .delete_volume(zfs_proto::DeleteVolumeRequest {
+                        name: volume_name.clone(),
+                    })
+                    .await
+                {
+                    eprintln!("Warning: Failed to delete volume {}: {}", volume_name, e);
+                }
+
+                // TODO: Delete NIC if exists (need to track NIC ID in pod)
+
+                println!("Removed pod: {}", pod_id);
+            }
+
+            PodCommands::Attach { name_or_id } => {
+                // Find pod by name or ID
+                let pod_id = resolve_pod_id(&mut pod_client, name_or_id).await?;
+
+                // Get pod to find VM ID
+                let pod = pod_client
+                    .get_pod(GetPodRequest { id: pod_id.clone() })
+                    .await?
+                    .into_inner();
+
+                if pod.vm_id.is_empty() {
+                    eprintln!("Error: Pod is not running");
+                    std::process::exit(1);
+                }
+
+                // Connect to VM console
+                let mut vm_client = VmServiceClient::connect(cli.server.clone()).await?;
+                run_console(&mut vm_client, pod.vm_id).await?;
+            }
         }
 
         return Ok(());
@@ -1225,7 +1627,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Commands::Snapshot(_)
         | Commands::Template(_)
         | Commands::Network(_)
-        | Commands::Nic(_) => {
+        | Commands::Nic(_)
+        | Commands::Pod(_) => {
             // Handled above
             unreachable!()
         }

@@ -357,6 +357,7 @@ message ContainerSpec {
 message PodResources {
   uint32 vcpus = 1;                  // vCPUs for the MicroVM
   uint64 memory_mb = 2;              // Memory for the MicroVM
+  uint64 disk_size_gb = 3;           // Root disk size in GB (default: 4GB)
 }
 
 // ============================================
@@ -367,6 +368,8 @@ message CreatePodRequest {
   optional string name = 1;
   repeated ContainerSpec containers = 2;
   optional PodResources resources = 3;  // Defaults: 1 vCPU, 256MB
+  optional string root_disk_path = 4;   // Path to root disk (created by CLI via mvirt-zfs)
+  optional string nic_socket_path = 5;  // vhost-user socket path (from mvirt-net)
 }
 
 message GetPodRequest {

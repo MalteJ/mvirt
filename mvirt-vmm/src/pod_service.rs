@@ -3,9 +3,9 @@
 use crate::hypervisor::Hypervisor;
 use crate::proto::{
     BootMode, Container, ContainerSpec, ContainerState, CreatePodRequest, DeletePodRequest,
-    DeletePodResponse, GetPodRequest, ListPodsRequest, ListPodsResponse, LogChunk, Pod,
-    PodExecInput, PodExecOutput, PodLogsRequest, PodState, StartPodRequest, StopPodRequest,
-    VmConfig, pod_service_server::PodService,
+    DeletePodResponse, DiskConfig, GetPodRequest, ListPodsRequest, ListPodsResponse, LogChunk,
+    NicConfig, Pod, PodExecInput, PodExecOutput, PodLogsRequest, PodResources, PodState,
+    StartPodRequest, StopPodRequest, VmConfig, pod_service_server::PodService,
 };
 use crate::store::VmStore;
 use crate::vsock_client::{UosClient, pid_to_cid, wait_for_uos};
@@ -24,12 +24,12 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-/// Default kernel path for MicroVM boot.
-const UOS_KERNEL_PATH: &str = "/var/lib/mvirt/one/vmlinux";
-/// Default initramfs path for MicroVM boot.
-const UOS_INITRAMFS_PATH: &str = "/var/lib/mvirt/one/initramfs.cpio.gz";
-/// Default kernel command line for MicroVM.
-const UOS_CMDLINE: &str = "console=ttyS0 quiet";
+/// Kernel path for MicroVM boot.
+const UOS_KERNEL_PATH: &str = "/usr/share/mvirt/one/bzImage";
+/// Cmdline file path.
+const UOS_CMDLINE_PATH: &str = "/usr/share/mvirt/one/cmdline";
+/// Default kernel command line for MicroVM (disk boot).
+const UOS_DISK_CMDLINE: &str = "console=ttyS0 quiet root=/dev/vda rw init=/init";
 /// Timeout for waiting for uos to become ready.
 const UOS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default memory for pod MicroVMs (MB).
@@ -45,10 +45,22 @@ struct PodData {
     state: PodState,
     vm_id: Option<String>,
     containers: Vec<ContainerSpec>,
+    resources: Option<PodResources>,
+    /// Path to root disk (created by CLI via mvirt-zfs).
+    root_disk_path: Option<String>,
+    /// vhost-user socket path for NIC (from mvirt-net).
+    nic_socket_path: Option<String>,
     ip_address: String,
     created_at: i64,
     started_at: Option<i64>,
     error_message: Option<String>,
+}
+
+/// Read kernel cmdline from file, falling back to default.
+fn read_uos_cmdline() -> String {
+    std::fs::read_to_string(UOS_CMDLINE_PATH)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| UOS_DISK_CMDLINE.to_string())
 }
 
 impl From<PodData> for Pod {
@@ -144,6 +156,9 @@ impl PodService for PodServiceImpl {
             state: PodState::Created,
             vm_id: None,
             containers,
+            resources: req.resources,
+            root_disk_path: req.root_disk_path,
+            nic_socket_path: req.nic_socket_path,
             ip_address: String::new(),
             created_at: now,
             started_at: None,
@@ -207,7 +222,7 @@ impl PodService for PodServiceImpl {
             ));
         }
 
-        // TODO: Stop the MicroVM if running
+        // Stop the MicroVM if running
         if let Some(vm_id) = &pod.vm_id {
             // Remove uos client
             let mut clients = self.uos_clients.write().await;
@@ -218,6 +233,8 @@ impl PodService for PodServiceImpl {
                 warn!(vm_id = %vm_id, error = %e, "Failed to kill VM for pod");
             }
         }
+
+        // Note: ZFS volume cleanup is the CLI's responsibility
 
         let pod_name = pod.name.clone();
         pods.remove(&req.id);
@@ -238,7 +255,7 @@ impl PodService for PodServiceImpl {
         info!(pod_id = %req.id, "Starting pod");
 
         // Get pod data (we need to clone to avoid holding the lock)
-        let (pod_id, pod_name, containers) = {
+        let (pod_id, pod_name, containers, resources, root_disk_path, nic_socket_path) = {
             let mut pods = self.pods.write().await;
             let pod = pods
                 .get_mut(&req.id)
@@ -250,22 +267,85 @@ impl PodService for PodServiceImpl {
             }
 
             pod.state = PodState::Starting;
-            (pod.id.clone(), pod.name.clone(), pod.containers.clone())
+            (
+                pod.id.clone(),
+                pod.name.clone(),
+                pod.containers.clone(),
+                pod.resources,
+                pod.root_disk_path.clone(),
+                pod.nic_socket_path.clone(),
+            )
+        };
+
+        // Root disk is required (created by CLI via mvirt-zfs)
+        let root_disk_path = match root_disk_path {
+            Some(path) => path,
+            None => {
+                error!(pod_id = %pod_id, "No root disk path provided");
+                let mut pods = self.pods.write().await;
+                if let Some(pod) = pods.get_mut(&pod_id) {
+                    pod.state = PodState::Failed;
+                    pod.error_message =
+                        Some("No root disk path provided. Create volume first.".to_string());
+                }
+                return Err(Status::failed_precondition(
+                    "No root disk path provided. Create volume with CLI first.",
+                ));
+            }
         };
 
         // Create VM ID based on pod ID
         let vm_id = format!("pod-{}", pod_id);
 
-        // Create VM config for kernel boot with uos
+        // Determine resource values
+        let vcpus = resources
+            .as_ref()
+            .map(|r| {
+                if r.vcpus > 0 {
+                    r.vcpus
+                } else {
+                    POD_DEFAULT_VCPUS
+                }
+            })
+            .unwrap_or(POD_DEFAULT_VCPUS);
+        let memory_mb = resources
+            .as_ref()
+            .map(|r| {
+                if r.memory_mb > 0 {
+                    r.memory_mb
+                } else {
+                    POD_DEFAULT_MEMORY_MB
+                }
+            })
+            .unwrap_or(POD_DEFAULT_MEMORY_MB);
+
+        // Read kernel cmdline
+        let cmdline = read_uos_cmdline();
+
+        // Build NIC config if socket path provided
+        let nics = if let Some(socket_path) = nic_socket_path {
+            vec![NicConfig {
+                tap: None,
+                mac: None, // auto-generated
+                vhost_socket: Some(socket_path),
+            }]
+        } else {
+            vec![]
+        };
+
+        // Create VM config for kernel boot with disk
         let vm_config = VmConfig {
-            vcpus: POD_DEFAULT_VCPUS,
-            memory_mb: POD_DEFAULT_MEMORY_MB,
+            vcpus,
+            memory_mb,
             boot_mode: BootMode::Kernel.into(),
             kernel: Some(UOS_KERNEL_PATH.to_string()),
-            initramfs: Some(UOS_INITRAMFS_PATH.to_string()),
-            cmdline: Some(UOS_CMDLINE.to_string()),
-            disks: vec![],
-            nics: vec![],
+            initramfs: None, // No initramfs - boot from disk
+            cmdline: Some(cmdline),
+            disks: vec![DiskConfig {
+                path: root_disk_path.clone(),
+                readonly: false,
+            }],
+            nics,
             user_data: None,
             nested_virt: false,
         };
@@ -305,7 +385,7 @@ impl PodService for PodServiceImpl {
             Ok(client) => client,
             Err(e) => {
                 error!(cid = cid, error = %e, "Failed to connect to uos");
-                // Kill the VM since we can't communicate with it
+                // Kill the VM
                 let _ = self.hypervisor.kill(&vm_id).await;
                 let mut pods = self.pods.write().await;
                 if let Some(pod) = pods.get_mut(&pod_id) {
