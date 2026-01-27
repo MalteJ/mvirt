@@ -1,0 +1,33 @@
+[package]
+name = "mvirt-ebpf-programs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+network-types = "0.0.8"
+
+[[bin]]
+name = "tc-egress"
+path = "src/tc_egress.rs"
+
+[[bin]]
+name = "tc-ingress"
+path = "src/tc_ingress.rs"
+
+[profile.dev]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+incremental = false
+codegen-units = 1
+rpath = false
+
+[profile.release]
+lto = true
+panic = "abort"
+codegen-units = 1

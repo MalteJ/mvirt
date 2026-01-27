@@ -22,6 +22,29 @@ build:
 release:
 	cargo build --release --target $(MUSL_TARGET)
 
+# ============ TESTS ============
+
+.PHONY: test test-unit test-integration test-all
+
+# Run unit tests (no sudo required) - excludes integration_test
+test-unit:
+	cargo test --package mvirt-ebpf --features test-util --lib
+	cargo test --package mvirt-ebpf --features test-util --test arp_test
+	cargo test --package mvirt-ebpf --features test-util --test dhcp_test
+	cargo test --package mvirt-ebpf --features test-util --test ping_test
+	cargo test --package mvirt-ebpf --features test-util --test routing_test
+	cargo test --package mvirt-ebpf --features test-util --test service_test
+
+# Run integration tests (requires sudo for TAP devices)
+test-integration:
+	sudo -E cargo test --package mvirt-ebpf --test integration_test --features test-util
+
+# Run all tests
+test-all: test-unit test-integration
+
+# Alias
+test: test-unit
+
 # Rust binary targets (for dependency tracking)
 $(RUST_TARGET_DIR)/mvirt-one $(RUST_TARGET_DIR)/mvirt $(RUST_TARGET_DIR)/mvirt-vmm:
 	cargo build --release --target $(MUSL_TARGET)

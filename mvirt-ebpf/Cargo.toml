@@ -1,0 +1,98 @@
+[package]
+name = "mvirt-ebpf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# eBPF userspace
+aya = "0.12"
+aya-log = "0.2"
+
+# Networking
+nix = { version = "0.29", features = ["ioctl", "net", "socket", "poll", "fs"] }
+rtnetlink = "0.14"
+netlink-packet-route = "0.19"
+socket2 = { version = "0.5", features = ["all"] }
+libc = "0.2"
+
+# Protocol parsing
+smoltcp = { version = "0.11", default-features = false, features = [
+    "proto-ipv4", "proto-ipv6", "medium-ethernet", "socket-raw"
+] }
+dhcproto = "0.12"
+
+# IP/Network types
+ipnet = "2.9"
+
+# Async runtime
+tokio = { version = "1", features = ["rt", "macros", "signal", "time", "sync", "net", "io-util"] }
+futures = "0.3"
+
+# gRPC
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+
+# Audit logging
+mvirt-log = { path = "../mvirt-log" }
+
+# Database + Migrations
+rusqlite = { version = "0.32", features = ["bundled"] }
+refinery = { version = "0.8", features = ["rusqlite"] }
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1.0", features = ["v4"] }
+
+# JSON serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Random (MAC generation)
+rand = "0.8"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tempfile = "3"
+
+# Enable test-util for integration tests
+[package.metadata.cargo-all-features]
+skip_optional_dependencies = true
+
+[features]
+default = []
+test-util = []
+
+# Enable test-util feature for tests
+[[test]]
+name = "dhcp_test"
+required-features = ["test-util"]
+
+[[test]]
+name = "arp_test"
+required-features = ["test-util"]
+
+[[test]]
+name = "ping_test"
+required-features = ["test-util"]
+
+[[test]]
+name = "routing_test"
+required-features = ["test-util"]
+
+[[test]]
+name = "service_test"
+required-features = ["test-util"]

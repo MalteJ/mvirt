@@ -9,6 +9,8 @@ members = [
     "mvirt-log",
     "mvirt-api",
     "mvirt-node",
+    "mvirt-ebpf",
+    "mvirt-ebpf-programs",
 ]
 
 # Size optimization for init process (MicroVM init)

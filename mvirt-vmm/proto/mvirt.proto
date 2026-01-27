@@ -52,9 +52,10 @@ message DiskConfig {
 }
 
 message NicConfig {
-  optional string tap = 1;           // TAP device name (legacy, auto-created if empty)
+  optional string tap = 1;           // TAP device name (for mvirt-ebpf or manual TAP)
   optional string mac = 2;           // MAC address
-  optional string vhost_socket = 3;  // vhost-user socket path (from mvirt-net)
+  optional string vhost_socket = 3;  // vhost-user socket path (for mvirt-net)
+  // Note: Use either tap (for mvirt-ebpf) or vhost_socket (for mvirt-net), not both
 }
 
 // ============================================
