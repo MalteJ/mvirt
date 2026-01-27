@@ -10,8 +10,8 @@
 //!   sudo -E cargo test --package mvirt-ebpf --test integration_test --features test-util
 
 use mvirt_ebpf::test_util::{
-    create_arp_request, create_dhcp_discover, create_icmp_echo_request, test_network_config,
-    test_nic_config, TapTestDevice,
+    TapTestDevice, create_arp_request, create_dhcp_discover, create_icmp_echo_request,
+    test_network_config, test_nic_config,
 };
 use mvirt_ebpf::{ProtocolHandler, Storage};
 use std::net::{IpAddr, Ipv4Addr};

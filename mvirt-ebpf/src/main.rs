@@ -2,7 +2,7 @@
 
 use mvirt_ebpf::audit::create_audit_logger;
 use mvirt_ebpf::ebpf_loader::EbpfManager;
-use mvirt_ebpf::grpc::proto::ebpf_net_service_server::EbpfNetServiceServer;
+use mvirt_ebpf::grpc::proto::net_service_server::NetServiceServer;
 use mvirt_ebpf::grpc::{EbpfNetServiceImpl, Storage};
 use mvirt_ebpf::nat;
 use mvirt_ebpf::proto_handler::ProtocolHandler;
@@ -13,7 +13,7 @@ use tonic::transport::Server;
 use tracing::{error, info};
 
 /// gRPC server address.
-const GRPC_ADDR: &str = "[::1]:50055";
+const GRPC_ADDR: &str = "[::1]:50054";
 
 /// Database path.
 const DB_PATH: &str = "/var/lib/mvirt/ebpf/networks.db";
@@ -93,7 +93,7 @@ async fn main() {
 
     // Start server with graceful shutdown
     let server = Server::builder()
-        .add_service(EbpfNetServiceServer::new(service))
+        .add_service(NetServiceServer::new(service))
         .serve_with_shutdown(addr, async {
             tokio::select! {
                 _ = sigint.recv() => { info!("Received SIGINT"); }

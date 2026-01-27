@@ -6,7 +6,7 @@ pub mod validation;
 
 /// Generated proto types.
 pub mod proto {
-    tonic::include_proto!("mvirt.ebpf");
+    tonic::include_proto!("mvirt.net");
 }
 
 pub use service::EbpfNetServiceImpl;

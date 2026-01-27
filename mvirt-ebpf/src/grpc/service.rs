@@ -1,6 +1,6 @@
 //! gRPC EbpfNetService implementation.
 
-use super::proto::ebpf_net_service_server::EbpfNetService;
+use super::proto::net_service_server::NetService;
 use super::proto::*;
 use super::storage::{NetworkData, NicData, NicState, Storage, generate_mac_address};
 use super::validation::{
@@ -84,7 +84,7 @@ fn nic_data_to_proto(data: &NicData) -> Nic {
             .iter()
             .map(|p| p.to_string())
             .collect(),
-        tap_name: data.tap_name.clone(),
+        socket_path: format!("tap:{}", data.tap_name),
         state: data.state as i32,
         created_at: data.created_at.to_rfc3339(),
         updated_at: data.updated_at.to_rfc3339(),
@@ -279,7 +279,7 @@ impl EbpfNetServiceImpl {
 }
 
 #[tonic::async_trait]
-impl EbpfNetService for EbpfNetServiceImpl {
+impl NetService for EbpfNetServiceImpl {
     // ========== System ==========
 
     async fn get_version(

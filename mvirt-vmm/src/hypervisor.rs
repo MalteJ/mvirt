@@ -246,15 +246,35 @@ ethernets:
             }
         }
 
-        // Add network interfaces (vhost-user via mvirt-net)
+        // Add network interfaces
         for nic in &config.nics {
-            if let Some(ref socket) = nic.vhost_socket {
-                let mut net_arg = format!("vhost_user=true,socket={},num_queues=2", socket);
-                if let Some(ref mac) = nic.mac {
-                    net_arg.push_str(&format!(",mac={}", mac));
+            if let Some(ref nic_spec) = nic.vhost_socket {
+                if let Some(socket_path) = nic_spec.strip_prefix("vhost-user:") {
+                    // vhost-user (mvirt-net)
+                    let mut net_arg =
+                        format!("vhost_user=true,socket={},num_queues=2", socket_path);
+                    if let Some(ref mac) = nic.mac {
+                        net_arg.push_str(&format!(",mac={}", mac));
+                    }
+                    cmd.arg("--net").arg(net_arg);
+                    info!(vm_id = %vm_id, socket = %socket_path, "Using vhost-user network");
+                } else if let Some(tap_name) = nic_spec.strip_prefix("tap:") {
+                    // TAP device (mvirt-ebpf)
+                    let mut net_arg = format!("tap={}", tap_name);
+                    if let Some(ref mac) = nic.mac {
+                        net_arg.push_str(&format!(",mac={}", mac));
+                    }
+                    cmd.arg("--net").arg(net_arg);
+                    info!(vm_id = %vm_id, tap = %tap_name, "Using TAP network");
+                } else {
+                    // Fallback: assume vhost-user without prefix (backwards compatibility)
+                    let mut net_arg = format!("vhost_user=true,socket={},num_queues=2", nic_spec);
+                    if let Some(ref mac) = nic.mac {
+                        net_arg.push_str(&format!(",mac={}", mac));
+                    }
+                    cmd.arg("--net").arg(net_arg);
+                    warn!(vm_id = %vm_id, socket = %nic_spec, "Using vhost-user (no prefix)");
                 }
-                cmd.arg("--net").arg(net_arg);
-                info!(vm_id = %vm_id, socket = %socket, "Using vhost-user network");
             }
         }
 

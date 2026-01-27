@@ -93,7 +93,7 @@ fn nic_data_to_proto(data: &NicData) -> Nic {
             .iter()
             .map(|p| p.to_string())
             .collect(),
-        socket_path: data.socket_path.clone(),
+        socket_path: format!("vhost-user:{}", data.socket_path),
         state: data.state as i32,
         created_at: data.created_at.to_rfc3339(),
         updated_at: data.updated_at.to_rfc3339(),
