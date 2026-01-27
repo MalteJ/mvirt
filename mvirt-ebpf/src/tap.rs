@@ -28,6 +28,12 @@ pub enum TapError {
 
     #[error("Failed to delete interface '{0}': {1}")]
     DeleteInterface(String, io::Error),
+
+    #[error("Failed to add route for {0}: {1}")]
+    AddRoute(String, io::Error),
+
+    #[error("Failed to remove route for {0}: {1}")]
+    RemoveRoute(String, io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, TapError>;
@@ -295,6 +301,130 @@ impl Drop for TapDevice {
         // and no other process has it open.
         // The OwnedFd will close the fd automatically.
     }
+}
+
+/// Add a host route for a VM's IP address through the TAP device.
+///
+/// This adds a /32 route for IPv4 (or /128 for IPv6) so the kernel knows
+/// how to route return traffic back to the VM.
+pub async fn add_host_route_v4(addr: std::net::Ipv4Addr, if_index: u32) -> Result<()> {
+    // Get interface name from index
+    let if_name =
+        if_name_from_index(if_index).map_err(|e| TapError::AddRoute(addr.to_string(), e))?;
+
+    let output = std::process::Command::new("ip")
+        .args(["route", "add", &format!("{}/32", addr), "dev", &if_name])
+        .output()
+        .map_err(|e| TapError::AddRoute(addr.to_string(), e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Ignore "File exists" error (route already present)
+        if !stderr.contains("File exists") {
+            return Err(TapError::AddRoute(
+                addr.to_string(),
+                io::Error::other(stderr.to_string()),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove a host route for a VM's IP address.
+pub async fn remove_host_route_v4(addr: std::net::Ipv4Addr, if_index: u32) -> Result<()> {
+    let if_name =
+        if_name_from_index(if_index).map_err(|e| TapError::RemoveRoute(addr.to_string(), e))?;
+
+    let output = std::process::Command::new("ip")
+        .args(["route", "del", &format!("{}/32", addr), "dev", &if_name])
+        .output()
+        .map_err(|e| TapError::RemoveRoute(addr.to_string(), e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Ignore "No such process" error (route doesn't exist)
+        if !stderr.contains("No such process") && !stderr.contains("Cannot find device") {
+            return Err(TapError::RemoveRoute(
+                addr.to_string(),
+                io::Error::other(stderr.to_string()),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Add a host route for a VM's IPv6 address through the TAP device.
+pub async fn add_host_route_v6(addr: std::net::Ipv6Addr, if_index: u32) -> Result<()> {
+    let if_name =
+        if_name_from_index(if_index).map_err(|e| TapError::AddRoute(addr.to_string(), e))?;
+
+    let output = std::process::Command::new("ip")
+        .args([
+            "-6",
+            "route",
+            "add",
+            &format!("{}/128", addr),
+            "dev",
+            &if_name,
+        ])
+        .output()
+        .map_err(|e| TapError::AddRoute(addr.to_string(), e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("File exists") {
+            return Err(TapError::AddRoute(
+                addr.to_string(),
+                io::Error::other(stderr.to_string()),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove a host route for a VM's IPv6 address.
+pub async fn remove_host_route_v6(addr: std::net::Ipv6Addr, if_index: u32) -> Result<()> {
+    let if_name =
+        if_name_from_index(if_index).map_err(|e| TapError::RemoveRoute(addr.to_string(), e))?;
+
+    let output = std::process::Command::new("ip")
+        .args([
+            "-6",
+            "route",
+            "del",
+            &format!("{}/128", addr),
+            "dev",
+            &if_name,
+        ])
+        .output()
+        .map_err(|e| TapError::RemoveRoute(addr.to_string(), e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("No such process") && !stderr.contains("Cannot find device") {
+            return Err(TapError::RemoveRoute(
+                addr.to_string(),
+                io::Error::other(stderr.to_string()),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Get interface name from index.
+fn if_name_from_index(if_index: u32) -> io::Result<String> {
+    let mut name = [0u8; 16];
+    let ptr = name.as_mut_ptr() as *mut libc::c_char;
+    let result = unsafe { libc::if_indextoname(if_index, ptr) };
+    if result.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    Ok(String::from_utf8_lossy(&name[..len]).to_string())
 }
 
 /// Delete a TAP interface by name using netlink.

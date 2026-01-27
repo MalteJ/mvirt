@@ -160,9 +160,11 @@ async fn test_e2e_nginx() {
         .into_inner();
     let nic_id = nic.id.clone();
     let nic_socket = nic.socket_path.clone();
+    let nic_mac = nic.mac_address.clone();
     let nic_ip = nic.ipv4_address.clone();
     println!("  NIC created: {} ({})", nic.name, nic.id);
     println!("  Socket: {}", nic_socket);
+    println!("  MAC: {}", nic_mac);
     println!("  IP: {}\n", nic_ip);
 
     // 3. Create pod with nginx container
@@ -186,6 +188,7 @@ async fn test_e2e_nginx() {
             }),
             root_disk_path: Some(test_rootfs.to_string_lossy().into()),
             nic_socket_path: Some(nic_socket),
+            nic_mac_address: Some(nic_mac),
         })
         .await
         .expect("Failed to create pod")
@@ -338,9 +341,11 @@ async fn test_dhcp_network_info() {
         .into_inner();
     let nic_id = nic.id.clone();
     let nic_socket = nic.socket_path.clone();
+    let nic_mac = nic.mac_address.clone();
     let expected_ip = nic.ipv4_address.clone();
     println!("  NIC created: {} ({})", nic.name, nic.id);
     println!("  Socket: {}", nic_socket);
+    println!("  MAC: {}", nic_mac);
     println!("  Expected IP (from mvirt-net): {}\n", expected_ip);
 
     // 3. Create pod with simple sleep container (no image pull needed if cached)
@@ -364,6 +369,7 @@ async fn test_dhcp_network_info() {
             }),
             root_disk_path: Some(test_rootfs.to_string_lossy().into()),
             nic_socket_path: Some(nic_socket),
+            nic_mac_address: Some(nic_mac),
         })
         .await
         .expect("Failed to create pod")

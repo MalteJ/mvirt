@@ -9,9 +9,11 @@ use super::validation::{
 };
 use crate::audit::EbpfAuditLogger;
 use crate::ebpf_loader::{ACTION_REDIRECT, EbpfManager, RouteEntry};
+use crate::nat;
 use crate::proto_handler::{GATEWAY_MAC, ProtocolHandler};
 use crate::tap::{
-    create_persistent_tap, delete_tap_interface, set_interface_mac, set_interface_up,
+    add_host_route_v4, add_host_route_v6, create_persistent_tap, delete_tap_interface,
+    remove_host_route_v4, remove_host_route_v6, set_interface_mac, set_interface_up,
     tap_name_from_nic_id,
 };
 use chrono::Utc;
@@ -194,6 +196,11 @@ impl EbpfNetServiceImpl {
                 .add_egress_route_v4(ipv4, 32, route)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to add route: {}", e)))?;
+
+            // Add kernel route for return traffic (NAT)
+            add_host_route_v4(ipv4, if_index)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to add kernel route: {}", e)))?;
         }
 
         if let Some(ipv6) = nic.ipv6_address {
@@ -202,6 +209,11 @@ impl EbpfNetServiceImpl {
                 .add_egress_route_v6(ipv6, 128, route)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to add route: {}", e)))?;
+
+            // Add kernel route for return traffic (NAT)
+            add_host_route_v6(ipv6, if_index)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to add kernel route: {}", e)))?;
         }
 
         // Store managed NIC
@@ -225,22 +237,33 @@ impl EbpfNetServiceImpl {
 
     /// Teardown a NIC: remove routes, stop handler, delete TAP.
     async fn teardown_nic(&self, nic: &NicData) -> Result<(), Status> {
-        // Remove routes
-        if let Some(ipv4) = nic.ipv4_address {
-            let _ = self.ebpf.remove_egress_route_v4(ipv4, 32).await;
-        }
-        if let Some(ipv6) = nic.ipv6_address {
-            let _ = self.ebpf.remove_egress_route_v6(ipv6, 128).await;
-        }
-
-        // Get and remove managed NIC
+        // Get and remove managed NIC first to get if_index
         let mut nics = self.nics.write().await;
-        if let Some(managed) = nics.remove(&nic.id) {
+        let if_index = if let Some(managed) = nics.remove(&nic.id) {
             // Unregister from protocol handler
             self.proto_handler.unregister_nic(managed.if_index).await;
 
             // Abort handler task
             managed.handler_task.abort();
+
+            Some(managed.if_index)
+        } else {
+            None
+        };
+        drop(nics);
+
+        // Remove eBPF and kernel routes
+        if let Some(ipv4) = nic.ipv4_address {
+            let _ = self.ebpf.remove_egress_route_v4(ipv4, 32).await;
+            if let Some(if_idx) = if_index {
+                let _ = remove_host_route_v4(ipv4, if_idx).await;
+            }
+        }
+        if let Some(ipv6) = nic.ipv6_address {
+            let _ = self.ebpf.remove_egress_route_v6(ipv6, 128).await;
+            if let Some(if_idx) = if_index {
+                let _ = remove_host_route_v6(ipv6, if_idx).await;
+            }
         }
 
         // Delete the persistent TAP interface
@@ -350,6 +373,34 @@ impl NetService for EbpfNetServiceImpl {
         self.storage
             .create_network(&network)
             .map_err(storage_err_to_status)?;
+
+        // Add masquerade rule for public networks
+        if network.is_public {
+            if let Some(subnet) = network.ipv4_subnet {
+                match nat::get_default_interface() {
+                    Ok(out_iface) => {
+                        if let Err(e) = nat::add_masquerade_v4(subnet, &out_iface) {
+                            warn!(subnet = %subnet, error = %e, "Failed to add masquerade rule");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to get default interface for masquerade");
+                    }
+                }
+            }
+            if let Some(prefix) = network.ipv6_prefix {
+                match nat::get_default_interface() {
+                    Ok(out_iface) => {
+                        if let Err(e) = nat::add_masquerade_v6(prefix, &out_iface) {
+                            warn!(prefix = %prefix, error = %e, "Failed to add IPv6 masquerade rule");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to get default interface for IPv6 masquerade");
+                    }
+                }
+            }
+        }
 
         info!(id = %network.id, name = %network.name, "Network created");
         self.audit
@@ -488,7 +539,20 @@ impl NetService for EbpfNetServiceImpl {
             .delete_network(&uuid)
             .map_err(storage_err_to_status)?;
 
-        if let Some(n) = network {
+        if let Some(ref n) = network {
+            // Remove masquerade rules for public networks
+            if n.is_public {
+                if let Some(subnet) = n.ipv4_subnet
+                    && let Ok(out_iface) = nat::get_default_interface()
+                {
+                    let _ = nat::remove_masquerade_v4(subnet, &out_iface);
+                }
+                if let Some(prefix) = n.ipv6_prefix
+                    && let Ok(out_iface) = nat::get_default_interface()
+                {
+                    let _ = nat::remove_masquerade_v6(prefix, &out_iface);
+                }
+            }
             self.audit.network_deleted(&n.id.to_string(), &n.name);
         }
 

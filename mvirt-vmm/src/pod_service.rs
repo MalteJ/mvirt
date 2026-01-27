@@ -52,8 +52,10 @@ struct PodData {
     resources: Option<PodResources>,
     /// Path to root disk volume (ZFS volume created by CLI, rootfs written by VMM).
     root_disk_path: Option<String>,
-    /// vhost-user socket path for NIC (from mvirt-net).
+    /// vhost-user socket path for NIC (from mvirt-net/mvirt-ebpf).
     nic_socket_path: Option<String>,
+    /// MAC address for the NIC (required for DHCP to work).
+    nic_mac_address: Option<String>,
     ip_address: String,
     created_at: i64,
     started_at: Option<i64>,
@@ -163,6 +165,7 @@ impl PodService for PodServiceImpl {
             resources: req.resources,
             root_disk_path: req.root_disk_path,
             nic_socket_path: req.nic_socket_path,
+            nic_mac_address: req.nic_mac_address,
             ip_address: String::new(),
             created_at: now,
             started_at: None,
@@ -264,7 +267,15 @@ impl PodService for PodServiceImpl {
         info!(pod_id = %req.id, "Starting pod");
 
         // Get pod data (we need to clone to avoid holding the lock)
-        let (pod_id, pod_name, _containers, resources, root_disk_path, nic_socket_path) = {
+        let (
+            pod_id,
+            pod_name,
+            _containers,
+            resources,
+            root_disk_path,
+            nic_socket_path,
+            nic_mac_address,
+        ) = {
             let mut pods = self.pods.write().await;
             let pod = pods
                 .get_mut(&req.id)
@@ -283,6 +294,7 @@ impl PodService for PodServiceImpl {
                 pod.resources,
                 pod.root_disk_path.clone(),
                 pod.nic_socket_path.clone(),
+                pod.nic_mac_address.clone(),
             )
         };
 
@@ -304,13 +316,14 @@ impl PodService for PodServiceImpl {
         };
 
         // Write rootfs template to volume
+        // Use conv=notrunc to preserve the volume size (important for raw files in /tmp for tests)
         info!(pod_id = %pod_id, volume = %root_disk_path, "Writing rootfs template to volume");
         let dd_status = std::process::Command::new("dd")
             .args([
                 &format!("if={}", UOS_ROOTFS_TEMPLATE),
                 &format!("of={}", root_disk_path),
                 "bs=4M",
-                "conv=fsync",
+                "conv=fsync,notrunc",
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -397,7 +410,7 @@ impl PodService for PodServiceImpl {
         let nics = if let Some(socket_path) = nic_socket_path {
             vec![NicConfig {
                 tap: None,
-                mac: None, // auto-generated
+                mac: nic_mac_address, // Must match what mvirt-ebpf expects for DHCP
                 vhost_socket: Some(socket_path),
             }]
         } else {

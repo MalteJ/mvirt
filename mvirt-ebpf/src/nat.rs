@@ -21,6 +21,33 @@ pub type Result<T> = std::result::Result<T, NatError>;
 const TABLE_NAME: &str = "mvirt_ebpf";
 const NAT_CHAIN: &str = "postrouting";
 
+/// Get the default outbound interface (the one with the default route).
+pub fn get_default_interface() -> Result<String> {
+    let output = Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .map_err(NatError::Command)?;
+
+    if !output.status.success() {
+        return Err(NatError::NftFailed(
+            "Failed to get default route".to_string(),
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Parse: "default via 192.168.1.1 dev eth0 proto kernel onlink"
+    let parts: Vec<_> = stdout.split_whitespace().collect();
+    if let Some(pos) = parts.iter().position(|&p| p == "dev")
+        && pos + 1 < parts.len()
+    {
+        return Ok(parts[pos + 1].to_string());
+    }
+
+    Err(NatError::NftFailed(
+        "No default interface found".to_string(),
+    ))
+}
+
 /// Initialize the nftables table and chains.
 pub fn init_nftables() -> Result<()> {
     // Create table if not exists

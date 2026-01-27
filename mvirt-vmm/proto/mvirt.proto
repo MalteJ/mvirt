@@ -373,7 +373,8 @@ message CreatePodRequest {
   repeated ContainerSpec containers = 2;
   optional PodResources resources = 3;  // Defaults: 1 vCPU, 256MB
   optional string root_disk_path = 4;   // Path to ZFS volume (VMM writes rootfs template)
-  optional string nic_socket_path = 5;  // vhost-user socket path (from mvirt-net)
+  optional string nic_socket_path = 5;  // vhost-user socket path (from mvirt-net/mvirt-ebpf)
+  optional string nic_mac_address = 6;  // MAC address for the NIC (required for DHCP)
 }
 
 message GetPodRequest {
