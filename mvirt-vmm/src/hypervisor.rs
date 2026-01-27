@@ -248,7 +248,15 @@ ethernets:
 
         // Add network interfaces
         for nic in &config.nics {
-            if let Some(ref nic_spec) = nic.vhost_socket {
+            // Check for direct TAP device first
+            if let Some(ref tap_name) = nic.tap {
+                let mut net_arg = format!("tap={}", tap_name);
+                if let Some(ref mac) = nic.mac {
+                    net_arg.push_str(&format!(",mac={}", mac));
+                }
+                cmd.arg("--net").arg(net_arg);
+                info!(vm_id = %vm_id, tap = %tap_name, "Using TAP network");
+            } else if let Some(ref nic_spec) = nic.vhost_socket {
                 if let Some(socket_path) = nic_spec.strip_prefix("vhost-user:") {
                     // vhost-user (mvirt-net)
                     let mut net_arg =
@@ -259,7 +267,7 @@ ethernets:
                     cmd.arg("--net").arg(net_arg);
                     info!(vm_id = %vm_id, socket = %socket_path, "Using vhost-user network");
                 } else if let Some(tap_name) = nic_spec.strip_prefix("tap:") {
-                    // TAP device (mvirt-ebpf)
+                    // TAP device (mvirt-ebpf) - legacy format in vhost_socket
                     let mut net_arg = format!("tap={}", tap_name);
                     if let Some(ref mac) = nic.mac {
                         net_arg.push_str(&format!(",mac={}", mac));

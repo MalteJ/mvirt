@@ -18,6 +18,9 @@ service NetService {
   rpc ListNics(ListNicsRequest) returns (ListNicsResponse);
   rpc UpdateNic(UpdateNicRequest) returns (Nic);
   rpc DeleteNic(DeleteNicRequest) returns (DeleteNicResponse);
+
+  // Attach NIC to TAP device (called when VM starts)
+  rpc AttachNic(AttachNicRequest) returns (AttachNicResponse);
 }
 
 // === System Messages ===
@@ -187,4 +190,13 @@ message DeleteNicRequest {
 
 message DeleteNicResponse {
   bool deleted = 1;
+}
+
+message AttachNicRequest {
+  string id = 1;                     // NIC UUID
+}
+
+message AttachNicResponse {
+  bool attached = 1;                 // true if TAP found and attached
+  string message = 2;                // Status message
 }

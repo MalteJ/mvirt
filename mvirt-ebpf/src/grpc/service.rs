@@ -10,7 +10,10 @@ use super::validation::{
 use crate::audit::EbpfAuditLogger;
 use crate::ebpf_loader::{ACTION_REDIRECT, EbpfManager, RouteEntry};
 use crate::proto_handler::{GATEWAY_MAC, ProtocolHandler};
-use crate::tap::{TapDevice, delete_tap_interface, tap_name_from_nic_id};
+use crate::tap::{
+    create_persistent_tap, delete_tap_interface, set_interface_mac, set_interface_up,
+    tap_name_from_nic_id,
+};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -91,9 +94,11 @@ fn nic_data_to_proto(data: &NicData) -> Nic {
     }
 }
 
-/// Managed TAP device with handler task.
+/// Managed NIC with handler task.
 struct ManagedNic {
-    tap: TapDevice,
+    /// Interface index
+    if_index: u32,
+    /// Protocol handler task
     handler_task: tokio::task::JoinHandle<()>,
 }
 
@@ -143,37 +148,48 @@ impl EbpfNetServiceImpl {
         }
     }
 
-    /// Setup a NIC: create TAP, attach eBPF, start protocol handler.
+    /// Setup a NIC: create persistent TAP device, attach eBPF, start protocol handler.
     async fn setup_nic(&self, nic: &NicData, network: &NetworkData) -> Result<(), Status> {
-        // Create TAP device
-        let tap = TapDevice::create(&nic.tap_name)
+        // Create persistent TAP device (survives fd close, can be opened by cloud-hypervisor)
+        let if_index = create_persistent_tap(&nic.tap_name)
             .map_err(|e| Status::internal(format!("Failed to create TAP: {}", e)))?;
 
+        // Set TAP MAC to gateway MAC (so kernel accepts packets destined for gateway)
+        set_interface_mac(&nic.tap_name, GATEWAY_MAC)
+            .map_err(|e| Status::internal(format!("Failed to set TAP MAC: {}", e)))?;
+
         // Set TAP interface up
-        tap.set_up()
+        set_interface_up(&nic.tap_name)
             .map_err(|e| Status::internal(format!("Failed to set TAP up: {}", e)))?;
+
+        info!(
+            nic_id = %nic.id,
+            tap_name = %nic.tap_name,
+            if_index,
+            gateway_mac = ?GATEWAY_MAC,
+            "Created persistent TAP device"
+        );
 
         // Attach TC egress program
         self.ebpf
-            .attach_egress(tap.if_index, &nic.tap_name)
+            .attach_egress(if_index, &nic.tap_name)
             .await
             .map_err(|e| Status::internal(format!("Failed to attach eBPF: {}", e)))?;
 
         // Register with protocol handler
         self.proto_handler
-            .register_nic(tap.if_index, nic.clone(), network.clone())
+            .register_nic(if_index, nic.clone(), network.clone())
             .await;
 
-        // Spawn protocol handler task
+        // Spawn protocol handler task (uses AF_PACKET, independent of TAP fd)
         let handler_task = self
             .proto_handler
-            .spawn_handler(nic.tap_name.clone(), tap.if_index);
+            .spawn_handler(nic.tap_name.clone(), if_index);
 
         // Add routes to eBPF maps
         if let Some(ipv4) = nic.ipv4_address {
             // Route to this NIC for its assigned IP
-            let route =
-                RouteEntry::new(ACTION_REDIRECT, tap.if_index, nic.mac_address, GATEWAY_MAC);
+            let route = RouteEntry::new(ACTION_REDIRECT, if_index, nic.mac_address, GATEWAY_MAC);
             self.ebpf
                 .add_egress_route_v4(ipv4, 32, route)
                 .await
@@ -181,8 +197,7 @@ impl EbpfNetServiceImpl {
         }
 
         if let Some(ipv6) = nic.ipv6_address {
-            let route =
-                RouteEntry::new(ACTION_REDIRECT, tap.if_index, nic.mac_address, GATEWAY_MAC);
+            let route = RouteEntry::new(ACTION_REDIRECT, if_index, nic.mac_address, GATEWAY_MAC);
             self.ebpf
                 .add_egress_route_v6(ipv6, 128, route)
                 .await
@@ -191,7 +206,13 @@ impl EbpfNetServiceImpl {
 
         // Store managed NIC
         let mut nics = self.nics.write().await;
-        nics.insert(nic.id, ManagedNic { tap, handler_task });
+        nics.insert(
+            nic.id,
+            ManagedNic {
+                if_index,
+                handler_task,
+            },
+        );
 
         info!(
             nic_id = %nic.id,
@@ -216,17 +237,13 @@ impl EbpfNetServiceImpl {
         let mut nics = self.nics.write().await;
         if let Some(managed) = nics.remove(&nic.id) {
             // Unregister from protocol handler
-            self.proto_handler
-                .unregister_nic(managed.tap.if_index)
-                .await;
+            self.proto_handler.unregister_nic(managed.if_index).await;
 
             // Abort handler task
             managed.handler_task.abort();
-
-            // TAP is automatically cleaned up when dropped
         }
 
-        // Also try to delete the interface directly (in case we're recovering)
+        // Delete the persistent TAP interface
         let _ = delete_tap_interface(&nic.tap_name).await;
 
         info!(
@@ -257,7 +274,7 @@ impl EbpfNetServiceImpl {
             };
 
             match self.setup_nic(&nic, &network).await {
-                Ok(_) => recovered += 1,
+                Ok(()) => recovered += 1,
                 Err(e) => {
                     warn!(nic_id = %nic.id, error = %e, "Failed to recover NIC");
                     failed += 1;
@@ -721,5 +738,48 @@ impl NetService for EbpfNetServiceImpl {
             .map_err(storage_err_to_status)?;
 
         Ok(Response::new(DeleteNicResponse { deleted }))
+    }
+
+    async fn attach_nic(
+        &self,
+        request: Request<AttachNicRequest>,
+    ) -> Result<Response<AttachNicResponse>, Status> {
+        let req = request.into_inner();
+
+        let uuid = Uuid::parse_str(&req.id)
+            .map_err(|_| Status::invalid_argument(format!("Invalid NIC ID: {}", req.id)))?;
+
+        // Get NIC from DB
+        let nic = self
+            .storage
+            .get_nic_by_id(&uuid)
+            .map_err(storage_err_to_status)?
+            .ok_or_else(|| Status::not_found(format!("NIC not found: {}", req.id)))?;
+
+        // Check if already attached
+        {
+            let nics = self.nics.read().await;
+            if nics.contains_key(&uuid) {
+                return Ok(Response::new(AttachNicResponse {
+                    attached: true,
+                    message: "NIC already attached".to_string(),
+                }));
+            }
+        }
+
+        // Get network
+        let network = self
+            .storage
+            .get_network_by_id(&nic.network_id)
+            .map_err(storage_err_to_status)?
+            .ok_or_else(|| Status::internal(format!("Network not found: {}", nic.network_id)))?;
+
+        // Try to attach (this will create TAP if it doesn't exist)
+        self.setup_nic(&nic, &network).await?;
+        info!(nic_id = %uuid, "NIC attached successfully");
+        Ok(Response::new(AttachNicResponse {
+            attached: true,
+            message: "NIC attached".to_string(),
+        }))
     }
 }

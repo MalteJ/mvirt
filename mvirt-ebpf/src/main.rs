@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
 use tonic::transport::Server;
 use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 /// gRPC server address.
 const GRPC_ADDR: &str = "[::1]:50054";
@@ -23,8 +24,11 @@ const LOG_ENDPOINT: &str = "http://[::1]:50052";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+    // Initialize logging with h2 filtered to warn level
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive("h2=warn".parse().unwrap());
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     info!("mvirt-ebpf starting...");
 

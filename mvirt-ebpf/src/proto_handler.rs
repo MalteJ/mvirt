@@ -363,6 +363,8 @@ fn process_arp(_config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<
     let arp_packet = ArpPacket::new_checked(eth_frame.payload()).ok()?;
     let arp_repr = ArpRepr::parse(&arp_packet).ok()?;
 
+    debug!(?arp_repr, "ARP packet received");
+
     // Only handle IPv4 ARP requests
     if let ArpRepr::EthernetIpv4 {
         operation: ArpOperation::Request,
@@ -372,9 +374,17 @@ fn process_arp(_config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<
         ..
     } = arp_repr
     {
+        debug!(
+            src_mac = %source_hardware_addr,
+            src_ip = %source_protocol_addr,
+            target_ip = %target_protocol_addr,
+            "ARP REQUEST: who-has"
+        );
+
         // Check if they're asking for the link-local gateway (169.254.0.1)
         let gateway_addr = Ipv4Address::from_bytes(&GATEWAY_IPV4_LINK_LOCAL.octets());
         if target_protocol_addr != gateway_addr {
+            debug!(target_ip = %target_protocol_addr, gateway = %gateway_addr, "ARP not for gateway, ignoring");
             return None;
         }
 
@@ -506,10 +516,25 @@ fn process_dhcp(
     _eth_frame: &EthernetFrame<&[u8]>,
     payload: &[u8],
 ) -> Option<Vec<u8>> {
-    let dhcp_msg = DhcpMessage::decode(&mut dhcproto::decoder::Decoder::new(payload)).ok()?;
+    debug!(payload_len = payload.len(), "DHCP packet received");
+
+    let dhcp_msg = match DhcpMessage::decode(&mut dhcproto::decoder::Decoder::new(payload)) {
+        Ok(msg) => msg,
+        Err(e) => {
+            debug!(error = %e, "Failed to decode DHCP message");
+            return None;
+        }
+    };
+
+    debug!(
+        opcode = ?dhcp_msg.opcode(),
+        xid = dhcp_msg.xid(),
+        "DHCP message decoded"
+    );
 
     // Only handle requests from client
     if dhcp_msg.opcode() != Opcode::BootRequest {
+        debug!("Not a BootRequest, ignoring");
         return None;
     }
 
@@ -520,9 +545,29 @@ fn process_dhcp(
     };
 
     let client_mac = dhcp_msg.chaddr();
+    let client_mac_str = format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        client_mac[0], client_mac[1], client_mac[2], client_mac[3], client_mac[4], client_mac[5]
+    );
+
+    debug!(
+        msg_type = ?msg_type,
+        client_mac = %client_mac_str,
+        "DHCP {} received",
+        match msg_type {
+            DhcpMessageType::Discover => "DISCOVER",
+            DhcpMessageType::Request => "REQUEST",
+            _ => "OTHER",
+        }
+    );
 
     // Verify this is from our NIC's MAC
     if client_mac[..6] != config.nic.mac_address {
+        debug!(
+            expected = ?config.nic.mac_address,
+            got = %client_mac_str,
+            "DHCP from wrong MAC, ignoring"
+        );
         return None;
     }
 

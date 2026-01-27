@@ -615,4 +615,27 @@ impl NetService for NetServiceImpl {
 
         Ok(Response::new(DeleteNicResponse { deleted }))
     }
+
+    async fn attach_nic(
+        &self,
+        request: Request<AttachNicRequest>,
+    ) -> Result<Response<AttachNicResponse>, Status> {
+        let req = request.into_inner();
+
+        let uuid = Uuid::parse_str(&req.id)
+            .map_err(|_| Status::invalid_argument(format!("Invalid NIC ID: {}", req.id)))?;
+
+        // Check NIC exists
+        self.storage
+            .get_nic_by_id(&uuid)
+            .map_err(storage_err_to_status)?
+            .ok_or_else(|| Status::not_found(format!("NIC not found: {}", req.id)))?;
+
+        // mvirt-net uses vhost-user which is always ready
+        // No explicit attach needed
+        Ok(Response::new(AttachNicResponse {
+            attached: true,
+            message: "vhost-user socket ready".to_string(),
+        }))
+    }
 }

@@ -93,6 +93,10 @@ enum Commands {
         /// Enable nested virtualization
         #[arg(long)]
         nested_virt: bool,
+
+        /// NIC socket path (from mvirt nic create, e.g., "tap:tap_abc1234")
+        #[arg(long)]
+        nic: Option<String>,
     },
 
     /// List all VMs
@@ -364,6 +368,12 @@ enum NicCommands {
     /// Delete a NIC
     Delete {
         /// NIC ID or name
+        id: String,
+    },
+
+    /// Attach NIC to TAP device (after VM starts)
+    Attach {
+        /// NIC ID
         id: String,
     },
 }
@@ -933,6 +943,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .delete_nic(net_proto::DeleteNicRequest { id: id.clone() })
                         .await?;
                     println!("Deleted NIC: {}", id);
+                }
+                NicCommands::Attach { id } => {
+                    let response = net_client
+                        .attach_nic(net_proto::AttachNicRequest { id: id.clone() })
+                        .await?;
+                    let result = response.into_inner();
+                    if result.attached {
+                        println!("Attached NIC: {} - {}", id, result.message);
+                    } else {
+                        println!("Failed to attach NIC: {} - {}", id, result.message);
+                    }
                 }
             },
 
@@ -1537,6 +1558,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             disk,
             user_data,
             nested_virt,
+            nic,
         } => {
             // Parse boot mode
             let boot_mode = match boot.to_lowercase().as_str() {
@@ -1578,6 +1600,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => None,
             };
 
+            // Parse NIC socket path (format: "tap:name,mac=XX:XX:XX:XX:XX:XX" or "vhost-user:path")
+            let nics = match nic {
+                Some(socket) => {
+                    if let Some(rest) = socket.strip_prefix("tap:") {
+                        // Parse tap:name,mac=XX:XX:XX:XX:XX:XX
+                        let mut tap_name = rest.to_string();
+                        let mut mac = None;
+                        if let Some(comma_pos) = rest.find(',') {
+                            tap_name = rest[..comma_pos].to_string();
+                            let params = &rest[comma_pos + 1..];
+                            if let Some(mac_str) = params.strip_prefix("mac=") {
+                                mac = Some(mac_str.to_string());
+                            }
+                        }
+                        vec![NicConfig {
+                            tap: Some(tap_name),
+                            mac,
+                            vhost_socket: None,
+                        }]
+                    } else {
+                        vec![NicConfig {
+                            tap: None,
+                            mac: None,
+                            vhost_socket: Some(socket),
+                        }]
+                    }
+                }
+                None => vec![],
+            };
+
             let request = CreateVmRequest {
                 name,
                 config: Some(VmConfig {
@@ -1588,7 +1640,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     initramfs,
                     cmdline,
                     disks,
-                    nics: vec![],
+                    nics,
                     user_data: user_data_content,
                     nested_virt,
                 }),

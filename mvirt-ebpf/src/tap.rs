@@ -34,6 +34,7 @@ pub type Result<T> = std::result::Result<T, TapError>;
 
 // ioctl constants for TUN/TAP
 const TUNSETIFF: libc::c_ulong = 0x400454ca;
+const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
 const IFF_TAP: i16 = 0x0002;
 const IFF_NO_PI: i16 = 0x1000;
 const IFF_VNET_HDR: i16 = 0x4000;
@@ -54,6 +55,150 @@ pub struct TapDevice {
     fd: OwnedFd,
     /// Interface index
     pub if_index: u32,
+}
+
+/// Create a persistent TAP device.
+///
+/// The TAP device is created with TUNSETPERSIST, so it remains even after
+/// the fd is closed. This allows cloud-hypervisor to open it later.
+/// Returns the interface index.
+pub fn create_persistent_tap(name: &str) -> Result<u32> {
+    if name.len() > 15 {
+        return Err(TapError::NameTooLong(name.to_string()));
+    }
+
+    // Open /dev/net/tun
+    let tun_fd = open(c"/dev/net/tun", OFlag::O_RDWR, Mode::empty())
+        .map_err(|e| TapError::OpenTun(io::Error::from_raw_os_error(e as i32)))?;
+
+    // Create ifreq struct
+    let mut ifreq = IfReq::default();
+    let name_bytes = name.as_bytes();
+    ifreq.ifr_name[..name_bytes.len()].copy_from_slice(name_bytes);
+    ifreq.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_VNET_HDR;
+
+    // TUNSETIFF ioctl - create the TAP device
+    let ret = unsafe { libc::ioctl(tun_fd, TUNSETIFF as libc::Ioctl, &mut ifreq) };
+    if ret < 0 {
+        let err = io::Error::last_os_error();
+        let _ = close(tun_fd);
+        return Err(TapError::CreateDevice(name.to_string(), err));
+    }
+
+    // TUNSETPERSIST - make it persistent (survives fd close)
+    let ret = unsafe { libc::ioctl(tun_fd, TUNSETPERSIST as libc::Ioctl, 1i32) };
+    if ret < 0 {
+        let err = io::Error::last_os_error();
+        let _ = close(tun_fd);
+        return Err(TapError::CreateDevice(
+            name.to_string(),
+            io::Error::new(err.kind(), format!("TUNSETPERSIST failed: {}", err)),
+        ));
+    }
+
+    // Get interface index before closing fd
+    let if_index = get_if_index_by_name(name)?;
+
+    // Close fd - TAP persists due to TUNSETPERSIST
+    let _ = close(tun_fd);
+
+    Ok(if_index)
+}
+
+/// Set the MAC address of an interface.
+pub fn set_interface_mac(name: &str, mac: [u8; 6]) -> Result<()> {
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if sock < 0 {
+        return Err(TapError::SetUp(io::Error::last_os_error()));
+    }
+
+    let mut ifreq: libc::ifreq = unsafe { std::mem::zeroed() };
+    let name_bytes = name.as_bytes();
+    if name_bytes.len() > 15 {
+        unsafe { libc::close(sock) };
+        return Err(TapError::NameTooLong(name.to_string()));
+    }
+    ifreq.ifr_name[..name_bytes.len()].copy_from_slice(unsafe {
+        std::slice::from_raw_parts(name_bytes.as_ptr() as *const i8, name_bytes.len())
+    });
+
+    // Set MAC address in ifr_hwaddr
+    unsafe {
+        ifreq.ifr_ifru.ifru_hwaddr.sa_family = libc::ARPHRD_ETHER;
+        ifreq.ifr_ifru.ifru_hwaddr.sa_data[..6]
+            .copy_from_slice(std::slice::from_raw_parts(mac.as_ptr() as *const i8, 6));
+    }
+
+    let ret = unsafe { libc::ioctl(sock, libc::SIOCSIFHWADDR as libc::Ioctl, &ifreq) };
+    unsafe { libc::close(sock) };
+
+    if ret < 0 {
+        return Err(TapError::SetUp(io::Error::last_os_error()));
+    }
+
+    Ok(())
+}
+
+/// Set an interface up by name.
+pub fn set_interface_up(name: &str) -> Result<()> {
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if sock < 0 {
+        return Err(TapError::SetUp(io::Error::last_os_error()));
+    }
+
+    let mut ifreq: libc::ifreq = unsafe { std::mem::zeroed() };
+    let name_bytes = name.as_bytes();
+    if name_bytes.len() > 15 {
+        unsafe { libc::close(sock) };
+        return Err(TapError::NameTooLong(name.to_string()));
+    }
+    ifreq.ifr_name[..name_bytes.len()].copy_from_slice(unsafe {
+        std::slice::from_raw_parts(name_bytes.as_ptr() as *const i8, name_bytes.len())
+    });
+
+    // Get current flags
+    let ret = unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::Ioctl, &mut ifreq) };
+    if ret < 0 {
+        let err = io::Error::last_os_error();
+        unsafe { libc::close(sock) };
+        return Err(TapError::SetUp(err));
+    }
+
+    // Set IFF_UP flag
+    unsafe {
+        ifreq.ifr_ifru.ifru_flags |= libc::IFF_UP as i16;
+    }
+
+    let ret = unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::Ioctl, &ifreq) };
+    unsafe { libc::close(sock) };
+
+    if ret < 0 {
+        return Err(TapError::SetUp(io::Error::last_os_error()));
+    }
+
+    Ok(())
+}
+
+/// Get interface index for an existing interface by name.
+///
+/// Returns the interface index if the interface exists, or an error if not found.
+pub fn get_if_index_by_name(name: &str) -> Result<u32> {
+    let c_name = CString::new(name).map_err(|_| {
+        TapError::GetIfIndex(
+            name.to_string(),
+            io::Error::new(io::ErrorKind::InvalidInput, "Invalid interface name"),
+        )
+    })?;
+
+    let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+    if index == 0 {
+        return Err(TapError::GetIfIndex(
+            name.to_string(),
+            io::Error::last_os_error(),
+        ));
+    }
+
+    Ok(index)
 }
 
 impl TapDevice {
@@ -100,22 +245,7 @@ impl TapDevice {
 
     /// Get interface index for a device by name.
     fn get_if_index(name: &str) -> Result<u32> {
-        let c_name = CString::new(name).map_err(|_| {
-            TapError::GetIfIndex(
-                name.to_string(),
-                io::Error::new(io::ErrorKind::InvalidInput, "Invalid interface name"),
-            )
-        })?;
-
-        let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
-        if index == 0 {
-            return Err(TapError::GetIfIndex(
-                name.to_string(),
-                io::Error::last_os_error(),
-            ));
-        }
-
-        Ok(index)
+        get_if_index_by_name(name)
     }
 
     /// Set the interface up.
