@@ -32,6 +32,8 @@ BZIMAGE := $(KERNEL_DIR)/arch/x86/boot/bzImage
 INITRAMFS := $(MVIRT_ONE_DIR)/target/initramfs.cpio.gz
 INITRAMFS_ROOTFS := $(MVIRT_ONE_DIR)/initramfs/rootfs
 UKI := $(MVIRT_ONE_DIR)/target/mvirt-one.efi
+ROOTFS_RAW := $(MVIRT_ONE_DIR)/target/rootfs.raw
+ROOTFS_SIZE_MB := 32
 
 # ============ KERNEL ============
 
@@ -82,6 +84,20 @@ $(INITRAMFS): $(RUST_TARGET_DIR)/mvirt-one $(YOUKI_BIN) | $(MVIRT_ONE_DIR)/targe
 .PHONY: initramfs
 initramfs: $(INITRAMFS)
 
+# ============ ROOTFS RAW IMAGE ============
+
+$(ROOTFS_RAW): $(RUST_TARGET_DIR)/mvirt-one $(YOUKI_BIN) | $(MVIRT_ONE_DIR)/target
+	@echo "Building rootfs.raw ($(ROOTFS_SIZE_MB)MB ext4 image)..."
+	mkdir -p $(INITRAMFS_ROOTFS)/usr/bin
+	cp $(RUST_TARGET_DIR)/mvirt-one $(INITRAMFS_ROOTFS)/init
+	cp $(YOUKI_BIN) $(INITRAMFS_ROOTFS)/usr/bin/youki
+	chmod +x $(INITRAMFS_ROOTFS)/init $(INITRAMFS_ROOTFS)/usr/bin/youki
+	truncate -s $(ROOTFS_SIZE_MB)M $(ROOTFS_RAW)
+	/usr/sbin/mkfs.ext4 -d $(INITRAMFS_ROOTFS) $(ROOTFS_RAW)
+
+.PHONY: rootfs
+rootfs: $(ROOTFS_RAW)
+
 # ============ UKI (Unified Kernel Image) ============
 
 $(UKI): $(BZIMAGE) $(INITRAMFS) $(MVIRT_ONE_DIR)/cmdline.txt | $(MVIRT_ONE_DIR)/target
@@ -94,7 +110,9 @@ $(UKI): $(BZIMAGE) $(INITRAMFS) $(MVIRT_ONE_DIR)/cmdline.txt | $(MVIRT_ONE_DIR)/
 		--output=$(UKI)
 
 .PHONY: one
-one: $(UKI)
+one: $(UKI) $(ROOTFS_RAW)
+	cp $(BZIMAGE) $(MVIRT_ONE_DIR)/target/bzImage
+	cp $(MVIRT_ONE_DIR)/cmdline.txt $(MVIRT_ONE_DIR)/target/cmdline
 
 # Keep 'uos' as alias for backwards compatibility
 .PHONY: uos

@@ -8,13 +8,9 @@ use crate::proto::{
     StartPodRequest, StopPodRequest, VmConfig, pod_service_server::PodService,
 };
 use crate::store::VmStore;
-use crate::vsock_client::{UosClient, pid_to_cid, wait_for_uos};
+use crate::vsock_client::UosClient;
 use mvirt_log::AuditLogger;
-use mvirt_one::proto::{
-    ContainerSpec as OneContainerSpec, CreatePodRequest as OneCreatePodRequest,
-    StartPodRequest as OneStartPodRequest, StopPodRequest as OneStopPodRequest,
-    uos_service_client::UosServiceClient,
-};
+use mvirt_one::proto::{StopPodRequest as OneStopPodRequest, uos_service_client::UosServiceClient};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,12 +22,12 @@ use uuid::Uuid;
 
 /// Kernel path for MicroVM boot.
 const UOS_KERNEL_PATH: &str = "/usr/share/mvirt/one/bzImage";
+/// Rootfs template path for pod volumes.
+const UOS_ROOTFS_TEMPLATE: &str = "/usr/share/mvirt/one/rootfs.raw";
 /// Cmdline file path.
 const UOS_CMDLINE_PATH: &str = "/usr/share/mvirt/one/cmdline";
 /// Default kernel command line for MicroVM (disk boot).
 const UOS_DISK_CMDLINE: &str = "console=ttyS0 quiet root=/dev/vda rw init=/init";
-/// Timeout for waiting for uos to become ready.
-const UOS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default memory for pod MicroVMs (MB).
 const POD_DEFAULT_MEMORY_MB: u64 = 256;
 /// Default vCPUs for pod MicroVMs.
@@ -46,7 +42,7 @@ struct PodData {
     vm_id: Option<String>,
     containers: Vec<ContainerSpec>,
     resources: Option<PodResources>,
-    /// Path to root disk (created by CLI via mvirt-zfs).
+    /// Path to root disk volume (ZFS volume created by CLI, rootfs written by VMM).
     root_disk_path: Option<String>,
     /// vhost-user socket path for NIC (from mvirt-net).
     nic_socket_path: Option<String>,
@@ -234,6 +230,11 @@ impl PodService for PodServiceImpl {
             }
         }
 
+        // Delete the VM entry from database (pod_id == vm_id)
+        if let Err(e) = self.store.delete(&req.id).await {
+            warn!(pod_id = %req.id, error = %e, "Failed to delete VM entry for pod");
+        }
+
         // Note: ZFS volume cleanup is the CLI's responsibility
 
         let pod_name = pod.name.clone();
@@ -255,7 +256,7 @@ impl PodService for PodServiceImpl {
         info!(pod_id = %req.id, "Starting pod");
 
         // Get pod data (we need to clone to avoid holding the lock)
-        let (pod_id, pod_name, containers, resources, root_disk_path, nic_socket_path) = {
+        let (pod_id, pod_name, _containers, resources, root_disk_path, nic_socket_path) = {
             let mut pods = self.pods.write().await;
             let pod = pods
                 .get_mut(&req.id)
@@ -294,8 +295,70 @@ impl PodService for PodServiceImpl {
             }
         };
 
-        // Create VM ID based on pod ID
-        let vm_id = format!("pod-{}", pod_id);
+        // Write rootfs template to volume
+        info!(pod_id = %pod_id, volume = %root_disk_path, "Writing rootfs template to volume");
+        let dd_status = std::process::Command::new("dd")
+            .args([
+                &format!("if={}", UOS_ROOTFS_TEMPLATE),
+                &format!("of={}", root_disk_path),
+                "bs=4M",
+                "conv=fsync",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        match dd_status {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                error!(pod_id = %pod_id, "dd failed with exit code {:?}", status.code());
+                let mut pods = self.pods.write().await;
+                if let Some(pod) = pods.get_mut(&pod_id) {
+                    pod.state = PodState::Failed;
+                    pod.error_message =
+                        Some("Failed to write rootfs template to volume".to_string());
+                }
+                return Err(Status::internal(
+                    "Failed to write rootfs template to volume",
+                ));
+            }
+            Err(e) => {
+                error!(pod_id = %pod_id, error = %e, "Failed to execute dd");
+                let mut pods = self.pods.write().await;
+                if let Some(pod) = pods.get_mut(&pod_id) {
+                    pod.state = PodState::Failed;
+                    pod.error_message = Some(format!("Failed to execute dd: {}", e));
+                }
+                return Err(Status::internal(format!("Failed to execute dd: {}", e)));
+            }
+        }
+
+        // Check and resize filesystem to fill volume
+        info!(pod_id = %pod_id, volume = %root_disk_path, "Checking and resizing filesystem");
+
+        // Run e2fsck first (required before resize2fs)
+        let _ = std::process::Command::new("e2fsck")
+            .args(["-f", "-y", &root_disk_path])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        // Now resize the filesystem
+        let resize_status = std::process::Command::new("resize2fs")
+            .arg(&root_disk_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        match resize_status {
+            Ok(status) if !status.success() => {
+                warn!(pod_id = %pod_id, "resize2fs failed with exit code {:?} (continuing anyway)", status.code());
+            }
+            Err(e) => {
+                warn!(pod_id = %pod_id, error = %e, "Failed to resize filesystem (continuing anyway)");
+            }
+            _ => {}
+        }
 
         // Determine resource values
         let vcpus = resources
@@ -350,6 +413,36 @@ impl PodService for PodServiceImpl {
             nested_virt: false,
         };
 
+        // Create a VM entry in the database (so console works via standard VM API)
+        // Mark as microvm=true so it doesn't show up in ListVms
+        let vm_entry = match self
+            .store
+            .create_microvm(&pod_id, Some(pod_name.clone()), vm_config.clone())
+            .await
+        {
+            Ok(entry) => entry,
+            Err(e) => {
+                error!(pod_id = %pod_id, error = %e, "Failed to create VM entry for pod");
+                let mut pods = self.pods.write().await;
+                if let Some(pod) = pods.get_mut(&pod_id) {
+                    pod.state = PodState::Failed;
+                    pod.error_message = Some(format!("Failed to create VM entry: {}", e));
+                }
+                return Err(Status::internal(format!(
+                    "Failed to create VM entry: {}",
+                    e
+                )));
+            }
+        };
+
+        let vm_id = vm_entry.id.clone();
+
+        // Update VM state to starting
+        self.store
+            .update_state(&vm_id, crate::proto::VmState::Starting)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
         // Start the MicroVM
         info!(vm_id = %vm_id, pod_id = %pod_id, "Starting MicroVM for pod");
         if let Err(e) = self
@@ -358,6 +451,11 @@ impl PodService for PodServiceImpl {
             .await
         {
             error!(vm_id = %vm_id, error = %e, "Failed to start MicroVM");
+            // Revert VM state and clean up
+            let _ = self
+                .store
+                .update_state(&vm_id, crate::proto::VmState::Stopped)
+                .await;
             let mut pods = self.pods.write().await;
             if let Some(pod) = pods.get_mut(&pod_id) {
                 pod.state = PodState::Failed;
@@ -366,127 +464,41 @@ impl PodService for PodServiceImpl {
             return Err(Status::internal(format!("Failed to start MicroVM: {}", e)));
         }
 
-        // Get PID and convert to CID
-        let runtime = self.store.get_runtime(&vm_id).await.map_err(|e| {
-            error!(vm_id = %vm_id, error = %e, "Failed to get VM runtime");
-            Status::internal("Failed to get VM runtime info")
-        })?;
+        // Update VM state to running
+        self.store
+            .update_state(&vm_id, crate::proto::VmState::Running)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
-        let runtime = runtime.ok_or_else(|| {
-            error!(vm_id = %vm_id, "No runtime info for VM");
-            Status::internal("No runtime info for VM")
-        })?;
+        debug!(vm_id = %vm_id, pod_id = %pod_id, "MicroVM started");
 
-        let cid = pid_to_cid(runtime.pid);
-        debug!(vm_id = %vm_id, pid = runtime.pid, cid = cid, "VM started, waiting for uos");
+        // Mark pod as running (uos communication will happen in background)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
 
-        // Wait for uos to become ready via vsock
-        let uos_client = match wait_for_uos(cid, UOS_CONNECT_TIMEOUT).await {
-            Ok(client) => client,
-            Err(e) => {
-                error!(cid = cid, error = %e, "Failed to connect to uos");
-                // Kill the VM
-                let _ = self.hypervisor.kill(&vm_id).await;
-                let mut pods = self.pods.write().await;
-                if let Some(pod) = pods.get_mut(&pod_id) {
-                    pod.state = PodState::Failed;
-                    pod.error_message = Some(format!("Failed to connect to uos: {}", e));
-                }
-                return Err(Status::internal(format!("Failed to connect to uos: {}", e)));
-            }
-        };
-
-        // Create gRPC client to uos
-        let mut uos = UosServiceClient::new(uos_client.channel());
-
-        // Convert container specs to uos format
-        let one_containers: Vec<OneContainerSpec> = containers
-            .iter()
-            .map(|c| OneContainerSpec {
-                id: c.id.clone(),
-                name: c.name.clone(),
-                image: c.image.clone(),
-                command: c.command.clone(),
-                args: c.args.clone(),
-                env: c.env.clone(),
-                working_dir: c.working_dir.clone(),
-            })
-            .collect();
-
-        // Create pod in uos
-        info!(pod_id = %pod_id, "Creating pod in uos");
-        let create_req = OneCreatePodRequest {
-            id: pod_id.clone(),
-            name: pod_name.clone(),
-            containers: one_containers,
-        };
-
-        if let Err(e) = uos.create_pod(create_req).await {
-            error!(pod_id = %pod_id, error = %e, "Failed to create pod in uos");
-            let _ = self.hypervisor.kill(&vm_id).await;
+        {
             let mut pods = self.pods.write().await;
             if let Some(pod) = pods.get_mut(&pod_id) {
-                pod.state = PodState::Failed;
-                pod.error_message = Some(format!("Failed to create pod in uos: {}", e));
-            }
-            return Err(Status::internal(format!(
-                "Failed to create pod in uos: {}",
-                e
-            )));
-        }
-
-        // Start pod in uos
-        info!(pod_id = %pod_id, "Starting pod in uos");
-        let start_req = OneStartPodRequest { id: pod_id.clone() };
-
-        match uos.start_pod(start_req).await {
-            Ok(response) => {
-                let one_pod = response.into_inner();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-
-                // Update pod state
-                let mut pods = self.pods.write().await;
-                if let Some(pod) = pods.get_mut(&pod_id) {
-                    pod.state = PodState::Running;
-                    pod.vm_id = Some(vm_id.clone());
-                    pod.started_at = Some(now);
-                    pod.ip_address = one_pod.ip_address;
-                    pod.error_message = None;
-                }
-
-                // Store uos client for future communication
-                let mut clients = self.uos_clients.write().await;
-                clients.insert(pod_id.clone(), uos_client);
-
-                self.audit
-                    .log(
-                        mvirt_log::LogLevel::Audit,
-                        &format!("Pod {} ({}) started", pod_name, pod_id),
-                        vec![pod_id.clone(), vm_id],
-                    )
-                    .await;
-
-                let pods = self.pods.read().await;
-                let pod = pods.get(&pod_id).cloned().unwrap();
-                Ok(Response::new(pod.into()))
-            }
-            Err(e) => {
-                error!(pod_id = %pod_id, error = %e, "Failed to start pod in uos");
-                let _ = self.hypervisor.kill(&vm_id).await;
-                let mut pods = self.pods.write().await;
-                if let Some(pod) = pods.get_mut(&pod_id) {
-                    pod.state = PodState::Failed;
-                    pod.error_message = Some(format!("Failed to start pod in uos: {}", e));
-                }
-                Err(Status::internal(format!(
-                    "Failed to start pod in uos: {}",
-                    e
-                )))
+                pod.state = PodState::Running;
+                pod.vm_id = Some(vm_id.clone());
+                pod.started_at = Some(now);
+                pod.error_message = None;
             }
         }
+
+        self.audit
+            .log(
+                mvirt_log::LogLevel::Audit,
+                &format!("Pod {} ({}) started", pod_name, pod_id),
+                vec![pod_id.clone(), vm_id],
+            )
+            .await;
+
+        let pods = self.pods.read().await;
+        let pod = pods.get(&pod_id).cloned().unwrap();
+        Ok(Response::new(pod.into()))
     }
 
     async fn stop_pod(&self, request: Request<StopPodRequest>) -> Result<Response<Pod>, Status> {
@@ -536,6 +548,12 @@ impl PodService for PodServiceImpl {
             if let Err(e) = self.hypervisor.stop(vm_id, timeout).await {
                 warn!(vm_id = %vm_id, error = %e, "Failed to stop VM for pod");
             }
+
+            // Update VM state in database
+            let _ = self
+                .store
+                .update_state(vm_id, crate::proto::VmState::Stopped)
+                .await;
         }
 
         // Update pod state

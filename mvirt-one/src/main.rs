@@ -30,14 +30,19 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let is_pid1 = std::process::id() == 1;
+
+    // Redirect stdin/stdout/stderr to console when running as PID 1
+    if is_pid1 {
+        setup_console();
+    }
+
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
     info!("mvirt-one v{} starting", VERSION);
-
-    let is_pid1 = std::process::id() == 1;
 
     // Parse CLI args (only in non-PID1 mode)
     let args = if is_pid1 {
@@ -52,6 +57,26 @@ async fn main() -> Result<()> {
     } else {
         info!("Running in local development mode");
         run_local(args).await
+    }
+}
+
+/// Setup console for init mode - redirect stdin/stdout/stderr to serial console
+fn setup_console() {
+    use std::fs::OpenOptions;
+    use std::os::unix::io::AsRawFd;
+
+    // Use /dev/ttyS0 (serial console) - this is what cloud-hypervisor exposes via --serial file=...
+    let console_path = "/dev/ttyS0";
+
+    if let Ok(console) = OpenOptions::new().read(true).write(true).open(console_path) {
+        let fd = console.as_raw_fd();
+        unsafe {
+            // Redirect stdin, stdout, stderr to serial console
+            libc::dup2(fd, 0); // stdin
+            libc::dup2(fd, 1); // stdout
+            libc::dup2(fd, 2); // stderr
+        }
+        // console file handle dropped here, but fd 0/1/2 keep it open
     }
 }
 

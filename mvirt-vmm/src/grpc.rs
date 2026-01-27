@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mvirt_log::{AuditLogger, LogLevel};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -432,67 +433,108 @@ impl VmService for VmServiceImpl {
             return Err(Status::failed_precondition("VM is not running"));
         }
 
-        // Get serial socket path
-        let serial_socket = self.hypervisor.serial_socket_path(&vm_id);
-        if !serial_socket.exists() {
-            return Err(Status::unavailable("Serial socket not available"));
-        }
-
-        // Connect to serial socket
-        let socket = UnixStream::connect(&serial_socket)
+        // Get console path (socket or file depending on boot mode)
+        let console_path = self
+            .hypervisor
+            .console_path(&vm_id)
             .await
-            .map_err(|e| Status::internal(format!("Failed to connect to serial: {}", e)))?;
+            .ok_or_else(|| Status::unavailable("Console not available"))?;
 
-        let (mut socket_read, mut socket_write) = socket.into_split();
+        if !console_path.exists() {
+            return Err(Status::unavailable("Console not available"));
+        }
 
         // Channel for output to client
         let (tx, rx) = mpsc::channel::<Result<ConsoleOutput, Status>>(32);
 
-        // Send first message data if any
-        if !first_msg.data.is_empty() {
-            let _ = socket_write.write_all(&first_msg.data).await;
+        // Check if this is a socket (bidirectional) or file (read-only)
+        let is_socket = console_path
+            .extension()
+            .map(|e| e == "sock")
+            .unwrap_or(false);
+
+        if is_socket {
+            // Socket-based console (Disk Boot) - bidirectional
+            let socket = UnixStream::connect(&console_path)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to connect to console: {}", e)))?;
+
+            let (mut socket_read, mut socket_write) = socket.into_split();
+
+            // Task: Forward input from client -> socket
+            tokio::spawn(async move {
+                while let Some(Ok(msg)) = input_stream.next().await {
+                    if !msg.data.is_empty() && socket_write.write_all(&msg.data).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // Task: Read from socket -> send to client
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                loop {
+                    match socket_read.read(&mut buf).await {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            let output = ConsoleOutput {
+                                data: buf[..n].to_vec(),
+                            };
+                            if tx_clone.send(Ok(output)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Error reading from console socket");
+                            break;
+                        }
+                    }
+                }
+            });
+        } else {
+            // File-based console (Kernel Boot) - read-only, tail -f style
+            let mut console_file = File::open(&console_path)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to open console log: {}", e)))?;
+
+            // Seek to end to only show new output (like tail -f)
+            let _ = console_file.seek(std::io::SeekFrom::End(0)).await;
+
+            // Note: Input from client is ignored for file-based console (read-only)
+            // Just drain the input stream to prevent backpressure
+            tokio::spawn(async move {
+                while input_stream.next().await.is_some() {
+                    // Discard input - serial file is read-only
+                }
+            });
+
+            // Task: Read from console file -> send to client (tail -f style)
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                loop {
+                    match console_file.read(&mut buf).await {
+                        Ok(0) => {
+                            // No new data, wait briefly and try again (tail -f behavior)
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        }
+                        Ok(n) => {
+                            let output = ConsoleOutput {
+                                data: buf[..n].to_vec(),
+                            };
+                            if tx_clone.send(Ok(output)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Error reading from console log");
+                            break;
+                        }
+                    }
+                }
+            });
         }
-
-        // Task: Read from socket -> send to client
-        let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 1024];
-            loop {
-                match socket_read.read(&mut buf).await {
-                    Ok(0) => break, // EOF
-                    Ok(n) => {
-                        let output = ConsoleOutput {
-                            data: buf[..n].to_vec(),
-                        };
-                        if tx_clone.send(Ok(output)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Error reading from serial socket");
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Task: Read from client -> write to socket
-        tokio::spawn(async move {
-            while let Some(result) = input_stream.next().await {
-                match result {
-                    Ok(input) => {
-                        if let Err(e) = socket_write.write_all(&input.data).await {
-                            error!(error = %e, "Error writing to serial socket");
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Error receiving from client");
-                        break;
-                    }
-                }
-            }
-        });
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }

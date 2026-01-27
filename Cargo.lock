@@ -2071,6 +2071,7 @@ dependencies = [
 [[package]]
 name = "mraft"
 version = "0.1.0"
+source = "git+https://github.com/maltej/mraft#3c965554a4b879b15b08eb6b63d66224e69dbaa5"
 dependencies = [
  "base64 0.22.1",
  "bincode",

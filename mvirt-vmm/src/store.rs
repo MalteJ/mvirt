@@ -28,39 +28,42 @@ impl VmStore {
     }
 
     async fn migrate(&self) -> Result<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS vms (
-                id TEXT PRIMARY KEY,
-                name TEXT,
-                state TEXT NOT NULL DEFAULT 'stopped',
-                config_json TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                started_at INTEGER
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS vm_runtime (
-                vm_id TEXT PRIMARY KEY REFERENCES vms(id) ON DELETE CASCADE,
-                pid INTEGER NOT NULL,
-                api_socket TEXT NOT NULL,
-                serial_socket TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
+        sqlx::migrate!("./migrations").run(&self.pool).await?;
         Ok(())
     }
 
     pub async fn create(&self, name: Option<String>, config: VmConfig) -> Result<VmEntry> {
         let id = Uuid::new_v4().to_string();
+        self.create_internal(&id, name, config, false).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn create_with_id(
+        &self,
+        id: &str,
+        name: Option<String>,
+        config: VmConfig,
+    ) -> Result<VmEntry> {
+        self.create_internal(id, name, config, false).await
+    }
+
+    /// Create a MicroVM entry (marked with microvm=true, hidden from normal VM list)
+    pub async fn create_microvm(
+        &self,
+        id: &str,
+        name: Option<String>,
+        config: VmConfig,
+    ) -> Result<VmEntry> {
+        self.create_internal(id, name, config, true).await
+    }
+
+    async fn create_internal(
+        &self,
+        id: &str,
+        name: Option<String>,
+        config: VmConfig,
+        microvm: bool,
+    ) -> Result<VmEntry> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -69,19 +72,20 @@ impl VmStore {
 
         sqlx::query(
             r#"
-            INSERT INTO vms (id, name, state, config_json, created_at)
-            VALUES (?, ?, 'stopped', ?, ?)
+            INSERT INTO vms (id, name, state, config_json, created_at, microvm)
+            VALUES (?, ?, 'stopped', ?, ?, ?)
             "#,
         )
-        .bind(&id)
+        .bind(id)
         .bind(&name)
         .bind(&config_json)
         .bind(now)
+        .bind(microvm)
         .execute(&self.pool)
         .await?;
 
         Ok(VmEntry {
-            id,
+            id: id.to_string(),
             name,
             state: VmState::Stopped,
             config,
@@ -107,7 +111,22 @@ impl VmStore {
         }
     }
 
+    /// List regular VMs (excludes MicroVMs used for pods)
     pub async fn list(&self) -> Result<Vec<VmEntry>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, name, state, config_json, created_at, started_at
+            FROM vms WHERE microvm = FALSE ORDER BY created_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(row_to_entry).collect()
+    }
+
+    /// List all VMs including MicroVMs (for internal use like process recovery)
+    pub async fn list_all(&self) -> Result<Vec<VmEntry>> {
         let rows = sqlx::query(
             r#"
             SELECT id, name, state, config_json, created_at, started_at

@@ -69,34 +69,11 @@ in
       "virtio_blk"
     ];
 
-    # Reserve hugepages in stage 1 (before memory fragmentation)
+    # Reserve 48 GiB hugepages in stage 1 (before memory fragmentation)
     initrd.postDeviceCommands = ''
-      # Get total memory in kB
-      total_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-
-      # Option 1: Total minus 4 GiB (4194304 kB)
-      minus_4g_kb=$((total_kb - 4194304))
-
-      # Option 2: 95% of total
-      pct95_kb=$((total_kb * 95 / 100))
-
-      # Take the minimum of both (ensures at least 4 GiB free, but max 95%)
-      if [ $minus_4g_kb -lt $pct95_kb ]; then
-        hugepages_kb=$minus_4g_kb
-      else
-        hugepages_kb=$pct95_kb
-      fi
-
-      # Don't go negative
-      if [ $hugepages_kb -lt 0 ]; then
-        hugepages_kb=0
-      fi
-
-      # Each 2MB hugepage = 2048 kB
-      nr_hugepages=$((hugepages_kb / 2048))
-
-      echo "Reserving $nr_hugepages x 2MB hugepages for VMs"
-      echo $nr_hugepages > /proc/sys/vm/nr_hugepages
+      # 48 GiB = 24576 x 2MB hugepages
+      echo "Reserving 24576 x 2MB hugepages (48 GiB) for VMs"
+      echo 24576 > /proc/sys/vm/nr_hugepages
     '';
 
     # Kernel parameters for KVM

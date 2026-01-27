@@ -77,13 +77,22 @@ async fn create_vsock_channel(cid: u32, port: u32) -> Result<Channel> {
     Ok(channel)
 }
 
-/// Get the CID of a running VM process.
+/// Calculate CID from VM ID.
 ///
-/// The CID is calculated from the VM's PID: CID = PID + 3
-/// (CID 0, 1, 2 are reserved)
+/// The CID must be > 2 (0 = hypervisor, 1 = local, 2 = host are reserved).
+/// We use a hash of the VM ID to generate a unique CID.
+pub fn vm_id_to_cid(vm_id: &str) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    vm_id.hash(&mut hasher);
+    // CID must be > 2, and we limit to 32-bit range minus reserved values
+    let hash = hasher.finish();
+    ((hash % (u32::MAX as u64 - 3)) + 3) as u32
+}
+
+/// Get the CID of a running VM process (deprecated, use vm_id_to_cid instead).
+#[deprecated(note = "Use vm_id_to_cid instead")]
 pub fn pid_to_cid(pid: u32) -> u32 {
-    // cloud-hypervisor uses the VM's process ID + 3 as the CID
-    // CID 0 = hypervisor, 1 = local, 2 = host
     pid + 3
 }
 

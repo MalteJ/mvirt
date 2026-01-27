@@ -55,10 +55,6 @@ impl Hypervisor {
         self.vm_dir(vm_id).join("api.sock")
     }
 
-    fn serial_socket(&self, vm_id: &str) -> PathBuf {
-        self.vm_dir(vm_id).join("serial.sock")
-    }
-
     fn cloudinit_iso(&self, vm_id: &str) -> PathBuf {
         self.vm_dir(vm_id).join("cloudinit.iso")
     }
@@ -126,7 +122,6 @@ ethernets:
     pub async fn start(&self, vm_id: &str, vm_name: Option<&str>, config: &VmConfig) -> Result<()> {
         let vm_dir = self.vm_dir(vm_id);
         let api_socket = self.api_socket(vm_id);
-        let serial_socket = self.serial_socket(vm_id);
 
         debug!(vm_dir = %vm_dir.display(), "Creating VM directory");
 
@@ -138,10 +133,6 @@ ethernets:
             debug!(path = %api_socket.display(), "Removing stale API socket");
             let _ = tokio::fs::remove_file(&api_socket).await;
         }
-        if serial_socket.exists() {
-            debug!(path = %serial_socket.display(), "Removing stale serial socket");
-            let _ = tokio::fs::remove_file(&serial_socket).await;
-        }
 
         debug!(vm_dir = %vm_dir.display(), "VM directory created");
 
@@ -151,26 +142,30 @@ ethernets:
         cmd.arg("--api-socket")
             .arg(format!("path={}", api_socket.display()));
 
-        cmd.arg("--serial")
-            .arg(format!("socket={}", serial_socket.display()));
-
-        cmd.arg("--console").arg("off");
-
-        // Boot configuration based on boot_mode
-        match BootMode::try_from(config.boot_mode).unwrap_or(BootMode::Disk) {
+        // Boot configuration and serial output based on boot_mode
+        let serial_path = match BootMode::try_from(config.boot_mode).unwrap_or(BootMode::Disk) {
             BootMode::Disk | BootMode::Unspecified => {
-                // Disk boot: use rust-hypervisor-firmware (loaded as kernel with PVH entry)
+                // Disk boot: use rust-hypervisor-firmware + serial socket (bidirectional)
                 cmd.arg("--kernel").arg(self.firmware_path());
+                let serial_socket = vm_dir.join("serial.sock");
+                cmd.arg("--serial")
+                    .arg(format!("socket={}", serial_socket.display()));
+                serial_socket
             }
             BootMode::Kernel => {
-                // Kernel boot: use provided kernel
+                // Kernel boot: use provided kernel + serial file (read-only log)
                 if let Some(kernel) = &config.kernel {
                     cmd.arg("--kernel").arg(kernel);
                 } else {
                     return Err(anyhow!("Kernel boot mode requires kernel path"));
                 }
+                let console_log = vm_dir.join("console.log");
+                cmd.arg("--serial")
+                    .arg(format!("file={}", console_log.display()));
+                console_log
             }
-        }
+        };
+        cmd.arg("--console").arg("off");
 
         let cpus_arg = if config.nested_virt {
             format!("boot={},nested=on", config.vcpus)
@@ -272,13 +267,13 @@ ethernets:
             ));
         }
 
-        // Store runtime info
+        // Store runtime info with serial path (socket or log file depending on boot mode)
         self.store
             .set_runtime(
                 vm_id,
                 pid,
                 api_socket.to_str().unwrap(),
-                serial_socket.to_str().unwrap(),
+                serial_path.to_str().unwrap(),
             )
             .await?;
 
@@ -466,7 +461,7 @@ ethernets:
         drop(processes);
 
         // Check adopted VMs (running but no Child handle) by PID
-        if let Ok(vms) = self.store.list().await {
+        if let Ok(vms) = self.store.list_all().await {
             for vm in vms {
                 if vm.state != crate::proto::VmState::Running {
                     continue;
@@ -514,8 +509,13 @@ ethernets:
         Ok(())
     }
 
-    pub fn serial_socket_path(&self, vm_id: &str) -> PathBuf {
-        self.serial_socket(vm_id)
+    /// Get the console path (PTY) for the VM from runtime info
+    pub async fn console_path(&self, vm_id: &str) -> Option<PathBuf> {
+        if let Ok(Some(runtime)) = self.store.get_runtime(vm_id).await {
+            Some(PathBuf::from(runtime.serial_socket))
+        } else {
+            None
+        }
     }
 
     /// Check all "running" VMs on startup and clean up stale ones
@@ -524,7 +524,7 @@ ethernets:
 
         info!("Checking running VMs...");
 
-        let vms = self.store.list().await?;
+        let vms = self.store.list_all().await?;
         let running_vms: Vec<_> = vms
             .into_iter()
             .filter(|vm| {
@@ -550,10 +550,15 @@ ethernets:
                 false
             };
 
-            let serial_exists = self.serial_socket(&vm.id).exists();
             let api_exists = self.api_socket(&vm.id).exists();
+            // PTY path is stored in runtime, check if it exists and is accessible
+            let console_accessible = if let Some(ref rt) = runtime {
+                Path::new(&rt.serial_socket).exists()
+            } else {
+                false
+            };
 
-            if process_alive && serial_exists && api_exists {
+            if process_alive && console_accessible && api_exists {
                 info!(vm_id = %vm.id, pid = runtime.as_ref().map(|r| r.pid), "VM still running");
                 // Process is alive but we don't have the Child handle
                 // The watcher will track it by PID via runtime info
@@ -561,7 +566,7 @@ ethernets:
                 warn!(
                     vm_id = %vm.id,
                     process_alive = process_alive,
-                    serial_exists = serial_exists,
+                    console_accessible = console_accessible,
                     api_exists = api_exists,
                     "VM in inconsistent state, cleaning up"
                 );
