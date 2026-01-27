@@ -11,3 +11,6 @@ pub mod test_util;
 pub mod tun;
 pub mod vhost_user;
 pub mod virtqueue;
+
+// Re-export tonic for external tests that need matching versions
+pub use tonic;

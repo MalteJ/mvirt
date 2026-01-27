@@ -299,6 +299,9 @@ service PodService {
   // Container interaction
   rpc PodLogs(PodLogsRequest) returns (stream LogChunk);
   rpc PodExec(stream PodExecInput) returns (stream PodExecOutput);
+
+  // Network info (proxied to mvirt-one)
+  rpc GetPodNetworkInfo(GetPodNetworkInfoRequest) returns (PodNetworkInfo);
 }
 
 // ============================================
@@ -397,6 +400,35 @@ message StartPodRequest {
 message StopPodRequest {
   string id = 1;
   uint32 timeout_seconds = 2;        // Grace period before force kill (default: 10)
+}
+
+// Network Info (from mvirt-one inside the MicroVM)
+
+message GetPodNetworkInfoRequest {
+  string pod_id = 1;
+}
+
+message PodNetworkInfo {
+  repeated PodInterfaceInfo interfaces = 1;
+}
+
+message PodInterfaceInfo {
+  string name = 1;
+  string mac_address = 2;
+
+  // IPv4 configuration (from DHCPv4)
+  string ipv4_address = 3;       // e.g., "10.0.0.5"
+  string ipv4_netmask = 4;       // e.g., "255.255.255.0"
+  string ipv4_gateway = 5;       // e.g., "10.0.0.1"
+  repeated string ipv4_dns = 6;
+
+  // IPv6 configuration (from SLAAC/DHCPv6)
+  string ipv6_address = 7;       // e.g., "fd00::5"
+  string ipv6_gateway = 8;       // Router from RA
+  repeated string ipv6_dns = 9;
+
+  // DHCPv6 Prefix Delegation
+  string delegated_prefix = 10;  // e.g., "fd00:1234::/56"
 }
 
 // Container Logs

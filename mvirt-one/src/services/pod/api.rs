@@ -4,9 +4,10 @@ use super::Command;
 use crate::error::PodError;
 use crate::proto::{
     CreatePodRequest, DeletePodRequest, Empty, ExecInput, ExecOutput, GetPodRequest,
-    HealthResponse, ListPodsResponse, LogsRequest, LogsResponse, Pod, ShutdownRequest,
-    StartPodRequest, StopPodRequest, uos_service_server::UosService,
+    HealthResponse, InterfaceInfo, ListPodsResponse, LogsRequest, LogsResponse, NetworkInfo, Pod,
+    ShutdownRequest, StartPodRequest, StopPodRequest, uos_service_server::UosService,
 };
+use crate::utils::network;
 use log::info;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -254,5 +255,48 @@ impl UosService for PodApiHandler {
             running_pods,
             running_containers,
         }))
+    }
+
+    async fn get_network_info(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<NetworkInfo>, Status> {
+        info!("API: GetNetworkInfo");
+
+        let state = network::get_network_state().await;
+
+        let interfaces = state
+            .interfaces
+            .into_iter()
+            .map(|iface| InterfaceInfo {
+                name: iface.name,
+                mac_address: iface.mac_address,
+                ipv4_address: iface
+                    .ipv4_address
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
+                ipv4_netmask: iface
+                    .ipv4_netmask
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
+                ipv4_gateway: iface
+                    .ipv4_gateway
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
+                ipv4_dns: iface.ipv4_dns.iter().map(|a| a.to_string()).collect(),
+                ipv6_address: iface
+                    .ipv6_address
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
+                ipv6_gateway: iface
+                    .ipv6_gateway
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
+                ipv6_dns: iface.ipv6_dns.iter().map(|a| a.to_string()).collect(),
+                delegated_prefix: iface.delegated_prefix.unwrap_or_default(),
+            })
+            .collect();
+
+        Ok(Response::new(NetworkInfo { interfaces }))
     }
 }

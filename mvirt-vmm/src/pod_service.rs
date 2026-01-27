@@ -3,16 +3,17 @@
 use crate::hypervisor::Hypervisor;
 use crate::proto::{
     BootMode, Container, ContainerSpec, ContainerState, CreatePodRequest, DeletePodRequest,
-    DeletePodResponse, DiskConfig, GetPodRequest, ListPodsRequest, ListPodsResponse, LogChunk,
-    NicConfig, Pod, PodExecInput, PodExecOutput, PodLogsRequest, PodResources, PodState,
-    StartPodRequest, StopPodRequest, VmConfig, pod_service_server::PodService,
+    DeletePodResponse, DiskConfig, GetPodNetworkInfoRequest, GetPodRequest, ListPodsRequest,
+    ListPodsResponse, LogChunk, NicConfig, Pod, PodExecInput, PodExecOutput, PodInterfaceInfo,
+    PodLogsRequest, PodNetworkInfo, PodResources, PodState, StartPodRequest, StopPodRequest,
+    VmConfig, pod_service_server::PodService,
 };
 use crate::ready_listener::ReadySignalListener;
 use crate::store::VmStore;
 use crate::vsock_client::{UosClient, vm_id_to_cid, vsock_socket_path};
 use mvirt_log::AuditLogger;
 use mvirt_one::proto::{
-    ContainerSpec as OneContainerSpec, CreatePodRequest as OneCreatePodRequest,
+    ContainerSpec as OneContainerSpec, CreatePodRequest as OneCreatePodRequest, Empty as OneEmpty,
     StartPodRequest as OneStartPodRequest, StopPodRequest as OneStopPodRequest,
     uos_service_client::UosServiceClient,
 };
@@ -747,5 +748,62 @@ impl PodService for PodServiceImpl {
         _request: Request<Streaming<PodExecInput>>,
     ) -> Result<Response<Self::PodExecStream>, Status> {
         Err(Status::unimplemented("Pod exec not yet implemented"))
+    }
+
+    async fn get_pod_network_info(
+        &self,
+        request: Request<GetPodNetworkInfoRequest>,
+    ) -> Result<Response<PodNetworkInfo>, Status> {
+        let req = request.into_inner();
+        info!(pod_id = %req.pod_id, "Getting pod network info");
+
+        // Verify pod exists and is running
+        let pod_id = {
+            let pods = self.pods.read().await;
+            let pod = pods
+                .get(&req.pod_id)
+                .ok_or_else(|| Status::not_found(format!("Pod {} not found", req.pod_id)))?;
+
+            if pod.state != PodState::Running {
+                return Err(Status::failed_precondition("Pod is not running"));
+            }
+
+            pod.id.clone()
+        };
+
+        // Get the UOS client for this pod
+        let clients = self.uos_clients.read().await;
+        let uos_client = clients
+            .get(&pod_id)
+            .ok_or_else(|| Status::unavailable("No connection to pod"))?;
+
+        let mut uos = UosServiceClient::new(uos_client.channel());
+
+        // Call GetNetworkInfo on mvirt-one
+        let response = uos
+            .get_network_info(OneEmpty {})
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get network info: {}", e)))?
+            .into_inner();
+
+        // Convert mvirt-one NetworkInfo to mvirt-vmm PodNetworkInfo
+        let interfaces = response
+            .interfaces
+            .into_iter()
+            .map(|iface| PodInterfaceInfo {
+                name: iface.name,
+                mac_address: iface.mac_address,
+                ipv4_address: iface.ipv4_address,
+                ipv4_netmask: iface.ipv4_netmask,
+                ipv4_gateway: iface.ipv4_gateway,
+                ipv4_dns: iface.ipv4_dns,
+                ipv6_address: iface.ipv6_address,
+                ipv6_gateway: iface.ipv6_gateway,
+                ipv6_dns: iface.ipv6_dns,
+                delegated_prefix: iface.delegated_prefix,
+            })
+            .collect();
+
+        Ok(Response::new(PodNetworkInfo { interfaces }))
     }
 }

@@ -2,6 +2,7 @@
 //! Ported from pideisn.
 
 use crate::error::NetworkError;
+use netlink_packet_route::route::RouteScope;
 use rtnetlink::Handle;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -62,13 +63,32 @@ impl NetlinkHandle {
             .map_err(|e| NetworkError::NetlinkError(e.to_string()))
     }
 
+    /// Add an on-link route to a specific host (for link-local gateways).
+    pub async fn add_onlink_route_v4(
+        &self,
+        host: Ipv4Addr,
+        index: u32,
+    ) -> Result<(), NetworkError> {
+        self.handle
+            .route()
+            .add()
+            .v4()
+            .destination_prefix(host, 32)
+            .output_interface(index)
+            .scope(RouteScope::Link)
+            .execute()
+            .await
+            .map_err(|e| NetworkError::NetlinkError(e.to_string()))
+    }
+
     /// Add an IPv4 default route.
-    pub async fn add_route_v4(&self, gateway: Ipv4Addr, _index: u32) -> Result<(), NetworkError> {
+    pub async fn add_route_v4(&self, gateway: Ipv4Addr, index: u32) -> Result<(), NetworkError> {
         self.handle
             .route()
             .add()
             .v4()
             .gateway(gateway)
+            .output_interface(index)
             .execute()
             .await
             .map_err(|e| NetworkError::NetlinkError(e.to_string()))

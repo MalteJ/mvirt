@@ -16,8 +16,14 @@ const ICMPV6_ROUTER_ADVERTISEMENT: u8 = 134;
 // IPv6 multicast addresses
 const ALL_ROUTERS_MULTICAST: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2);
 
+/// SLAAC configuration result.
+#[derive(Debug, Clone, Default)]
+pub struct SlaacInfo {
+    pub gateway: Option<Ipv6Addr>,
+}
+
 /// Configure an interface using SLAAC.
-pub async fn configure(iface: &Interface, nl: &NetlinkHandle) -> Result<(), NetworkError> {
+pub async fn configure(iface: &Interface, nl: &NetlinkHandle) -> Result<SlaacInfo, NetworkError> {
     // Generate and configure link-local address
     let link_local = generate_link_local(&iface.mac);
     info!("SLAAC: Configuring link-local {}", link_local);
@@ -39,8 +45,11 @@ pub async fn configure(iface: &Interface, nl: &NetlinkHandle) -> Result<(), Netw
 
         match timeout(Duration::from_secs(2), receive_ra(&socket)).await {
             Ok(Ok(ra)) => {
+                let gateway = ra.router_addr;
                 process_router_advertisement(&ra, iface, nl).await?;
-                return Ok(());
+                return Ok(SlaacInfo {
+                    gateway: Some(gateway),
+                });
             }
             Ok(Err(e)) => {
                 debug!("SLAAC: Error receiving RA: {}", e);
@@ -53,7 +62,7 @@ pub async fn configure(iface: &Interface, nl: &NetlinkHandle) -> Result<(), Netw
 
     // No router found, but link-local is configured - that's okay
     info!("SLAAC: No router found, using link-local only");
-    Ok(())
+    Ok(SlaacInfo::default())
 }
 
 fn generate_link_local(mac: &[u8; 6]) -> Ipv6Addr {

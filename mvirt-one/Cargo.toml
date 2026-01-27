@@ -33,7 +33,7 @@ serde_json = "1"
 
 # Network (from pideisn)
 rtnetlink = "0.14"
-netlink-packet-route = "0.21"
+netlink-packet-route = "0.19"
 dhcproto = "0.14"
 socket2 = "0.5"
 

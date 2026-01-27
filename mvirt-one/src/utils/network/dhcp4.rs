@@ -30,10 +30,27 @@ pub async fn configure(iface: &Interface, nl: &NetlinkHandle) -> Result<Dhcp4Lea
 
     // Add default route if we have a gateway
     if let Some(gw) = lease.gateway {
+        // Check if gateway is on a different subnet (e.g., link-local gateway like 169.254.0.1)
+        // If so, add an on-link route to the gateway first
+        if !is_same_subnet(lease.address, gw, lease.netmask) {
+            debug!(
+                "Gateway {} not on same subnet as {}/{}, adding on-link route",
+                gw, lease.address, prefix_len
+            );
+            nl.add_onlink_route_v4(gw, iface.index).await?;
+        }
         nl.add_route_v4(gw, iface.index).await?;
     }
 
     Ok(lease)
+}
+
+/// Check if two addresses are on the same subnet
+fn is_same_subnet(addr1: Ipv4Addr, addr2: Ipv4Addr, netmask: Ipv4Addr) -> bool {
+    let mask = u32::from_be_bytes(netmask.octets());
+    let a1 = u32::from_be_bytes(addr1.octets());
+    let a2 = u32::from_be_bytes(addr2.octets());
+    (a1 & mask) == (a2 & mask)
 }
 
 fn netmask_to_prefix_len(netmask: Ipv4Addr) -> u8 {

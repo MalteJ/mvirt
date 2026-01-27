@@ -18,6 +18,7 @@ service UosService {
   // System
   rpc Shutdown(ShutdownRequest) returns (Empty);
   rpc Health(Empty) returns (HealthResponse);
+  rpc GetNetworkInfo(Empty) returns (NetworkInfo);
 }
 
 message Empty {}
@@ -165,4 +166,29 @@ message HealthResponse {
   string version = 2;
   uint32 running_pods = 3;
   uint32 running_containers = 4;
+}
+
+// NetworkInfo contains network configuration received via DHCP/NDP
+message NetworkInfo {
+  repeated InterfaceInfo interfaces = 1;
+}
+
+// InterfaceInfo contains network configuration for a single interface
+message InterfaceInfo {
+  string name = 1;
+  string mac_address = 2;
+
+  // IPv4 configuration (from DHCPv4)
+  string ipv4_address = 3;       // e.g., "10.0.0.5"
+  string ipv4_netmask = 4;       // e.g., "255.255.255.0"
+  string ipv4_gateway = 5;       // e.g., "10.0.0.1"
+  repeated string ipv4_dns = 6;
+
+  // IPv6 configuration (from SLAAC/DHCPv6)
+  string ipv6_address = 7;       // e.g., "fd00::5"
+  string ipv6_gateway = 8;       // Router from RA
+  repeated string ipv6_dns = 9;
+
+  // DHCPv6 Prefix Delegation
+  string delegated_prefix = 10;  // e.g., "fd00:1234::/56"
 }

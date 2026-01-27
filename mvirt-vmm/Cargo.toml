@@ -59,3 +59,8 @@ tower = "0.5"
 
 [build-dependencies]
 tonic-build = "0.12"
+
+[dev-dependencies]
+# E2E integration tests
+mvirt-net = { path = "../mvirt-net" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
