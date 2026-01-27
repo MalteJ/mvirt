@@ -27,5 +27,8 @@ pub mod test_util;
 pub use audit::{EbpfAuditLogger, create_audit_logger};
 pub use ebpf_loader::EbpfManager;
 pub use grpc::{EbpfNetServiceImpl, NetworkData, NicData, NicState, Storage};
-pub use proto_handler::{ProtocolHandler, process_packet_sync};
+pub use proto_handler::{
+    GATEWAY_IPV4_LINK_LOCAL, GATEWAY_IPV6_LINK_LOCAL, GATEWAY_MAC, ProtocolHandler,
+    process_packet_sync,
+};
 pub use tap::TapDevice;

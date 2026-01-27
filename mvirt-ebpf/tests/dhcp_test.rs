@@ -5,6 +5,7 @@
 //! These tests verify the packet processing logic directly without needing
 //! CAP_NET_ADMIN or actual TAP devices.
 
+use mvirt_ebpf::GATEWAY_IPV4_LINK_LOCAL;
 use mvirt_ebpf::process_packet_sync;
 use mvirt_ebpf::test_util::{
     DhcpMessageType, create_dhcp_discover, create_dhcp_request, parse_dhcp_response,
@@ -17,9 +18,6 @@ const TEST_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 
 /// Test IPv4 address for VM
 const TEST_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 100);
-
-/// Gateway IPv4 address (first usable in subnet)
-const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
 /// Test network subnet
 const SUBNET: &str = "10.0.0.0/24";
@@ -64,12 +62,12 @@ fn test_dhcp_discover_offer() {
     assert!(offer.subnet_mask.is_some(), "Missing subnet mask");
     assert!(offer.router.is_some(), "Missing router option");
 
-    // Verify router is the gateway
+    // Verify router is the link-local gateway (169.254.0.1)
     if let Some(router) = offer.router {
         assert_eq!(
             Ipv4Addr::from(router),
-            GATEWAY_IP,
-            "Router should be gateway"
+            GATEWAY_IPV4_LINK_LOCAL,
+            "Router should be link-local gateway"
         );
     }
 }
@@ -95,7 +93,7 @@ fn test_dhcp_full_handshake() {
     assert_eq!(Ipv4Addr::from(offer.your_ip), TEST_IP);
 
     // === DHCP REQUEST ===
-    let server_id = offer.router.unwrap_or(GATEWAY_IP.octets());
+    let server_id = offer.router.unwrap_or(GATEWAY_IPV4_LINK_LOCAL.octets());
     let request = create_dhcp_request(TEST_MAC, XID, offer.your_ip, server_id);
 
     let response =

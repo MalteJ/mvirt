@@ -179,6 +179,7 @@ pub fn validate_create_network(
 }
 
 /// Validate NIC creation request.
+#[allow(clippy::type_complexity)]
 pub fn validate_create_nic(
     mac_address: &str,
     ipv4_address: &str,

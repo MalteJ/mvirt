@@ -5,23 +5,35 @@ use dhcproto::v4::{
     Decodable, DhcpOption, Encodable, Message as DhcpMessage, MessageType as DhcpMessageType,
     Opcode,
 };
+use ipnet::Ipv4Net;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{
     ArpOperation, ArpPacket, ArpRepr, EthernetAddress, EthernetFrame, EthernetProtocol,
-    EthernetRepr, Icmpv6Message, Icmpv6Packet, Icmpv6Repr, IpAddress, IpProtocol, Ipv4Address,
-    Ipv4Packet, Ipv4Repr, Ipv6Address, Ipv6Packet, Ipv6Repr, NdiscNeighborFlags, NdiscRepr,
-    UdpPacket, UdpRepr,
+    EthernetRepr, Icmpv4Message, Icmpv4Packet, Icmpv4Repr, Icmpv6Message, Icmpv6Packet, Icmpv6Repr,
+    IpAddress, IpProtocol, Ipv4Address, Ipv4Packet, Ipv4Repr, Ipv6Address, Ipv6Packet, Ipv6Repr,
+    NdiscNeighborFlags, NdiscRepr, UdpPacket, UdpRepr,
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
+
+/// Fixed gateway MAC address (same as mvirt-net for consistency).
+/// Uses locally administered, unicast format.
+pub const GATEWAY_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+
+/// Link-local gateway IPv4 address (like AWS/GCP VPCs).
+/// VMs route all traffic via this gateway using classless static routes.
+pub const GATEWAY_IPV4_LINK_LOCAL: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 1);
+
+/// Link-local gateway IPv6 address.
+pub const GATEWAY_IPV6_LINK_LOCAL: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
 
 /// Protocol handler errors.
 #[derive(Debug, Error)]
@@ -347,7 +359,7 @@ fn process_packet(config: &NicConfig, packet: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Process ARP request.
-fn process_arp(config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<Vec<u8>> {
+fn process_arp(_config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<Vec<u8>> {
     let arp_packet = ArpPacket::new_checked(eth_frame.payload()).ok()?;
     let arp_repr = ArpRepr::parse(&arp_packet).ok()?;
 
@@ -360,25 +372,23 @@ fn process_arp(config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<V
         ..
     } = arp_repr
     {
-        // Check if they're asking for our gateway IP
-        let gateway_v4 = config.network.ipv4_gateway()?;
-        let gateway_addr = Ipv4Address::from_bytes(&gateway_v4.octets());
+        // Check if they're asking for the link-local gateway (169.254.0.1)
+        let gateway_addr = Ipv4Address::from_bytes(&GATEWAY_IPV4_LINK_LOCAL.octets());
         if target_protocol_addr != gateway_addr {
             return None;
         }
 
-        // Build ARP reply
-        let gateway_mac = gateway_mac_for_network(&config.network);
+        // Build ARP reply with fixed gateway MAC
         let arp_reply = ArpRepr::EthernetIpv4 {
             operation: ArpOperation::Reply,
-            source_hardware_addr: EthernetAddress(gateway_mac),
+            source_hardware_addr: EthernetAddress(GATEWAY_MAC),
             source_protocol_addr: target_protocol_addr,
             target_hardware_addr: source_hardware_addr,
             target_protocol_addr: source_protocol_addr,
         };
 
         let eth_reply = EthernetRepr {
-            src_addr: EthernetAddress(gateway_mac),
+            src_addr: EthernetAddress(GATEWAY_MAC),
             dst_addr: source_hardware_addr,
             ethertype: EthernetProtocol::Arp,
         };
@@ -392,7 +402,7 @@ fn process_arp(config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<V
         arp_reply.emit(&mut arp_packet);
 
         debug!(
-            gateway = %gateway_v4,
+            gateway = %GATEWAY_IPV4_LINK_LOCAL,
             requester = %source_protocol_addr,
             "ARP reply sent"
         );
@@ -402,24 +412,92 @@ fn process_arp(config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<V
     None
 }
 
-/// Process IPv4 packet (looking for DHCP).
+/// Process IPv4 packet (looking for DHCP and ICMP).
 fn process_ipv4(config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<Vec<u8>> {
     let ipv4_packet = Ipv4Packet::new_checked(eth_frame.payload()).ok()?;
 
-    if ipv4_packet.next_header() != IpProtocol::Udp {
-        return None;
-    }
+    match ipv4_packet.next_header() {
+        IpProtocol::Udp => {
+            let udp_packet = UdpPacket::new_checked(ipv4_packet.payload()).ok()?;
+            let src_port = udp_packet.src_port();
+            let dst_port = udp_packet.dst_port();
 
-    let udp_packet = UdpPacket::new_checked(ipv4_packet.payload()).ok()?;
-    let src_port = udp_packet.src_port();
-    let dst_port = udp_packet.dst_port();
-
-    // DHCP: client port 68, server port 67
-    if src_port == 68 && dst_port == 67 {
-        return process_dhcp(config, eth_frame, udp_packet.payload());
+            // DHCP: client port 68, server port 67
+            if src_port == 68 && dst_port == 67 {
+                return process_dhcp(config, eth_frame, udp_packet.payload());
+            }
+        }
+        IpProtocol::Icmp => {
+            // ICMP echo request handling
+            return process_icmp(eth_frame, &ipv4_packet);
+        }
+        _ => {}
     }
 
     None
+}
+
+/// Process ICMP echo requests to the gateway.
+fn process_icmp(
+    eth_frame: &EthernetFrame<&[u8]>,
+    ipv4_packet: &Ipv4Packet<&[u8]>,
+) -> Option<Vec<u8>> {
+    let icmp_packet = Icmpv4Packet::new_checked(ipv4_packet.payload()).ok()?;
+
+    // Only respond to echo requests
+    if icmp_packet.msg_type() != Icmpv4Message::EchoRequest {
+        return None;
+    }
+
+    // Only respond if destined for the gateway
+    let dst_ip = ipv4_packet.dst_addr();
+    let gateway_addr = Ipv4Address::from_bytes(&GATEWAY_IPV4_LINK_LOCAL.octets());
+    if dst_ip != gateway_addr {
+        return None;
+    }
+
+    // Build echo reply
+    let icmp_repr = Icmpv4Repr::EchoReply {
+        ident: icmp_packet.echo_ident(),
+        seq_no: icmp_packet.echo_seq_no(),
+        data: icmp_packet.data(),
+    };
+
+    // Build IP header (swap src/dst)
+    let ipv4_repr = Ipv4Repr {
+        src_addr: gateway_addr,
+        dst_addr: ipv4_packet.src_addr(),
+        next_header: IpProtocol::Icmp,
+        payload_len: icmp_repr.buffer_len(),
+        hop_limit: 64,
+    };
+
+    // Build Ethernet header
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress(GATEWAY_MAC),
+        dst_addr: eth_frame.src_addr(),
+        ethertype: EthernetProtocol::Ipv4,
+    };
+
+    // Serialize
+    let total_len = eth_repr.buffer_len() + ipv4_repr.buffer_len() + icmp_repr.buffer_len();
+    let mut buffer = vec![0u8; total_len];
+
+    let mut eth_out = EthernetFrame::new_unchecked(&mut buffer);
+    eth_repr.emit(&mut eth_out);
+
+    let mut ipv4_out = Ipv4Packet::new_unchecked(eth_out.payload_mut());
+    ipv4_repr.emit(&mut ipv4_out, &ChecksumCapabilities::default());
+
+    let mut icmp_out = Icmpv4Packet::new_unchecked(ipv4_out.payload_mut());
+    icmp_repr.emit(&mut icmp_out, &ChecksumCapabilities::default());
+
+    debug!(
+        src = %ipv4_packet.src_addr(),
+        "ICMP echo reply to gateway"
+    );
+
+    Some(buffer)
 }
 
 /// Process DHCP message.
@@ -449,7 +527,6 @@ fn process_dhcp(
     }
 
     let assigned_ip = config.nic.ipv4_address?;
-    let gateway_ip = config.network.ipv4_gateway()?;
     let subnet = config.network.ipv4_subnet?;
     let subnet_mask = Ipv4Addr::from(
         0xFFFFFFFFu32
@@ -464,11 +541,12 @@ fn process_dhcp(
     };
 
     // Build DHCP response
+    // Use link-local gateway (169.254.0.1) like AWS/GCP VPCs
     let mut reply = DhcpMessage::default();
     reply.set_opcode(Opcode::BootReply);
     reply.set_xid(dhcp_msg.xid());
     reply.set_yiaddr(assigned_ip);
-    reply.set_siaddr(gateway_ip);
+    reply.set_siaddr(GATEWAY_IPV4_LINK_LOCAL);
     reply.set_chaddr(client_mac);
     reply.set_flags(dhcp_msg.flags());
 
@@ -477,12 +555,26 @@ fn process_dhcp(
         .insert(DhcpOption::MessageType(response_type));
     reply
         .opts_mut()
-        .insert(DhcpOption::ServerIdentifier(gateway_ip));
+        .insert(DhcpOption::ServerIdentifier(GATEWAY_IPV4_LINK_LOCAL));
     reply.opts_mut().insert(DhcpOption::SubnetMask(subnet_mask));
     reply
         .opts_mut()
-        .insert(DhcpOption::Router(vec![gateway_ip]));
+        .insert(DhcpOption::Router(vec![GATEWAY_IPV4_LINK_LOCAL]));
     reply.opts_mut().insert(DhcpOption::AddressLeaseTime(86400)); // 24 hours
+
+    // Classless Static Routes (Option 121) - RFC 3442
+    // This is required for the link-local gateway to work properly:
+    // 1. Gateway route: 169.254.0.1/32 via on-link (0.0.0.0)
+    // 2. Default route: 0.0.0.0/0 via 169.254.0.1
+    let gateway_net = Ipv4Net::new(GATEWAY_IPV4_LINK_LOCAL, 32).unwrap();
+    let default_net = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();
+    let routes = vec![
+        (gateway_net, Ipv4Addr::UNSPECIFIED),   // 169.254.0.1/32 on-link
+        (default_net, GATEWAY_IPV4_LINK_LOCAL), // 0.0.0.0/0 via gateway
+    ];
+    reply
+        .opts_mut()
+        .insert(DhcpOption::ClasslessStaticRoute(routes));
 
     // Add DNS servers
     let dns_v4: Vec<Ipv4Addr> = config
@@ -506,7 +598,6 @@ fn process_dhcp(
     reply.encode(&mut encoder).ok()?;
 
     // Build UDP
-    let gateway_mac = gateway_mac_for_network(&config.network);
     let udp_repr = UdpRepr {
         src_port: 67,
         dst_port: 68,
@@ -524,7 +615,7 @@ fn process_dhcp(
         )
     };
 
-    let src_ip = Ipv4Address::from_bytes(&gateway_ip.octets());
+    let src_ip = Ipv4Address::from_bytes(&GATEWAY_IPV4_LINK_LOCAL.octets());
 
     let ipv4_repr = Ipv4Repr {
         src_addr: src_ip,
@@ -535,7 +626,7 @@ fn process_dhcp(
     };
 
     let eth_repr = EthernetRepr {
-        src_addr: EthernetAddress(gateway_mac),
+        src_addr: EthernetAddress(GATEWAY_MAC),
         dst_addr: dst_mac,
         ethertype: EthernetProtocol::Ipv4,
     };
@@ -596,7 +687,7 @@ fn process_ipv6(config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<
 
 /// Process NDP Neighbor Solicitation.
 fn process_neighbor_solicitation(
-    config: &NicConfig,
+    _config: &NicConfig,
     eth_frame: &EthernetFrame<&[u8]>,
     ipv6_packet: &Ipv6Packet<&[u8]>,
     icmpv6_packet: &Icmpv6Packet<&[u8]>,
@@ -608,23 +699,21 @@ fn process_neighbor_solicitation(
         lladdr: _,
     } = ndisc_repr
     {
-        // Check if they're asking for our gateway IP
-        let gateway_v6 = config.network.ipv6_gateway()?;
-        let gateway_addr = Ipv6Address::from_bytes(&gateway_v6.octets());
+        // Check if they're asking for the link-local gateway (fe80::1)
+        let gateway_addr = Ipv6Address::from_bytes(&GATEWAY_IPV6_LINK_LOCAL.octets());
         if target_addr != gateway_addr {
             return None;
         }
 
-        let gateway_mac = gateway_mac_for_network(&config.network);
         let src_addr = ipv6_packet.src_addr();
 
-        // Build Neighbor Advertisement
+        // Build Neighbor Advertisement with fixed gateway MAC
         let ndisc_reply = NdiscRepr::NeighborAdvert {
             flags: NdiscNeighborFlags::ROUTER
                 | NdiscNeighborFlags::SOLICITED
                 | NdiscNeighborFlags::OVERRIDE,
             target_addr,
-            lladdr: Some(EthernetAddress(gateway_mac).into()),
+            lladdr: Some(EthernetAddress(GATEWAY_MAC).into()),
         };
 
         let icmpv6_repr = Icmpv6Repr::Ndisc(ndisc_reply);
@@ -638,7 +727,7 @@ fn process_neighbor_solicitation(
         };
 
         let eth_repr = EthernetRepr {
-            src_addr: EthernetAddress(gateway_mac),
+            src_addr: EthernetAddress(GATEWAY_MAC),
             dst_addr: eth_frame.src_addr(),
             ethertype: EthernetProtocol::Ipv6,
         };
@@ -662,7 +751,7 @@ fn process_neighbor_solicitation(
         );
 
         debug!(
-            gateway = %gateway_v6,
+            gateway = %GATEWAY_IPV6_LINK_LOCAL,
             requester = %src_addr,
             "NDP Neighbor Advertisement sent"
         );
@@ -675,8 +764,6 @@ fn process_neighbor_solicitation(
 /// Process Router Solicitation (simplified - just sends RA with prefix info).
 fn process_router_solicitation(config: &NicConfig) -> Option<Vec<u8>> {
     let prefix = config.network.ipv6_prefix?;
-    let _gateway_v6 = config.network.ipv6_gateway()?;
-    let _gateway_mac = gateway_mac_for_network(&config.network);
 
     // For now, we don't send full RA - the VM should get IPv6 via SLAAC
     // based on the prefix. This is a simplified implementation.
@@ -686,17 +773,4 @@ fn process_router_solicitation(config: &NicConfig) -> Option<Vec<u8>> {
     );
 
     None
-}
-
-/// Generate a deterministic gateway MAC for a network.
-/// Uses the first 3 bytes of the network ID UUID with local admin bit set.
-fn gateway_mac_for_network(network: &NetworkData) -> [u8; 6] {
-    let id_bytes = network.id.as_bytes();
-    let mut mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01]; // Local admin, unicast
-    mac[1] = id_bytes[0];
-    mac[2] = id_bytes[1];
-    mac[3] = id_bytes[2];
-    mac[4] = id_bytes[3];
-    mac[5] = id_bytes[4];
-    mac
 }

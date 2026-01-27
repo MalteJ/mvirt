@@ -9,7 +9,7 @@ use super::validation::{
 };
 use crate::audit::EbpfAuditLogger;
 use crate::ebpf_loader::{ACTION_REDIRECT, EbpfManager, RouteEntry};
-use crate::proto_handler::ProtocolHandler;
+use crate::proto_handler::{GATEWAY_MAC, ProtocolHandler};
 use crate::tap::{TapDevice, delete_tap_interface, tap_name_from_nic_id};
 use chrono::Utc;
 use std::collections::HashMap;
@@ -172,12 +172,8 @@ impl EbpfNetServiceImpl {
         // Add routes to eBPF maps
         if let Some(ipv4) = nic.ipv4_address {
             // Route to this NIC for its assigned IP
-            let route = RouteEntry::new(
-                ACTION_REDIRECT,
-                tap.if_index,
-                nic.mac_address,
-                gateway_mac_for_network(network),
-            );
+            let route =
+                RouteEntry::new(ACTION_REDIRECT, tap.if_index, nic.mac_address, GATEWAY_MAC);
             self.ebpf
                 .add_egress_route_v4(ipv4, 32, route)
                 .await
@@ -185,12 +181,8 @@ impl EbpfNetServiceImpl {
         }
 
         if let Some(ipv6) = nic.ipv6_address {
-            let route = RouteEntry::new(
-                ACTION_REDIRECT,
-                tap.if_index,
-                nic.mac_address,
-                gateway_mac_for_network(network),
-            );
+            let route =
+                RouteEntry::new(ACTION_REDIRECT, tap.if_index, nic.mac_address, GATEWAY_MAC);
             self.ebpf
                 .add_egress_route_v6(ipv6, 128, route)
                 .await
@@ -730,16 +722,4 @@ impl NetService for EbpfNetServiceImpl {
 
         Ok(Response::new(DeleteNicResponse { deleted }))
     }
-}
-
-/// Generate a deterministic gateway MAC for a network.
-fn gateway_mac_for_network(network: &NetworkData) -> [u8; 6] {
-    let id_bytes = network.id.as_bytes();
-    let mut mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
-    mac[1] = id_bytes[0];
-    mac[2] = id_bytes[1];
-    mac[3] = id_bytes[2];
-    mac[4] = id_bytes[3];
-    mac[5] = id_bytes[4];
-    mac
 }

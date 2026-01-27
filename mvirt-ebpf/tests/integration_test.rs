@@ -13,7 +13,7 @@ use mvirt_ebpf::test_util::{
     TapTestDevice, create_arp_request, create_dhcp_discover, create_icmp_echo_request,
     test_network_config, test_nic_config,
 };
-use mvirt_ebpf::{ProtocolHandler, Storage};
+use mvirt_ebpf::{GATEWAY_IPV4_LINK_LOCAL, GATEWAY_MAC, ProtocolHandler, Storage};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,24 +27,8 @@ const VM_A_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 100);
 const VM_B_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0xbb, 0xbb, 0x02];
 const VM_B_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 101);
 
-/// Gateway IPv4 address
-const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
-
 /// Test network subnet
 const SUBNET: &str = "10.0.0.0/24";
-
-/// Deterministic gateway MAC for test network.
-fn expected_gateway_mac(network_id: &Uuid) -> [u8; 6] {
-    let id_bytes = network_id.as_bytes();
-    [
-        0x02,
-        id_bytes[0],
-        id_bytes[1],
-        id_bytes[2],
-        id_bytes[3],
-        id_bytes[4],
-    ]
-}
 
 /// Integration test: TAP device creation and basic operations.
 #[tokio::test]
@@ -184,8 +168,6 @@ async fn test_packet_sending_no_crash() {
         .create_network(&network)
         .expect("Failed to create network");
 
-    let gateway_mac = expected_gateway_mac(&network.id);
-
     let mut nic = test_nic_config(VM_A_MAC, VM_A_IP, network.id);
     nic.tap_name = tap_name.clone();
 
@@ -202,7 +184,7 @@ async fn test_packet_sending_no_crash() {
     let _ = tap.drain();
 
     // Send various packet types - handler should process without crashing
-    let arp = create_arp_request(VM_A_MAC, VM_A_IP.octets(), GATEWAY_IP.octets());
+    let arp = create_arp_request(VM_A_MAC, VM_A_IP.octets(), GATEWAY_IPV4_LINK_LOCAL.octets());
     tap.send_packet(&arp).expect("Send ARP");
 
     let dhcp = create_dhcp_discover(VM_A_MAC, 0x12345678);
@@ -210,9 +192,9 @@ async fn test_packet_sending_no_crash() {
 
     let ping = create_icmp_echo_request(
         VM_A_MAC,
-        gateway_mac,
+        GATEWAY_MAC,
         VM_A_IP.octets(),
-        GATEWAY_IP.octets(),
+        GATEWAY_IPV4_LINK_LOCAL.octets(),
         1,
         1,
     );
@@ -248,8 +230,6 @@ async fn test_vm_to_vm_packet_no_crash() {
         .create_network(&network)
         .expect("Failed to create network");
 
-    let gateway_mac = expected_gateway_mac(&network.id);
-
     let mut nic_a = test_nic_config(VM_A_MAC, VM_A_IP, network.id);
     nic_a.tap_name = tap_name_a.clone();
 
@@ -277,7 +257,7 @@ async fn test_vm_to_vm_packet_no_crash() {
     for seq in 1..=5 {
         let ping = create_icmp_echo_request(
             VM_A_MAC,
-            gateway_mac,
+            GATEWAY_MAC,
             VM_A_IP.octets(),
             VM_B_IP.octets(),
             1234,
@@ -336,7 +316,7 @@ async fn test_dynamic_nic_lifecycle() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send some packets
-    let arp = create_arp_request(VM_A_MAC, VM_A_IP.octets(), GATEWAY_IP.octets());
+    let arp = create_arp_request(VM_A_MAC, VM_A_IP.octets(), GATEWAY_IPV4_LINK_LOCAL.octets());
     tap.send_packet(&arp).expect("Send ARP");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -353,7 +333,7 @@ async fn test_dynamic_nic_lifecycle() {
         .await;
 
     // Send packet with new config
-    let arp2 = create_arp_request(VM_A_MAC, [10, 0, 0, 200], GATEWAY_IP.octets());
+    let arp2 = create_arp_request(VM_A_MAC, [10, 0, 0, 200], GATEWAY_IPV4_LINK_LOCAL.octets());
     tap.send_packet(&arp2).expect("Send ARP 2");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -379,8 +359,6 @@ async fn test_packet_flood_no_crash() {
         .create_network(&network)
         .expect("Failed to create network");
 
-    let gateway_mac = expected_gateway_mac(&network.id);
-
     let mut nic = test_nic_config(VM_A_MAC, VM_A_IP, network.id);
     nic.tap_name = tap_name.clone();
 
@@ -400,9 +378,9 @@ async fn test_packet_flood_no_crash() {
     for i in 0..100 {
         let ping = create_icmp_echo_request(
             VM_A_MAC,
-            gateway_mac,
+            GATEWAY_MAC,
             VM_A_IP.octets(),
-            GATEWAY_IP.octets(),
+            GATEWAY_IPV4_LINK_LOCAL.octets(),
             1234,
             i,
         );
@@ -416,9 +394,9 @@ async fn test_packet_flood_no_crash() {
     handler.unregister_nic(tap.if_index()).await;
 }
 
-/// Integration test: Different networks are isolated.
+/// Integration test: Both networks use same link-local gateway.
 #[tokio::test]
-async fn test_network_isolation_tap() {
+async fn test_networks_same_gateway_tap() {
     let tap_name_1 = format!("tap_net1_{}", &Uuid::new_v4().to_string()[..8]);
     let tap_name_2 = format!("tap_net2_{}", &Uuid::new_v4().to_string()[..8]);
 
@@ -467,19 +445,16 @@ async fn test_network_isolation_tap() {
     let _ = tap_1.drain();
     let _ = tap_2.drain();
 
-    // Send packets on both networks
-    let gateway1 = Ipv4Addr::new(10, 0, 1, 1);
-    let gateway2 = Ipv4Addr::new(10, 0, 2, 1);
-
-    let arp_1 = create_arp_request(VM_A_MAC, [10, 0, 1, 100], gateway1.octets());
-    let arp_2 = create_arp_request(VM_B_MAC, [10, 0, 2, 100], gateway2.octets());
+    // Both networks use the same link-local gateway
+    let arp_1 = create_arp_request(VM_A_MAC, [10, 0, 1, 100], GATEWAY_IPV4_LINK_LOCAL.octets());
+    let arp_2 = create_arp_request(VM_B_MAC, [10, 0, 2, 100], GATEWAY_IPV4_LINK_LOCAL.octets());
 
     tap_1.send_packet(&arp_1).expect("Send ARP 1");
     tap_2.send_packet(&arp_2).expect("Send ARP 2");
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Test passes if no crash with isolated networks
+    // Test passes if no crash
     handler.unregister_nic(tap_1.if_index()).await;
     handler.unregister_nic(tap_2.if_index()).await;
 }
