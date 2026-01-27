@@ -25,7 +25,7 @@ in {
 
     firmware = mkOption {
       type = types.package;
-      description = "The hypervisor firmware package to use";
+      description = "The UEFI firmware package (EDK2 CLOUDHV.fd) for VM boot";
     };
 
     dataDir = mkOption {
@@ -162,7 +162,7 @@ in {
       environment = {
         MVIRT_DATA_DIR = cfg.dataDir;
         MVIRT_LOG_ENDPOINT = "http://[::1]:${toString cfg.log.port}";
-        HYPERVISOR_FW = "${cfg.firmware}/share/firmware/hypervisor-fw";
+        HYPERVISOR_FW = "${cfg.firmware}/share/firmware/CLOUDHV.fd";
       };
 
       serviceConfig = {

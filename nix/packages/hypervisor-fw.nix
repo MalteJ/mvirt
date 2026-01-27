@@ -5,8 +5,8 @@ let
   # rust-hypervisor-firmware version
   hypervisorFwVersion = "0.4.2";
 
-  # EDK2 version (from cloud-hypervisor releases)
-  edk2Version = "50.0";
+  # EDK2 version (from cloud-hypervisor/edk2 releases)
+  edk2Version = "a54f262b09";
 
 in {
   # rust-hypervisor-firmware - lightweight UEFI firmware
@@ -45,8 +45,8 @@ in {
     version = edk2Version;
 
     src = pkgs.fetchurl {
-      url = "https://github.com/cloud-hypervisor/edk2/releases/download/ch-v${edk2Version}/CLOUDHV.fd";
-      sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";  # Update on first build
+      url = "https://github.com/cloud-hypervisor/edk2/releases/download/ch-${edk2Version}/CLOUDHV.fd";
+      sha256 = "121z2abiwr6vqjww0x1b2q1747yrc2d3krhbp28iy1wi8si2fk3v";
     };
 
     dontUnpack = true;

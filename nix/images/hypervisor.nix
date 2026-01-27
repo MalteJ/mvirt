@@ -208,7 +208,7 @@ in
     enable = true;
     package = mvirtPkgs.mvirt;
     cloudHypervisor = mvirtPkgs.cloud-hypervisor;
-    firmware = mvirtPkgs.hypervisor-fw;
+    firmware = mvirtPkgs.edk2-cloudhv;
 
     vmm.enable = true;
     log.enable = true;
