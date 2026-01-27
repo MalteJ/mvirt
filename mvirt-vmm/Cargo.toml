@@ -54,7 +54,7 @@ nix = { version = "0.29", features = ["signal", "process"] }
 sysinfo = "0.32"
 
 # vsock for Pod communication
-tokio-vsock = "0.5"
+tokio-vsock = "0.5"  # For listening to guest ready signals
 tower = "0.5"
 
 [build-dependencies]

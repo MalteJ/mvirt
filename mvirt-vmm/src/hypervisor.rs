@@ -51,6 +51,11 @@ impl Hypervisor {
         self.data_dir.join("vm").join(vm_id)
     }
 
+    /// Get the data directory.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     fn api_socket(&self, vm_id: &str) -> PathBuf {
         self.vm_dir(vm_id).join("api.sock")
     }
@@ -119,13 +124,28 @@ ethernets:
         Ok(iso_path)
     }
 
-    pub async fn start(&self, vm_id: &str, vm_name: Option<&str>, config: &VmConfig) -> Result<()> {
+    /// Prepare the VM directory (create if needed).
+    ///
+    /// Call this before creating the ready signal listener so the socket
+    /// path exists before the VM starts.
+    pub async fn prepare_vm_dir(&self, vm_id: &str) -> Result<()> {
+        let vm_dir = self.vm_dir(vm_id);
+        debug!(vm_dir = %vm_dir.display(), "Creating VM directory");
+        tokio::fs::create_dir_all(&vm_dir).await?;
+        Ok(())
+    }
+
+    pub async fn start(
+        &self,
+        vm_id: &str,
+        vm_name: Option<&str>,
+        config: &VmConfig,
+        vsock_cid: Option<u32>,
+    ) -> Result<()> {
         let vm_dir = self.vm_dir(vm_id);
         let api_socket = self.api_socket(vm_id);
 
-        debug!(vm_dir = %vm_dir.display(), "Creating VM directory");
-
-        // Create VM directory
+        // Ensure VM directory exists (may have been created by prepare_vm_dir)
         tokio::fs::create_dir_all(&vm_dir).await?;
 
         // Clean up any stale socket files from previous runs
@@ -236,6 +256,14 @@ ethernets:
                 cmd.arg("--net").arg(net_arg);
                 info!(vm_id = %vm_id, socket = %socket, "Using vhost-user network");
             }
+        }
+
+        // Add vsock device for MicroVMs (host<->guest communication)
+        if let Some(cid) = vsock_cid {
+            let vsock_socket = vm_dir.join("vsock.sock");
+            cmd.arg("--vsock")
+                .arg(format!("cid={},socket={}", cid, vsock_socket.display()));
+            info!(vm_id = %vm_id, cid = cid, "Enabling vsock");
         }
 
         info!(vm_id = %vm_id, cmd = ?cmd.as_std(), "Spawning cloud-hypervisor");

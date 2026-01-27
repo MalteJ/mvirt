@@ -1,11 +1,17 @@
 //! vsock client for communicating with uos in MicroVMs.
-
-#![allow(dead_code)]
+//!
+//! Cloud-hypervisor exposes vsock via a Unix socket proxy. To connect:
+//! 1. Connect to the vsock.sock Unix socket
+//! 2. Send "CONNECT <port>\n"
+//! 3. Receive "OK <cid>\n"
+//! 4. Stream is now connected to the guest's vsock port
 
 use anyhow::{Result, anyhow};
 use hyper_util::rt::TokioIo;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio_vsock::{VsockAddr, VsockStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 use tracing::{debug, info, warn};
@@ -15,65 +21,79 @@ const UOS_VSOCK_PORT: u32 = 1024;
 
 /// Client for communicating with uos running inside a MicroVM.
 pub struct UosClient {
-    cid: u32,
     channel: Channel,
 }
 
 impl UosClient {
-    /// Connect to uos in a MicroVM via vsock.
-    pub async fn connect(cid: u32) -> Result<Self> {
-        info!(cid = cid, "Connecting to uos via vsock");
+    /// Connect to uos in a MicroVM via vsock Unix socket proxy.
+    pub async fn connect(vsock_socket: &Path) -> Result<Self> {
+        info!(socket = %vsock_socket.display(), "Connecting to uos via vsock");
 
-        // Create a channel that uses vsock transport
-        let channel = create_vsock_channel(cid, UOS_VSOCK_PORT).await?;
+        let channel = create_vsock_channel(vsock_socket, UOS_VSOCK_PORT).await?;
 
-        Ok(Self { cid, channel })
+        Ok(Self { channel })
     }
 
     /// Get the underlying gRPC channel.
     pub fn channel(&self) -> Channel {
         self.channel.clone()
     }
+}
 
-    /// Get the CID of the connected VM.
-    pub fn cid(&self) -> u32 {
-        self.cid
+/// Perform the vsock CONNECT handshake over a Unix stream.
+async fn vsock_connect_handshake(stream: &mut UnixStream, port: u32) -> Result<()> {
+    // Send CONNECT command
+    let connect_cmd = format!("CONNECT {}\n", port);
+    stream.write_all(connect_cmd.as_bytes()).await?;
+
+    // Read response
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).await?;
+
+    if response.starts_with("OK") {
+        debug!(response = %response.trim(), "vsock handshake successful");
+        Ok(())
+    } else {
+        Err(anyhow!("vsock handshake failed: {}", response.trim()))
     }
 }
 
-/// Create a tonic channel over vsock.
-async fn create_vsock_channel(cid: u32, port: u32) -> Result<Channel> {
-    // Use a dummy URI - the actual connection is made via vsock
+/// Create a tonic channel over vsock Unix socket proxy.
+async fn create_vsock_channel(vsock_socket: &Path, port: u32) -> Result<Channel> {
+    // Use a dummy URI - the actual connection is made via Unix socket
     let uri = Uri::builder()
         .scheme("http")
-        .authority(format!("vsock-{}:{}", cid, port))
+        .authority("vsock.local")
         .path_and_query("/")
         .build()
         .map_err(|e| anyhow!("Failed to build URI: {}", e))?;
 
-    let endpoint = Endpoint::from(uri).connect_timeout(std::time::Duration::from_secs(5));
+    let endpoint = Endpoint::from(uri).connect_timeout(Duration::from_secs(5));
 
-    // Create channel with custom connector that uses vsock
-    let cid_clone = cid;
-    let port_clone = port;
+    let socket_path = vsock_socket.to_path_buf();
     let channel = endpoint
         .connect_with_connector(service_fn(move |_: Uri| {
-            let cid = cid_clone;
-            let port = port_clone;
+            let socket_path = socket_path.clone();
             async move {
-                debug!(cid = cid, port = port, "Creating vsock connection");
-                let addr = VsockAddr::new(cid, port);
-                let stream = VsockStream::connect(addr)
+                debug!(socket = %socket_path.display(), port = port, "Connecting to vsock socket");
+
+                // Connect to Unix socket
+                let mut stream = UnixStream::connect(&socket_path).await?;
+
+                // Perform vsock CONNECT handshake
+                vsock_connect_handshake(&mut stream, port)
                     .await
-                    .map_err(|e| std::io::Error::other(format!("vsock connect failed: {}", e)))?;
-                // Wrap with TokioIo to implement hyper's Read/Write traits
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                // Wrap with TokioIo for hyper compatibility
                 Ok::<_, std::io::Error>(TokioIo::new(stream))
             }
         }))
         .await
         .map_err(|e| anyhow!("Failed to connect via vsock: {}", e))?;
 
-    info!(cid = cid, port = port, "Connected to uos via vsock");
+    info!(socket = %vsock_socket.display(), port = port, "Connected to uos via vsock");
     Ok(channel)
 }
 
@@ -90,51 +110,50 @@ pub fn vm_id_to_cid(vm_id: &str) -> u32 {
     ((hash % (u32::MAX as u64 - 3)) + 3) as u32
 }
 
-/// Get the CID of a running VM process (deprecated, use vm_id_to_cid instead).
-#[deprecated(note = "Use vm_id_to_cid instead")]
-pub fn pid_to_cid(pid: u32) -> u32 {
-    pid + 3
+/// Get the vsock socket path for a VM.
+pub fn vsock_socket_path(data_dir: &Path, vm_id: &str) -> PathBuf {
+    data_dir.join("vm").join(vm_id).join("vsock.sock")
 }
 
 /// Wait for uos to become available on a MicroVM via vsock.
 ///
 /// This function retries the connection until the timeout is reached.
 /// Use this after starting a MicroVM to wait for the guest to boot.
-pub async fn wait_for_uos(cid: u32, timeout: Duration) -> Result<UosClient> {
+pub async fn wait_for_uos(vsock_socket: &Path, timeout: Duration) -> Result<UosClient> {
     let start = Instant::now();
     let retry_interval = Duration::from_millis(200);
 
     info!(
-        cid = cid,
+        socket = %vsock_socket.display(),
         timeout_secs = timeout.as_secs(),
         "Waiting for uos"
     );
 
     while start.elapsed() < timeout {
-        match UosClient::connect(cid).await {
+        match UosClient::connect(vsock_socket).await {
             Ok(client) => {
                 info!(
-                    cid = cid,
+                    socket = %vsock_socket.display(),
                     elapsed_ms = start.elapsed().as_millis(),
                     "Connected to uos"
                 );
                 return Ok(client);
             }
             Err(e) => {
-                debug!(cid = cid, error = %e, "uos not ready yet, retrying...");
+                debug!(socket = %vsock_socket.display(), error = %e, "uos not ready yet, retrying...");
                 tokio::time::sleep(retry_interval).await;
             }
         }
     }
 
     warn!(
-        cid = cid,
+        socket = %vsock_socket.display(),
         timeout_secs = timeout.as_secs(),
         "Timeout waiting for uos"
     );
     Err(anyhow!(
-        "Timeout waiting for uos on CID {} after {:?}",
-        cid,
+        "Timeout waiting for uos on {} after {:?}",
+        vsock_socket.display(),
         timeout
     ))
 }

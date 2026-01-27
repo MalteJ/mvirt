@@ -226,10 +226,10 @@ impl VmService for VmServiceImpl {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Start the VM via hypervisor
+        // Start the VM via hypervisor (normal VMs don't use vsock)
         if let Err(e) = self
             .hypervisor
-            .start(&req.id, entry.name.as_deref(), &entry.config)
+            .start(&req.id, entry.name.as_deref(), &entry.config, None)
             .await
         {
             // Revert state on failure

@@ -7,10 +7,15 @@ use crate::proto::{
     NicConfig, Pod, PodExecInput, PodExecOutput, PodLogsRequest, PodResources, PodState,
     StartPodRequest, StopPodRequest, VmConfig, pod_service_server::PodService,
 };
+use crate::ready_listener::ReadySignalListener;
 use crate::store::VmStore;
-use crate::vsock_client::UosClient;
+use crate::vsock_client::{UosClient, vm_id_to_cid, vsock_socket_path};
 use mvirt_log::AuditLogger;
-use mvirt_one::proto::{StopPodRequest as OneStopPodRequest, uos_service_client::UosServiceClient};
+use mvirt_one::proto::{
+    ContainerSpec as OneContainerSpec, CreatePodRequest as OneCreatePodRequest,
+    StartPodRequest as OneStartPodRequest, StopPodRequest as OneStopPodRequest,
+    uos_service_client::UosServiceClient,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +37,8 @@ const UOS_DISK_CMDLINE: &str = "console=ttyS0 quiet root=/dev/vda rw init=/init"
 const POD_DEFAULT_MEMORY_MB: u64 = 256;
 /// Default vCPUs for pod MicroVMs.
 const POD_DEFAULT_VCPUS: u32 = 1;
+/// Timeout for waiting for mvirt-one to boot.
+const UOS_BOOT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Internal pod data stored by the service.
 #[derive(Debug, Clone)]
@@ -437,17 +444,56 @@ impl PodService for PodServiceImpl {
 
         let vm_id = vm_entry.id.clone();
 
+        // Calculate vsock CID for this pod
+        let cid = vm_id_to_cid(&pod_id);
+        info!(pod_id = %pod_id, cid = cid, "Calculated vsock CID");
+
+        // Get vsock socket path for this VM
+        let vsock_socket = vsock_socket_path(self.hypervisor.data_dir(), &pod_id);
+
+        // Prepare VM directory before creating the ready listener
+        if let Err(e) = self.hypervisor.prepare_vm_dir(&pod_id).await {
+            error!(pod_id = %pod_id, error = %e, "Failed to prepare VM directory");
+            let mut pods = self.pods.write().await;
+            if let Some(pod) = pods.get_mut(&pod_id) {
+                pod.state = PodState::Failed;
+                pod.error_message = Some(format!("Failed to prepare VM directory: {}", e));
+            }
+            return Err(Status::internal(format!(
+                "Failed to prepare VM directory: {}",
+                e
+            )));
+        }
+
+        // Create ready signal listener BEFORE starting the VM to avoid race condition
+        // Cloud-hypervisor proxies guest→host connections to `<vsock_socket>_<port>`
+        let ready_listener = match ReadySignalListener::new(&vsock_socket).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!(pod_id = %pod_id, error = %e, "Failed to create ready listener");
+                let mut pods = self.pods.write().await;
+                if let Some(pod) = pods.get_mut(&pod_id) {
+                    pod.state = PodState::Failed;
+                    pod.error_message = Some(format!("Failed to create ready listener: {}", e));
+                }
+                return Err(Status::internal(format!(
+                    "Failed to create ready listener: {}",
+                    e
+                )));
+            }
+        };
+
         // Update VM state to starting
         self.store
             .update_state(&vm_id, crate::proto::VmState::Starting)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Start the MicroVM
-        info!(vm_id = %vm_id, pod_id = %pod_id, "Starting MicroVM for pod");
+        // Start the MicroVM with vsock enabled
+        info!(vm_id = %vm_id, pod_id = %pod_id, cid = cid, "Starting MicroVM for pod");
         if let Err(e) = self
             .hypervisor
-            .start(&vm_id, Some(&pod_name), &vm_config)
+            .start(&vm_id, Some(&pod_name), &vm_config, Some(cid))
             .await
         {
             error!(vm_id = %vm_id, error = %e, "Failed to start MicroVM");
@@ -472,7 +518,114 @@ impl PodService for PodServiceImpl {
 
         debug!(vm_id = %vm_id, pod_id = %pod_id, "MicroVM started");
 
-        // Mark pod as running (uos communication will happen in background)
+        // Wait for mvirt-one to signal it's ready via vsock
+        match ready_listener.wait(UOS_BOOT_TIMEOUT).await {
+            Ok(()) => {
+                info!(pod_id = %pod_id, cid = cid, "Received ready signal from mvirt-one");
+            }
+            Err(e) => {
+                error!(pod_id = %pod_id, cid = cid, error = %e, "Failed waiting for ready signal");
+                let _ = self.hypervisor.kill(&vm_id).await;
+                let _ = self
+                    .store
+                    .update_state(&vm_id, crate::proto::VmState::Stopped)
+                    .await;
+                let mut pods = self.pods.write().await;
+                if let Some(pod) = pods.get_mut(&pod_id) {
+                    pod.state = PodState::Failed;
+                    pod.error_message = Some(format!("Ready signal failed: {}", e));
+                }
+                return Err(Status::internal(format!("Ready signal failed: {}", e)));
+            }
+        }
+
+        // Now connect to mvirt-one via vsock
+        let uos_client = match UosClient::connect(&vsock_socket).await {
+            Ok(client) => {
+                info!(pod_id = %pod_id, "Connected to mvirt-one via vsock");
+                client
+            }
+            Err(e) => {
+                error!(pod_id = %pod_id, error = %e, "Failed to connect to mvirt-one");
+                let _ = self.hypervisor.kill(&vm_id).await;
+                let _ = self
+                    .store
+                    .update_state(&vm_id, crate::proto::VmState::Stopped)
+                    .await;
+                let mut pods = self.pods.write().await;
+                if let Some(pod) = pods.get_mut(&pod_id) {
+                    pod.state = PodState::Failed;
+                    pod.error_message = Some(format!("vsock connection failed: {}", e));
+                }
+                return Err(Status::internal(format!("vsock connection failed: {}", e)));
+            }
+        };
+
+        // Store the UOS client for later use
+        self.uos_clients
+            .write()
+            .await
+            .insert(pod_id.clone(), uos_client);
+
+        // Get the stored client's channel
+        let channel = {
+            let clients = self.uos_clients.read().await;
+            clients.get(&pod_id).map(|c| c.channel())
+        };
+
+        // Send CreatePod and StartPod commands to mvirt-one
+        if let Some(channel) = channel {
+            let mut uos = UosServiceClient::new(channel);
+
+            // Convert container specs to mvirt-one format
+            let one_containers: Vec<OneContainerSpec> = _containers
+                .iter()
+                .map(|c| OneContainerSpec {
+                    id: c.id.clone(),
+                    name: c.name.clone(),
+                    image: c.image.clone(),
+                    command: c.command.clone(),
+                    args: c.args.clone(),
+                    env: c.env.clone(),
+                    working_dir: c.working_dir.clone(),
+                })
+                .collect();
+
+            // Create pod in mvirt-one
+            let create_req = OneCreatePodRequest {
+                id: pod_id.clone(),
+                name: pod_name.clone(),
+                containers: one_containers,
+            };
+
+            match uos.create_pod(create_req).await {
+                Ok(_) => {
+                    debug!(pod_id = %pod_id, "Pod created in mvirt-one");
+                }
+                Err(e) => {
+                    warn!(pod_id = %pod_id, error = %e, "Failed to create pod in mvirt-one");
+                }
+            }
+
+            // Start pod in mvirt-one
+            let start_req = OneStartPodRequest { id: pod_id.clone() };
+
+            match uos.start_pod(start_req).await {
+                Ok(_) => {
+                    debug!(pod_id = %pod_id, "Pod started in mvirt-one");
+                }
+                Err(e) => {
+                    warn!(pod_id = %pod_id, error = %e, "Failed to start pod in mvirt-one");
+                    // Set error_message but don't fail - the VM is still running
+                    let mut pods = self.pods.write().await;
+                    if let Some(pod) = pods.get_mut(&pod_id) {
+                        pod.error_message = Some(format!("Container start failed: {}", e));
+                    }
+                }
+            }
+        }
+
+        // Mark pod as running
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

@@ -3,27 +3,15 @@ use std::sync::Arc;
 
 use clap::Parser;
 use mvirt_log::create_audit_logger;
+use mvirt_vmm::grpc::VmServiceImpl;
+use mvirt_vmm::hypervisor::Hypervisor;
+use mvirt_vmm::pod_service::PodServiceImpl;
+use mvirt_vmm::proto::pod_service_server::PodServiceServer;
+use mvirt_vmm::proto::vm_service_server::VmServiceServer;
+use mvirt_vmm::store::VmStore;
 use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-
-mod grpc;
-mod hypervisor;
-mod pod_service;
-mod store;
-mod system_info;
-mod vsock_client;
-
-pub mod proto {
-    tonic::include_proto!("mvirt");
-}
-
-use grpc::VmServiceImpl;
-use hypervisor::Hypervisor;
-use pod_service::PodServiceImpl;
-use proto::pod_service_server::PodServiceServer;
-use proto::vm_service_server::VmServiceServer;
-use store::VmStore;
 
 #[derive(Parser)]
 #[command(name = "mvirt-vmm")]

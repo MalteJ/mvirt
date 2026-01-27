@@ -104,6 +104,12 @@ async fn run_as_init() -> Result<()> {
     let api_handler = create_api_handler(services.pod_tx, services.shutdown_tx);
     let _vsock_handle = start_vsock_server(api_handler).await?;
 
+    // Phase 6: Signal ready to host
+    info!("Phase 6: Signaling ready to host");
+    if let Err(e) = signal_ready_to_host().await {
+        error!("Failed to signal ready to host: {} (continuing anyway)", e);
+    }
+
     // Main loop
     info!("mvirt-one ready, entering main loop");
     let mut shutdown_rx = services.shutdown_rx;
@@ -263,4 +269,32 @@ async fn start_vsock_server(
     });
 
     Ok(handle)
+}
+
+/// Signal to the host that mvirt-one is ready.
+///
+/// Connects to the host (CID 2) on port 1025 to notify that
+/// the guest is ready to receive gRPC calls.
+async fn signal_ready_to_host() -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    use tokio_vsock::{VsockAddr, VsockStream};
+
+    const HOST_CID: u32 = 2; // VMADDR_CID_HOST
+    const READY_PORT: u32 = 1025;
+
+    let addr = VsockAddr::new(HOST_CID, READY_PORT);
+
+    info!(
+        "Connecting to host CID {} port {} to signal ready",
+        HOST_CID, READY_PORT
+    );
+
+    let mut stream = VsockStream::connect(addr).await?;
+
+    // Send a simple ready message (the connection itself is the signal)
+    stream.write_all(b"READY\n").await?;
+    // Connection will be closed when stream is dropped
+
+    info!("Ready signal sent to host");
+    Ok(())
 }
