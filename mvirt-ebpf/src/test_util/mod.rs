@@ -10,8 +10,8 @@ pub use packets::*;
 pub use tap_device::TapTestDevice;
 
 use crate::grpc::{NetworkData, NicData, NicState};
-use ipnet::Ipv4Net;
-use std::net::{IpAddr, Ipv4Addr};
+use ipnet::{Ipv4Net, Ipv6Net};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -72,4 +72,48 @@ pub fn format_mac(mac: &[u8; 6]) -> String {
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     )
+}
+
+/// Create a test NIC configuration with IPv6 support
+pub fn test_nic_config_ipv6(
+    mac: [u8; 6],
+    ipv4: Ipv4Addr,
+    ipv6: Ipv6Addr,
+    network_id: Uuid,
+) -> NicData {
+    NicData {
+        id: Uuid::new_v4(),
+        network_id,
+        name: Some(format!("test-nic-{}", Uuid::new_v4().as_simple())),
+        mac_address: mac,
+        ipv4_address: Some(ipv4),
+        ipv6_address: Some(ipv6),
+        routed_ipv4_prefixes: vec![],
+        routed_ipv6_prefixes: vec![],
+        tap_name: String::new(),
+        state: NicState::Active,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+/// Create a test network configuration with IPv6 support
+pub fn test_network_config_ipv6(
+    ipv4_subnet: Ipv4Net,
+    ipv6_prefix: Ipv6Net,
+    dns_servers: Vec<IpAddr>,
+) -> NetworkData {
+    NetworkData {
+        id: Uuid::new_v4(),
+        name: format!("test-network-{}", Uuid::new_v4().as_simple()),
+        ipv4_enabled: true,
+        ipv4_subnet: Some(ipv4_subnet),
+        ipv6_enabled: true,
+        ipv6_prefix: Some(ipv6_prefix),
+        dns_servers,
+        ntp_servers: vec![],
+        is_public: false,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
 }

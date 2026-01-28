@@ -707,27 +707,29 @@ fn process_dhcp(
     Some(buf)
 }
 
-/// Process IPv6 packet (looking for NDP).
+/// Process IPv6 packet (looking for NDP, DHCPv6, or ICMPv6 Echo).
 fn process_ipv6(config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<Vec<u8>> {
     let ipv6_packet = Ipv6Packet::new_checked(eth_frame.payload()).ok()?;
 
-    if ipv6_packet.next_header() != IpProtocol::Icmpv6 {
-        return None;
+    match ipv6_packet.next_header() {
+        IpProtocol::Icmpv6 => {
+            let icmpv6_packet = Icmpv6Packet::new_checked(ipv6_packet.payload()).ok()?;
+
+            match icmpv6_packet.msg_type() {
+                Icmpv6Message::NeighborSolicit => {
+                    process_neighbor_solicitation(config, eth_frame, &ipv6_packet, &icmpv6_packet)
+                }
+                Icmpv6Message::RouterSolicit => process_router_solicitation(config, eth_frame),
+                Icmpv6Message::EchoRequest => process_icmpv6_echo(config, eth_frame, &ipv6_packet),
+                _ => None,
+            }
+        }
+        IpProtocol::Udp => {
+            // Check for DHCPv6
+            process_dhcpv6(config, eth_frame, &ipv6_packet)
+        }
+        _ => None,
     }
-
-    let icmpv6_packet = Icmpv6Packet::new_checked(ipv6_packet.payload()).ok()?;
-
-    // Handle Neighbor Solicitation
-    if icmpv6_packet.msg_type() == Icmpv6Message::NeighborSolicit {
-        return process_neighbor_solicitation(config, eth_frame, &ipv6_packet, &icmpv6_packet);
-    }
-
-    // Handle Router Solicitation
-    if icmpv6_packet.msg_type() == Icmpv6Message::RouterSolicit {
-        return process_router_solicitation(config);
-    }
-
-    None
 }
 
 /// Process NDP Neighbor Solicitation.
@@ -806,16 +808,427 @@ fn process_neighbor_solicitation(
     None
 }
 
-/// Process Router Solicitation (simplified - just sends RA with prefix info).
-fn process_router_solicitation(config: &NicConfig) -> Option<Vec<u8>> {
-    let prefix = config.network.ipv6_prefix?;
+/// Process Router Solicitation - send Router Advertisement with M+O flags.
+fn process_router_solicitation(
+    config: &NicConfig,
+    eth_frame: &EthernetFrame<&[u8]>,
+) -> Option<Vec<u8>> {
+    // IPv6 must be enabled
+    if !config.network.ipv6_enabled {
+        return None;
+    }
 
-    // For now, we don't send full RA - the VM should get IPv6 via SLAAC
-    // based on the prefix. This is a simplified implementation.
+    let src_mac = eth_frame.src_addr();
+    let gateway_ll = Ipv6Address::from_bytes(&GATEWAY_IPV6_LINK_LOCAL.octets());
+
+    // Compute link-local source address from MAC (EUI-64)
+    let vm_ll = mac_to_link_local(src_mac.0);
+
+    // RA packet structure:
+    // ICMPv6 type (1) + code (1) + checksum (2) + hop limit (1) + flags (1) +
+    // router lifetime (2) + reachable time (4) + retrans timer (4) + SLLAO (8)
+    // Total ICMPv6 payload: 24 bytes
+    let icmpv6_len = 24;
+
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress(GATEWAY_MAC),
+        dst_addr: src_mac,
+        ethertype: EthernetProtocol::Ipv6,
+    };
+
+    let ipv6_repr = Ipv6Repr {
+        src_addr: gateway_ll,
+        dst_addr: vm_ll,
+        next_header: IpProtocol::Icmpv6,
+        payload_len: icmpv6_len,
+        hop_limit: 255,
+    };
+
+    let total_len = eth_repr.buffer_len() + ipv6_repr.buffer_len() + icmpv6_len;
+    let mut buf = vec![0u8; total_len];
+
+    let mut eth_out = EthernetFrame::new_unchecked(&mut buf);
+    eth_repr.emit(&mut eth_out);
+
+    let mut ipv6_out = Ipv6Packet::new_unchecked(eth_out.payload_mut());
+    ipv6_repr.emit(&mut ipv6_out);
+
+    // Build ICMPv6 Router Advertisement manually
+    let icmpv6_data = ipv6_out.payload_mut();
+
+    // Type: Router Advertisement (134)
+    icmpv6_data[0] = 134;
+    // Code: 0
+    icmpv6_data[1] = 0;
+    // Checksum: placeholder
+    icmpv6_data[2..4].fill(0);
+    // Cur Hop Limit: 64
+    icmpv6_data[4] = 64;
+    // Flags: M (Managed) = 0x80, O (Other Config) = 0x40
+    // Set O flag when DNS servers are configured
+    let has_dns = config.network.dns_servers.iter().any(|ip| ip.is_ipv6());
+    let flags = if has_dns { 0xC0 } else { 0x80 };
+    icmpv6_data[5] = flags;
+    // Router Lifetime: 1800 seconds (30 minutes)
+    icmpv6_data[6..8].copy_from_slice(&1800u16.to_be_bytes());
+    // Reachable Time: 0 (unspecified)
+    icmpv6_data[8..12].fill(0);
+    // Retrans Timer: 0 (unspecified)
+    icmpv6_data[12..16].fill(0);
+    // Source Link-Layer Address Option (SLLAO)
+    icmpv6_data[16] = 1; // Type: Source Link-Layer Address
+    icmpv6_data[17] = 1; // Length: 1 (in 8-byte units)
+    icmpv6_data[18..24].copy_from_slice(&GATEWAY_MAC);
+
+    // Compute ICMPv6 checksum
+    let checksum = compute_icmpv6_checksum(&gateway_ll, &vm_ll, &icmpv6_data[..icmpv6_len]);
+    icmpv6_data[2..4].copy_from_slice(&checksum.to_be_bytes());
+
     debug!(
-        prefix = %prefix,
-        "Router Solicitation received (RA not fully implemented)"
+        dst = %vm_ll,
+        m_flag = true,
+        o_flag = has_dns,
+        "RA sent (use DHCPv6 for address)"
     );
 
-    None
+    Some(buf)
+}
+
+/// Compute link-local IPv6 address from MAC using EUI-64.
+fn mac_to_link_local(mac: [u8; 6]) -> Ipv6Address {
+    Ipv6Address::new(
+        0xfe80,
+        0,
+        0,
+        0,
+        ((mac[0] as u16 ^ 0x02) << 8) | mac[1] as u16,
+        (mac[2] as u16) << 8 | 0xff,
+        0xfe00 | mac[3] as u16,
+        (mac[4] as u16) << 8 | mac[5] as u16,
+    )
+}
+
+/// Compute ICMPv6 checksum.
+fn compute_icmpv6_checksum(src: &Ipv6Address, dst: &Ipv6Address, icmpv6_data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+
+    // Pseudo-header
+    for chunk in src.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    for chunk in dst.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    sum += icmpv6_data.len() as u32; // ICMPv6 length
+    sum += 58u32; // Next header (ICMPv6)
+
+    // ICMPv6 data
+    let mut i = 0;
+    while i + 1 < icmpv6_data.len() {
+        sum += u16::from_be_bytes([icmpv6_data[i], icmpv6_data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < icmpv6_data.len() {
+        sum += (icmpv6_data[i] as u32) << 8;
+    }
+
+    // Fold to 16 bits
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+
+    let result = !(sum as u16);
+    if result == 0 { 0xffff } else { result }
+}
+
+/// Compute UDP checksum for IPv6.
+fn compute_udp6_checksum(src: &Ipv6Address, dst: &Ipv6Address, udp_data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+
+    // Pseudo-header
+    for chunk in src.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    for chunk in dst.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    sum += udp_data.len() as u32; // UDP length
+    sum += 17u32; // Next header (UDP)
+
+    // UDP data
+    let mut i = 0;
+    while i + 1 < udp_data.len() {
+        sum += u16::from_be_bytes([udp_data[i], udp_data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < udp_data.len() {
+        sum += (udp_data[i] as u32) << 8;
+    }
+
+    // Fold to 16 bits
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+
+    let result = !(sum as u16);
+    if result == 0 { 0xffff } else { result }
+}
+
+/// Process ICMPv6 Echo Request - respond with Echo Reply for gateway.
+fn process_icmpv6_echo(
+    _config: &NicConfig,
+    eth_frame: &EthernetFrame<&[u8]>,
+    ipv6_packet: &Ipv6Packet<&[u8]>,
+) -> Option<Vec<u8>> {
+    let dst_addr = ipv6_packet.dst_addr();
+    let gateway_addr = Ipv6Address::from_bytes(&GATEWAY_IPV6_LINK_LOCAL.octets());
+
+    // Only respond if destination is the gateway
+    if dst_addr != gateway_addr {
+        return None;
+    }
+
+    let src_addr = ipv6_packet.src_addr();
+    let src_mac = eth_frame.src_addr();
+
+    // Get the raw ICMPv6 data (type, code, checksum, id, seq, data)
+    let echo_request = ipv6_packet.payload();
+    if echo_request.len() < 8 {
+        return None;
+    }
+
+    let icmpv6_len = echo_request.len();
+
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress(GATEWAY_MAC),
+        dst_addr: src_mac,
+        ethertype: EthernetProtocol::Ipv6,
+    };
+
+    let ipv6_repr = Ipv6Repr {
+        src_addr: gateway_addr,
+        dst_addr: src_addr,
+        next_header: IpProtocol::Icmpv6,
+        payload_len: icmpv6_len,
+        hop_limit: 64,
+    };
+
+    let total_len = eth_repr.buffer_len() + ipv6_repr.buffer_len() + icmpv6_len;
+    let mut buf = vec![0u8; total_len];
+
+    let mut eth_out = EthernetFrame::new_unchecked(&mut buf);
+    eth_repr.emit(&mut eth_out);
+
+    let mut ipv6_out = Ipv6Packet::new_unchecked(eth_out.payload_mut());
+    ipv6_repr.emit(&mut ipv6_out);
+
+    // Copy echo request and change type to Echo Reply
+    let icmpv6_data = ipv6_out.payload_mut();
+    icmpv6_data[..icmpv6_len].copy_from_slice(echo_request);
+    // Type: Echo Reply (129)
+    icmpv6_data[0] = 129;
+    // Code: 0
+    icmpv6_data[1] = 0;
+    // Clear checksum for recomputation
+    icmpv6_data[2..4].fill(0);
+
+    // Compute ICMPv6 checksum
+    let checksum = compute_icmpv6_checksum(&gateway_addr, &src_addr, icmpv6_data);
+    icmpv6_data[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+    debug!(
+        src = %src_addr,
+        "ICMPv6 Echo Reply sent"
+    );
+
+    Some(buf)
+}
+
+/// DHCPv6 server port
+const DHCP6_SERVER_PORT: u16 = 547;
+
+/// DHCPv6 client port
+const DHCP6_CLIENT_PORT: u16 = 546;
+
+/// Default preferred lifetime in seconds (24 hours)
+const PREFERRED_LIFETIME: u32 = 86400;
+
+/// Default valid lifetime in seconds (48 hours)
+const VALID_LIFETIME: u32 = 172800;
+
+/// Process DHCPv6 packet.
+fn process_dhcpv6(
+    config: &NicConfig,
+    eth_frame: &EthernetFrame<&[u8]>,
+    ipv6_packet: &Ipv6Packet<&[u8]>,
+) -> Option<Vec<u8>> {
+    use dhcproto::v6::{
+        DhcpOption, IAAddr, IANA, Message, MessageType, OptionCode, Status, StatusCode,
+    };
+    use dhcproto::{Decodable, Decoder, Encodable, Encoder};
+
+    let udp_packet = UdpPacket::new_checked(ipv6_packet.payload()).ok()?;
+
+    // Check if it's a DHCPv6 packet (client → server)
+    if udp_packet.dst_port() != DHCP6_SERVER_PORT {
+        return None;
+    }
+
+    // Parse DHCPv6 message
+    let dhcp_payload = udp_packet.payload();
+    let mut decoder = Decoder::new(dhcp_payload);
+    let dhcp_msg = Message::decode(&mut decoder).ok()?;
+
+    let src_addr = ipv6_packet.src_addr();
+    let src_mac = eth_frame.src_addr();
+
+    debug!(
+        msg_type = ?dhcp_msg.msg_type(),
+        xid = ?dhcp_msg.xid(),
+        src = %src_addr,
+        "DHCPv6 message received"
+    );
+
+    // Get the IPv6 address to assign
+    let ipv6_address = config.nic.ipv6_address?;
+
+    let response_type = match dhcp_msg.msg_type() {
+        MessageType::Solicit => MessageType::Advertise,
+        MessageType::Request | MessageType::Renew | MessageType::Rebind => MessageType::Reply,
+        MessageType::Confirm | MessageType::InformationRequest => MessageType::Reply,
+        _ => return None,
+    };
+
+    // Build DHCPv6 response
+    let mut response = Message::new(response_type);
+    response.set_xid(dhcp_msg.xid());
+
+    // Get client DUID
+    let client_duid = dhcp_msg.opts().get(OptionCode::ClientId)?;
+    let client_duid_bytes = match client_duid {
+        DhcpOption::ClientId(duid) => duid.clone(),
+        _ => return None,
+    };
+
+    // Server DUID - DUID-LL based on gateway MAC
+    let mut server_duid_bytes = Vec::with_capacity(10);
+    server_duid_bytes.extend_from_slice(&[0x00, 0x03]); // DUID-LL type
+    server_duid_bytes.extend_from_slice(&[0x00, 0x01]); // Ethernet hw type
+    server_duid_bytes.extend_from_slice(&GATEWAY_MAC);
+
+    response
+        .opts_mut()
+        .insert(DhcpOption::ClientId(client_duid_bytes));
+    response
+        .opts_mut()
+        .insert(DhcpOption::ServerId(server_duid_bytes));
+
+    // Add IA_NA with address (except for InformationRequest)
+    if dhcp_msg.msg_type() != MessageType::InformationRequest {
+        let client_iaid = dhcp_msg
+            .opts()
+            .get(OptionCode::IANA)
+            .and_then(|opt| match opt {
+                DhcpOption::IANA(iana) => Some(iana.id),
+                _ => None,
+            })
+            .unwrap_or(1);
+
+        let ia_addr = IAAddr {
+            addr: ipv6_address,
+            preferred_life: PREFERRED_LIFETIME,
+            valid_life: VALID_LIFETIME,
+            opts: Default::default(),
+        };
+
+        let ia_na = IANA {
+            id: client_iaid,
+            t1: PREFERRED_LIFETIME / 2,
+            t2: (PREFERRED_LIFETIME * 4) / 5,
+            opts: {
+                let mut opts = dhcproto::v6::DhcpOptions::new();
+                opts.insert(DhcpOption::IAAddr(ia_addr));
+                opts
+            },
+        };
+
+        response.opts_mut().insert(DhcpOption::IANA(ia_na));
+    }
+
+    // Add DNS servers
+    let dns_v6: Vec<Ipv6Addr> = config
+        .network
+        .dns_servers
+        .iter()
+        .filter_map(|ip| match ip {
+            IpAddr::V6(v6) => Some(*v6),
+            _ => None,
+        })
+        .collect();
+    if !dns_v6.is_empty() {
+        response
+            .opts_mut()
+            .insert(DhcpOption::DomainNameServers(dns_v6));
+    }
+
+    // Status code: Success
+    response
+        .opts_mut()
+        .insert(DhcpOption::StatusCode(StatusCode {
+            status: Status::Success,
+            msg: String::new(),
+        }));
+
+    // Encode DHCPv6 message
+    let mut dhcp_bytes = Vec::new();
+    let mut encoder = Encoder::new(&mut dhcp_bytes);
+    response.encode(&mut encoder).ok()?;
+
+    // Build the response packet
+    let gateway_ll = mac_to_link_local(GATEWAY_MAC);
+    let udp_len = 8 + dhcp_bytes.len();
+
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress(GATEWAY_MAC),
+        dst_addr: src_mac,
+        ethertype: EthernetProtocol::Ipv6,
+    };
+
+    let ipv6_repr = Ipv6Repr {
+        src_addr: gateway_ll,
+        dst_addr: src_addr,
+        next_header: IpProtocol::Udp,
+        payload_len: udp_len,
+        hop_limit: 64,
+    };
+
+    let total_len = eth_repr.buffer_len() + ipv6_repr.buffer_len() + udp_len;
+    let mut buf = vec![0u8; total_len];
+
+    let mut eth_out = EthernetFrame::new_unchecked(&mut buf);
+    eth_repr.emit(&mut eth_out);
+
+    let mut ipv6_out = Ipv6Packet::new_unchecked(eth_out.payload_mut());
+    ipv6_repr.emit(&mut ipv6_out);
+
+    // Write UDP header and payload
+    let udp_slice = ipv6_out.payload_mut();
+    udp_slice[0..2].copy_from_slice(&DHCP6_SERVER_PORT.to_be_bytes());
+    udp_slice[2..4].copy_from_slice(&DHCP6_CLIENT_PORT.to_be_bytes());
+    udp_slice[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    udp_slice[6..8].fill(0); // checksum placeholder
+    udp_slice[8..8 + dhcp_bytes.len()].copy_from_slice(&dhcp_bytes);
+
+    // Compute UDP checksum
+    let checksum = compute_udp6_checksum(&gateway_ll, &src_addr, &udp_slice[..udp_len]);
+    udp_slice[6..8].copy_from_slice(&checksum.to_be_bytes());
+
+    info!(
+        response_type = ?response_type,
+        assigned_ip = %ipv6_address,
+        client_mac = %src_mac,
+        "DHCPv6 response sent"
+    );
+
+    Some(buf)
 }
