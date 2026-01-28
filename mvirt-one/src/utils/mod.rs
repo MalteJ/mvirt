@@ -1,4 +1,4 @@
-//! Utility modules for uos.
+//! Utility modules for one.
 
 pub mod mount;
 pub mod network;

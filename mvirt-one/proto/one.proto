@@ -1,8 +1,8 @@
 syntax = "proto3";
-package mvirt.uos;
+package mvirt.one;
 
-// UosService provides the API for managing pods and containers in the MicroVM
-service UosService {
+// OneService provides the API for managing pods and containers in the MicroVM
+service OneService {
   // Pod Management
   rpc CreatePod(CreatePodRequest) returns (Pod);
   rpc StartPod(StartPodRequest) returns (Pod);

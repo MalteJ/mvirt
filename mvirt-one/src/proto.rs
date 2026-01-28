@@ -1,3 +1,3 @@
 //! Generated protobuf code.
 
-tonic::include_proto!("mvirt.uos");
+tonic::include_proto!("mvirt.one");

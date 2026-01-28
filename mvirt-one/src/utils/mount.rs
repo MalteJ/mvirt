@@ -1,4 +1,4 @@
-//! Filesystem mounting utilities for uos.
+//! Filesystem mounting utilities for one.
 //! Ported from pideisn.
 
 use crate::error::{Error, Result};

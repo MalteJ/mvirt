@@ -1,9 +1,9 @@
-//! Error types for uos.
+//! Error types for one.
 
 use std::fmt;
 use std::io;
 
-/// Main error type for uos operations.
+/// Main error type for one operations.
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),

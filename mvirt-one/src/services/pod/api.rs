@@ -5,7 +5,7 @@ use crate::error::PodError;
 use crate::proto::{
     CreatePodRequest, DeletePodRequest, Empty, ExecInput, ExecOutput, GetPodRequest,
     HealthResponse, InterfaceInfo, ListPodsResponse, LogsRequest, LogsResponse, NetworkInfo, Pod,
-    ShutdownRequest, StartPodRequest, StopPodRequest, uos_service_server::UosService,
+    ShutdownRequest, StartPodRequest, StopPodRequest, one_service_server::OneService,
 };
 use crate::utils::network;
 use log::info;
@@ -38,7 +38,7 @@ fn pod_error_to_status(e: PodError) -> Status {
 }
 
 #[tonic::async_trait]
-impl UosService for PodApiHandler {
+impl OneService for PodApiHandler {
     async fn create_pod(
         &self,
         request: Request<CreatePodRequest>,

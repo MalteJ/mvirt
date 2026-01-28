@@ -1,4 +1,4 @@
-//! vsock client for communicating with uos in MicroVMs.
+//! vsock client for communicating with one in MicroVMs.
 //!
 //! Cloud-hypervisor exposes vsock via a Unix socket proxy. To connect:
 //! 1. Connect to the vsock.sock Unix socket
@@ -16,20 +16,20 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 use tracing::{debug, info, warn};
 
-/// Port used by uos for its API.
-const UOS_VSOCK_PORT: u32 = 1024;
+/// Port used by one for its API.
+const ONE_VSOCK_PORT: u32 = 1024;
 
-/// Client for communicating with uos running inside a MicroVM.
-pub struct UosClient {
+/// Client for communicating with one running inside a MicroVM.
+pub struct OneClient {
     channel: Channel,
 }
 
-impl UosClient {
-    /// Connect to uos in a MicroVM via vsock Unix socket proxy.
+impl OneClient {
+    /// Connect to one in a MicroVM via vsock Unix socket proxy.
     pub async fn connect(vsock_socket: &Path) -> Result<Self> {
-        info!(socket = %vsock_socket.display(), "Connecting to uos via vsock");
+        info!(socket = %vsock_socket.display(), "Connecting to one via vsock");
 
-        let channel = create_vsock_channel(vsock_socket, UOS_VSOCK_PORT).await?;
+        let channel = create_vsock_channel(vsock_socket, ONE_VSOCK_PORT).await?;
 
         Ok(Self { channel })
     }
@@ -93,7 +93,7 @@ async fn create_vsock_channel(vsock_socket: &Path, port: u32) -> Result<Channel>
         .await
         .map_err(|e| anyhow!("Failed to connect via vsock: {}", e))?;
 
-    info!(socket = %vsock_socket.display(), port = port, "Connected to uos via vsock");
+    info!(socket = %vsock_socket.display(), port = port, "Connected to one via vsock");
     Ok(channel)
 }
 
@@ -115,32 +115,32 @@ pub fn vsock_socket_path(data_dir: &Path, vm_id: &str) -> PathBuf {
     data_dir.join("vm").join(vm_id).join("vsock.sock")
 }
 
-/// Wait for uos to become available on a MicroVM via vsock.
+/// Wait for one to become available on a MicroVM via vsock.
 ///
 /// This function retries the connection until the timeout is reached.
 /// Use this after starting a MicroVM to wait for the guest to boot.
-pub async fn wait_for_uos(vsock_socket: &Path, timeout: Duration) -> Result<UosClient> {
+pub async fn wait_for_one(vsock_socket: &Path, timeout: Duration) -> Result<OneClient> {
     let start = Instant::now();
     let retry_interval = Duration::from_millis(200);
 
     info!(
         socket = %vsock_socket.display(),
         timeout_secs = timeout.as_secs(),
-        "Waiting for uos"
+        "Waiting for one"
     );
 
     while start.elapsed() < timeout {
-        match UosClient::connect(vsock_socket).await {
+        match OneClient::connect(vsock_socket).await {
             Ok(client) => {
                 info!(
                     socket = %vsock_socket.display(),
                     elapsed_ms = start.elapsed().as_millis(),
-                    "Connected to uos"
+                    "Connected to one"
                 );
                 return Ok(client);
             }
             Err(e) => {
-                debug!(socket = %vsock_socket.display(), error = %e, "uos not ready yet, retrying...");
+                debug!(socket = %vsock_socket.display(), error = %e, "one not ready yet, retrying...");
                 tokio::time::sleep(retry_interval).await;
             }
         }
@@ -149,10 +149,10 @@ pub async fn wait_for_uos(vsock_socket: &Path, timeout: Duration) -> Result<UosC
     warn!(
         socket = %vsock_socket.display(),
         timeout_secs = timeout.as_secs(),
-        "Timeout waiting for uos"
+        "Timeout waiting for one"
     );
     Err(anyhow!(
-        "Timeout waiting for uos on {} after {:?}",
+        "Timeout waiting for one on {} after {:?}",
         vsock_socket.display(),
         timeout
     ))

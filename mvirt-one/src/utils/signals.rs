@@ -1,4 +1,4 @@
-//! Signal handling utilities for uos.
+//! Signal handling utilities for one.
 //! Ported from pideisn.
 
 use log::debug;

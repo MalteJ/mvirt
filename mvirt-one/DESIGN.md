@@ -20,7 +20,7 @@ mvirt-one is the init system for mvirt microVMs that run isolated pods (containe
 │                     MicroVM │ (cloud-hypervisor)                 │
 │                             ▼                                    │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │                      uos (PID 1)                          │   │
+│  │                      one (PID 1)                          │   │
 │  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────┐  │   │
 │  │  │ Image   │  │  Task   │  │   Pod   │  │    API      │  │   │
 │  │  │ Service │  │ Service │  │ Service │  │   Server    │  │   │
@@ -69,7 +69,7 @@ API Handler  →  Dispatcher  →  Worker
 
 ## Dual-Mode Operation
 
-uos runs in two modes:
+one runs in two modes:
 
 ### PID 1 Mode (in MicroVM)
 ```rust
@@ -84,7 +84,7 @@ if std::process::id() == 1 {
 ```rust
 else {
     prctl::set_child_subreaper(true)?;  // Handle orphaned children
-    start_unix_socket_server();          // /tmp/uos.sock
+    start_unix_socket_server();          // /tmp/one.sock
 }
 ```
 
@@ -127,9 +127,9 @@ else {
     └── rootfs/           # symlink or bind to image rootfs
 ```
 
-### Local Development (/tmp/uos)
+### Local Development (/tmp/one)
 ```
-/tmp/uos/
+/tmp/one/
 ├── images/
 └── pods/
 ```
@@ -137,7 +137,7 @@ else {
 ## API (Protobuf over vsock/Unix socket)
 
 ```protobuf
-service UosService {
+service OneService {
   // Pod lifecycle
   rpc CreatePod(CreatePodRequest) returns (Pod);
   rpc StartPod(StartPodRequest) returns (Pod);

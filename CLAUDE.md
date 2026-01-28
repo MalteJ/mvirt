@@ -12,7 +12,7 @@ mvirt/
 ├── mvirt-zfs/       # ZFS storage management
 ├── mvirt-one/       # MicroVM Init System for isolated Pods
 │   ├── src/         # Rust init process (PID 1)
-│   ├── proto/       # uos gRPC API
+│   ├── proto/       # one gRPC API
 │   └── initramfs/   # rootfs skeleton
 ├── proto/           # gRPC API definition
 └── images/          # Kernel and disk images (not in git)

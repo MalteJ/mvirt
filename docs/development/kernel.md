@@ -4,7 +4,7 @@ This guide explains how the kernel build works and how to customize it.
 
 ## Overview
 
-mvirt-uos uses a minimal Linux kernel optimized for virtualization. The kernel configuration uses a **fragment-based approach** rather than a full `.config` file.
+mvirt-one uses a minimal Linux kernel optimized for virtualization. The kernel configuration uses a **fragment-based approach** rather than a full `.config` file.
 
 ## Config Fragment Approach
 
@@ -22,7 +22,7 @@ Instead of maintaining a full kernel config (~8000+ lines), we use a small fragm
 
 ## Current Configuration
 
-The `mvirt-uos/kernel.config` fragment includes:
+The `mvirt-one/kernel.config` fragment includes:
 
 | Category | Options |
 |----------|---------|
@@ -63,10 +63,10 @@ If the option works, add it to the fragment:
 
 ```bash
 # Add to kernel.config
-echo "CONFIG_MY_DRIVER=y" >> mvirt-uos/kernel.config
+echo "CONFIG_MY_DRIVER=y" >> mvirt-one/kernel.config
 ```
 
-Or edit `mvirt-uos/kernel.config` directly.
+Or edit `mvirt-one/kernel.config` directly.
 
 **Important:** Changes only in `.config` are lost after `make clean` or when `kernel.config` is modified, because `.config` is regenerated from the fragment.
 
@@ -112,10 +112,10 @@ Common dependencies to check:
 
 ## Kernel Version
 
-The kernel version is specified in `mvirt-uos/kernel.version`:
+The kernel version is specified in `mvirt-one/kernel.version`:
 
 ```bash
-cat mvirt-uos/kernel.version
+cat mvirt-one/kernel.version
 ```
 
 To update the kernel:
@@ -131,7 +131,7 @@ To update the kernel:
 Check if the option has unmet dependencies:
 
 ```bash
-cd mvirt-uos/kernel
+cd mvirt-one/kernel
 ./scripts/config --state CONFIG_MY_OPTION
 ```
 

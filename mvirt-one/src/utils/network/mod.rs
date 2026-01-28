@@ -1,4 +1,4 @@
-//! Network configuration utilities for uos.
+//! Network configuration utilities for one.
 //! Ported from pideisn.
 
 pub mod dhcp4;

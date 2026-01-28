@@ -1,4 +1,4 @@
-//! Service modules for uos.
+//! Service modules for one.
 //!
 //! Following the Actor pattern from FeOS:
 //! - API handlers receive requests and send commands to dispatchers

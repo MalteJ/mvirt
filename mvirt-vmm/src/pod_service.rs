@@ -10,12 +10,12 @@ use crate::proto::{
 };
 use crate::ready_listener::ReadySignalListener;
 use crate::store::VmStore;
-use crate::vsock_client::{UosClient, vm_id_to_cid, vsock_socket_path};
+use crate::vsock_client::{OneClient, vm_id_to_cid, vsock_socket_path};
 use mvirt_log::AuditLogger;
 use mvirt_one::proto::{
     ContainerSpec as OneContainerSpec, CreatePodRequest as OneCreatePodRequest, Empty as OneEmpty,
     StartPodRequest as OneStartPodRequest, StopPodRequest as OneStopPodRequest,
-    uos_service_client::UosServiceClient,
+    one_service_client::OneServiceClient,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,19 +27,19 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Kernel path for MicroVM boot.
-const UOS_KERNEL_PATH: &str = "/usr/share/mvirt/one/bzImage";
+const ONE_KERNEL_PATH: &str = "/usr/share/mvirt/one/bzImage";
 /// Rootfs template path for pod volumes.
-const UOS_ROOTFS_TEMPLATE: &str = "/usr/share/mvirt/one/rootfs.raw";
+const ONE_ROOTFS_TEMPLATE: &str = "/usr/share/mvirt/one/rootfs.raw";
 /// Cmdline file path.
-const UOS_CMDLINE_PATH: &str = "/usr/share/mvirt/one/cmdline";
+const ONE_CMDLINE_PATH: &str = "/usr/share/mvirt/one/cmdline";
 /// Default kernel command line for MicroVM (disk boot).
-const UOS_DISK_CMDLINE: &str = "console=ttyS0 quiet root=/dev/vda rw init=/init";
+const ONE_DISK_CMDLINE: &str = "console=ttyS0 quiet root=/dev/vda rw init=/init";
 /// Default memory for pod MicroVMs (MB).
 const POD_DEFAULT_MEMORY_MB: u64 = 256;
 /// Default vCPUs for pod MicroVMs.
 const POD_DEFAULT_VCPUS: u32 = 1;
 /// Timeout for waiting for mvirt-one to boot.
-const UOS_BOOT_TIMEOUT: Duration = Duration::from_secs(10);
+const ONE_BOOT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Internal pod data stored by the service.
 #[derive(Debug, Clone)]
@@ -63,10 +63,10 @@ struct PodData {
 }
 
 /// Read kernel cmdline from file, falling back to default.
-fn read_uos_cmdline() -> String {
-    std::fs::read_to_string(UOS_CMDLINE_PATH)
+fn read_one_cmdline() -> String {
+    std::fs::read_to_string(ONE_CMDLINE_PATH)
         .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| UOS_DISK_CMDLINE.to_string())
+        .unwrap_or_else(|_| ONE_DISK_CMDLINE.to_string())
 }
 
 impl From<PodData> for Pod {
@@ -103,8 +103,8 @@ pub struct PodServiceImpl {
     hypervisor: Arc<Hypervisor>,
     audit: Arc<AuditLogger>,
     pods: Arc<RwLock<HashMap<String, PodData>>>,
-    /// Map of pod_id -> UosClient for communicating with MicroVMs
-    uos_clients: Arc<RwLock<HashMap<String, UosClient>>>,
+    /// Map of pod_id -> OneClient for communicating with MicroVMs
+    one_clients: Arc<RwLock<HashMap<String, OneClient>>>,
 }
 
 impl PodServiceImpl {
@@ -115,7 +115,7 @@ impl PodServiceImpl {
             hypervisor,
             audit,
             pods: Arc::new(RwLock::new(HashMap::new())),
-            uos_clients: Arc::new(RwLock::new(HashMap::new())),
+            one_clients: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -231,8 +231,8 @@ impl PodService for PodServiceImpl {
 
         // Stop the MicroVM if running
         if let Some(vm_id) = &pod.vm_id {
-            // Remove uos client
-            let mut clients = self.uos_clients.write().await;
+            // Remove one client
+            let mut clients = self.one_clients.write().await;
             clients.remove(&req.id);
 
             // Kill the MicroVM
@@ -320,7 +320,7 @@ impl PodService for PodServiceImpl {
         info!(pod_id = %pod_id, volume = %root_disk_path, "Writing rootfs template to volume");
         let dd_status = std::process::Command::new("dd")
             .args([
-                &format!("if={}", UOS_ROOTFS_TEMPLATE),
+                &format!("if={}", ONE_ROOTFS_TEMPLATE),
                 &format!("of={}", root_disk_path),
                 "bs=4M",
                 "conv=fsync,notrunc",
@@ -404,7 +404,7 @@ impl PodService for PodServiceImpl {
             .unwrap_or(POD_DEFAULT_MEMORY_MB);
 
         // Read kernel cmdline
-        let cmdline = read_uos_cmdline();
+        let cmdline = read_one_cmdline();
 
         // Build NIC config if socket path provided
         let nics = if let Some(socket_path) = nic_socket_path {
@@ -422,7 +422,7 @@ impl PodService for PodServiceImpl {
             vcpus,
             memory_mb,
             boot_mode: BootMode::Kernel.into(),
-            kernel: Some(UOS_KERNEL_PATH.to_string()),
+            kernel: Some(ONE_KERNEL_PATH.to_string()),
             initramfs: None, // No initramfs - boot from disk
             cmdline: Some(cmdline),
             disks: vec![DiskConfig {
@@ -533,7 +533,7 @@ impl PodService for PodServiceImpl {
         debug!(vm_id = %vm_id, pod_id = %pod_id, "MicroVM started");
 
         // Wait for mvirt-one to signal it's ready via vsock
-        match ready_listener.wait(UOS_BOOT_TIMEOUT).await {
+        match ready_listener.wait(ONE_BOOT_TIMEOUT).await {
             Ok(()) => {
                 info!(pod_id = %pod_id, cid = cid, "Received ready signal from mvirt-one");
             }
@@ -554,7 +554,7 @@ impl PodService for PodServiceImpl {
         }
 
         // Now connect to mvirt-one via vsock
-        let uos_client = match UosClient::connect(&vsock_socket).await {
+        let one_client = match OneClient::connect(&vsock_socket).await {
             Ok(client) => {
                 info!(pod_id = %pod_id, "Connected to mvirt-one via vsock");
                 client
@@ -575,21 +575,21 @@ impl PodService for PodServiceImpl {
             }
         };
 
-        // Store the UOS client for later use
-        self.uos_clients
+        // Store the one client for later use
+        self.one_clients
             .write()
             .await
-            .insert(pod_id.clone(), uos_client);
+            .insert(pod_id.clone(), one_client);
 
         // Get the stored client's channel
         let channel = {
-            let clients = self.uos_clients.read().await;
+            let clients = self.one_clients.read().await;
             clients.get(&pod_id).map(|c| c.channel())
         };
 
         // Send CreatePod and StartPod commands to mvirt-one
         if let Some(channel) = channel {
-            let mut uos = UosServiceClient::new(channel);
+            let mut one = OneServiceClient::new(channel);
 
             // Convert container specs to mvirt-one format
             let one_containers: Vec<OneContainerSpec> = _containers
@@ -612,7 +612,7 @@ impl PodService for PodServiceImpl {
                 containers: one_containers,
             };
 
-            match uos.create_pod(create_req).await {
+            match one.create_pod(create_req).await {
                 Ok(_) => {
                     debug!(pod_id = %pod_id, "Pod created in mvirt-one");
                 }
@@ -624,7 +624,7 @@ impl PodService for PodServiceImpl {
             // Start pod in mvirt-one
             let start_req = OneStartPodRequest { id: pod_id.clone() };
 
-            match uos.start_pod(start_req).await {
+            match one.start_pod(start_req).await {
                 Ok(_) => {
                     debug!(pod_id = %pod_id, "Pod started in mvirt-one");
                 }
@@ -694,19 +694,19 @@ impl PodService for PodServiceImpl {
             10 // Default timeout
         };
 
-        // Try to gracefully stop the pod via uos
+        // Try to gracefully stop the pod via one
         if let Some(ref vm_id) = vm_id {
-            let mut clients = self.uos_clients.write().await;
-            if let Some(uos_client) = clients.remove(&pod_id) {
-                let mut uos = UosServiceClient::new(uos_client.channel());
+            let mut clients = self.one_clients.write().await;
+            if let Some(one_client) = clients.remove(&pod_id) {
+                let mut one = OneServiceClient::new(one_client.channel());
                 let stop_req = OneStopPodRequest {
                     id: pod_id.clone(),
                     timeout_seconds: timeout_secs,
                 };
 
-                debug!(pod_id = %pod_id, "Sending stop request to uos");
-                if let Err(e) = uos.stop_pod(stop_req).await {
-                    warn!(pod_id = %pod_id, error = %e, "Failed to stop pod via uos, will kill VM");
+                debug!(pod_id = %pod_id, "Sending stop request to one");
+                if let Err(e) = one.stop_pod(stop_req).await {
+                    warn!(pod_id = %pod_id, error = %e, "Failed to stop pod via one, will kill VM");
                 }
             }
 
@@ -784,16 +784,16 @@ impl PodService for PodServiceImpl {
             pod.id.clone()
         };
 
-        // Get the UOS client for this pod
-        let clients = self.uos_clients.read().await;
-        let uos_client = clients
+        // Get the one client for this pod
+        let clients = self.one_clients.read().await;
+        let one_client = clients
             .get(&pod_id)
             .ok_or_else(|| Status::unavailable("No connection to pod"))?;
 
-        let mut uos = UosServiceClient::new(uos_client.channel());
+        let mut one = OneServiceClient::new(one_client.channel());
 
         // Call GetNetworkInfo on mvirt-one
-        let response = uos
+        let response = one
             .get_network_info(OneEmpty {})
             .await
             .map_err(|e| Status::internal(format!("Failed to get network info: {}", e)))?

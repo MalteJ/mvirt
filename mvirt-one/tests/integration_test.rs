@@ -14,14 +14,14 @@ mod common;
 use common::{TestServer, check_port};
 use mvirt_one::proto::{
     ContainerSpec, CreatePodRequest, DeletePodRequest, Empty, GetPodRequest, PodState,
-    StartPodRequest, StopPodRequest, uos_service_client::UosServiceClient,
+    StartPodRequest, StopPodRequest, one_service_client::OneServiceClient,
 };
 
 /// Test: Health Check - verify server is running and responds.
 #[tokio::test]
 async fn test_health() {
     let server = TestServer::start().await.expect("Failed to start server");
-    let mut client = UosServiceClient::connect(server.addr.clone())
+    let mut client = OneServiceClient::connect(server.addr.clone())
         .await
         .expect("Failed to connect to server");
 
@@ -36,7 +36,7 @@ async fn test_health() {
 #[tokio::test]
 async fn test_pod_lifecycle() {
     let server = TestServer::start().await.expect("Failed to start server");
-    let mut client = UosServiceClient::connect(server.addr.clone())
+    let mut client = OneServiceClient::connect(server.addr.clone())
         .await
         .expect("Failed to connect to server");
 
@@ -122,7 +122,7 @@ async fn test_pod_lifecycle() {
 #[tokio::test]
 async fn test_httpd_port_binding() {
     let server = TestServer::start().await.expect("Failed to start server");
-    let mut client = UosServiceClient::connect(server.addr.clone())
+    let mut client = OneServiceClient::connect(server.addr.clone())
         .await
         .expect("Failed to connect to server");
 
@@ -199,7 +199,7 @@ async fn test_httpd_port_binding() {
 #[tokio::test]
 async fn test_list_pods() {
     let server = TestServer::start().await.expect("Failed to start server");
-    let mut client = UosServiceClient::connect(server.addr.clone())
+    let mut client = OneServiceClient::connect(server.addr.clone())
         .await
         .expect("Failed to connect to server");
 
@@ -243,7 +243,7 @@ async fn test_list_pods() {
 #[tokio::test]
 async fn test_get_nonexistent_pod() {
     let server = TestServer::start().await.expect("Failed to start server");
-    let mut client = UosServiceClient::connect(server.addr.clone())
+    let mut client = OneServiceClient::connect(server.addr.clone())
         .await
         .expect("Failed to connect to server");
 
@@ -265,7 +265,7 @@ async fn test_get_nonexistent_pod() {
 #[tokio::test]
 async fn test_nginx_http_response() {
     let server = TestServer::start().await.expect("Failed to start server");
-    let mut client = UosServiceClient::connect(server.addr.clone())
+    let mut client = OneServiceClient::connect(server.addr.clone())
         .await
         .expect("Failed to connect to server");
 
@@ -364,7 +364,7 @@ async fn test_nginx_http_response() {
 #[tokio::test]
 async fn test_busybox_http_response() {
     let server = TestServer::start().await.expect("Failed to start server");
-    let mut client = UosServiceClient::connect(server.addr.clone())
+    let mut client = OneServiceClient::connect(server.addr.clone())
         .await
         .expect("Failed to connect to server");
 

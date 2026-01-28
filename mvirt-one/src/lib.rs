@@ -26,7 +26,7 @@ use log::info;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
-/// Configuration for uos services.
+/// Configuration for one services.
 pub struct Config {
     /// Base directory for images.
     pub images_dir: PathBuf,
@@ -60,7 +60,7 @@ impl Default for Config {
     }
 }
 
-/// Service handles for communicating with uos services.
+/// Service handles for communicating with one services.
 pub struct Services {
     pub image_tx: mpsc::Sender<ImageCommand>,
     pub task_tx: mpsc::Sender<TaskCommand>,
@@ -69,9 +69,9 @@ pub struct Services {
     pub shutdown_rx: mpsc::Receiver<()>,
 }
 
-/// Initialize all uos services.
+/// Initialize all one services.
 pub async fn initialize_services(config: Config) -> anyhow::Result<Services> {
-    info!("Initializing uos services");
+    info!("Initializing one services");
 
     // Create directories
     tokio::fs::create_dir_all(&config.images_dir).await?;

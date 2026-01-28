@@ -77,7 +77,7 @@ TUI and CLI that orchestrates the other services.
 - Provides unified interface for VM operations
 - Auto-refreshing TUI with ratatui
 
-### mvirt-uos (µOS for MicroVMs)
+### mvirt-one (µOS for MicroVMs)
 
 Minimal Linux distribution optimized for MicroVMs.
 

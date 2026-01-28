@@ -11,11 +11,11 @@ mvirt/
 ├── mvirt-log/           # Centralized audit logging
 ├── mvirt-zfs/           # ZFS storage management
 ├── mvirt-net/           # Virtual networking
-├── mvirt-uos/           # µOS - Minimal Linux for MicroVMs
+├── mvirt-one/           # µOS - Minimal Linux for MicroVMs
 │   ├── pideisn/         # Rust init process (PID 1)
 │   ├── initramfs/       # rootfs skeleton
 │   ├── kernel.config    # Kernel config fragment
-│   └── mvirt-uos.mk     # OS build rules
+│   └── mvirt-one.mk     # OS build rules
 ├── docs/                # Documentation
 └── Makefile             # Main build orchestration
 ```
@@ -32,7 +32,7 @@ The build system uses GNU Make with a dependency-based approach. Targets only re
 |--------|-------------|
 | `make` | Build everything (Rust + UKI) |
 | `make release` | Build Rust binaries (musl, static) |
-| `make uos` | Build mvirt-uos (UKI) |
+| `make one` | Build mvirt-one (UKI) |
 | `make kernel` | Build kernel only |
 | `make initramfs` | Build initramfs only |
 | `make clean` | Remove build artifacts |
@@ -45,7 +45,7 @@ The build system uses GNU Make with a dependency-based approach. Targets only re
 The build system automatically resolves dependencies:
 
 ```
-make uos
+make one
   └── $(UKI)                      # Unified Kernel Image
         ├── $(BZIMAGE)            # Linux kernel
         │     └── .config
@@ -59,7 +59,7 @@ make uos
         └── cmdline.txt           # Kernel command line
 ```
 
-Running `make uos` automatically builds all dependencies in the correct order.
+Running `make one` automatically builds all dependencies in the correct order.
 
 ### Rust Binaries
 
@@ -83,27 +83,27 @@ Build outputs:
 
 | File | Description |
 |------|-------------|
-| `mvirt-uos/target/mvirt-uos.efi` | UKI (kernel + initramfs + cmdline) |
-| `mvirt-uos/target/cloud-hypervisor` | Downloaded hypervisor binary |
-| `mvirt-uos/target/hypervisor-fw` | Downloaded firmware |
+| `mvirt-one/target/mvirt-one.efi` | UKI (kernel + initramfs + cmdline) |
+| `mvirt-one/target/cloud-hypervisor` | Downloaded hypervisor binary |
+| `mvirt-one/target/hypervisor-fw` | Downloaded firmware |
 
 ## Development Workflow
 
 ### Code Changes
 
-1. Edit code in any module (`mvirt-cli/`, `mvirt-vmm/`, `mvirt-zfs/`, `mvirt-net/`, `mvirt-log/`, `mvirt-uos/pideisn/`)
+1. Edit code in any module (`mvirt-cli/`, `mvirt-vmm/`, `mvirt-zfs/`, `mvirt-net/`, `mvirt-log/`, `mvirt-one/pideisn/`)
 2. Run `cargo fmt && cargo clippy --workspace` to check formatting and lints
-3. Run `make uos` to rebuild UKI, or `cargo build` for daemons only
+3. Run `make one` to rebuild UKI, or `cargo build` for daemons only
 
 ### Testing with cloud-hypervisor
 
 ```bash
 # Build UKI
-make uos
+make one
 
 # Test with cloud-hypervisor (direct kernel boot)
 cloud-hypervisor \
-    --kernel mvirt-uos/target/mvirt-uos.efi \
+    --kernel mvirt-one/target/mvirt-one.efi \
     --cpus boot=1 --memory size=512M \
     --console off --serial tty
 ```

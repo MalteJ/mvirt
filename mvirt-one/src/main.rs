@@ -5,7 +5,7 @@
 use anyhow::Result;
 use clap::Parser;
 use log::{error, info};
-use mvirt_one::proto::uos_service_server::UosServiceServer;
+use mvirt_one::proto::one_service_server::OneServiceServer;
 use mvirt_one::utils::{mount, network, signals};
 use mvirt_one::{Config, create_api_handler, initialize_services};
 use nix::sys::prctl;
@@ -189,7 +189,7 @@ async fn run_local(args: Args) -> Result<()> {
     info!("mvirt-one ready, listening on {}", addr);
 
     Server::builder()
-        .add_service(UosServiceServer::new(api_handler))
+        .add_service(OneServiceServer::new(api_handler))
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
         .await?;
 
@@ -207,7 +207,7 @@ async fn start_vsock_server(
     use tonic::transport::server::Connected;
 
     // CID_ANY (u32::MAX) means accept connections from any CID
-    // Port 1024 is our chosen port for the uos API
+    // Port 1024 is our chosen port for the one API
     const VSOCK_PORT: u32 = 1024;
 
     let addr = VsockAddr::new(libc::VMADDR_CID_ANY, VSOCK_PORT);
@@ -290,7 +290,7 @@ async fn start_vsock_server(
         };
 
         if let Err(e) = Server::builder()
-            .add_service(UosServiceServer::new(api_handler))
+            .add_service(OneServiceServer::new(api_handler))
             .serve_with_incoming(incoming)
             .await
         {
