@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use crate::command::{
-    Command, NetworkData, NicData, NicStateData, NodeData, NodeStatus, Response, VmData, VmPhase,
-    VmStatus,
+    Command, ImportJobData, ImportJobState, NetworkData, NicData, NicStateData, NodeData,
+    NodeStatus, ProjectData, Response, SnapshotData, TemplateData, VmData, VmPhase, VmStatus,
+    VolumeData,
 };
 use crate::store::Event;
 
@@ -19,6 +20,10 @@ pub struct ApiState {
     pub networks: HashMap<String, NetworkData>,
     pub nics: HashMap<String, NicData>,
     pub vms: HashMap<String, VmData>,
+    pub projects: HashMap<String, ProjectData>,
+    pub volumes: HashMap<String, VolumeData>,
+    pub templates: HashMap<String, TemplateData>,
+    pub import_jobs: HashMap<String, ImportJobData>,
     /// Idempotency cache for request deduplication
     #[serde(skip)]
     applied_requests: Option<LruCache<String, Response>>,
@@ -31,6 +36,10 @@ impl Default for ApiState {
             networks: HashMap::new(),
             nics: HashMap::new(),
             vms: HashMap::new(),
+            projects: HashMap::new(),
+            volumes: HashMap::new(),
+            templates: HashMap::new(),
+            import_jobs: HashMap::new(),
             applied_requests: Some(LruCache::new(NonZeroUsize::new(1000).unwrap())),
         }
     }
@@ -137,6 +146,107 @@ impl ApiState {
             .values()
             .filter(|v| v.status.phase == phase)
             .collect()
+    }
+
+    /// List VMs by project
+    pub fn list_vms_by_project(&self, project_id: &str) -> Vec<&VmData> {
+        self.vms
+            .values()
+            .filter(|v| v.spec.project_id.as_deref() == Some(project_id))
+            .collect()
+    }
+
+    // =========================================================================
+    // Project queries
+    // =========================================================================
+
+    /// Get a project by ID
+    pub fn get_project(&self, id: &str) -> Option<&ProjectData> {
+        self.projects.get(id)
+    }
+
+    /// Get a project by name
+    pub fn get_project_by_name(&self, name: &str) -> Option<&ProjectData> {
+        self.projects.values().find(|p| p.name == name)
+    }
+
+    /// List all projects
+    pub fn list_projects(&self) -> Vec<&ProjectData> {
+        self.projects.values().collect()
+    }
+
+    // =========================================================================
+    // Volume queries
+    // =========================================================================
+
+    /// Get a volume by ID
+    pub fn get_volume(&self, id: &str) -> Option<&VolumeData> {
+        self.volumes.get(id)
+    }
+
+    /// Get a volume by name within a project
+    pub fn get_volume_by_name(&self, project_id: &str, name: &str) -> Option<&VolumeData> {
+        self.volumes
+            .values()
+            .find(|v| v.project_id == project_id && v.name == name)
+    }
+
+    /// List all volumes, optionally filtered by project or node
+    pub fn list_volumes(
+        &self,
+        project_id: Option<&str>,
+        node_id: Option<&str>,
+    ) -> Vec<&VolumeData> {
+        self.volumes
+            .values()
+            .filter(|v| {
+                project_id.is_none_or(|pid| v.project_id == pid)
+                    && node_id.is_none_or(|nid| v.node_id == nid)
+            })
+            .collect()
+    }
+
+    // =========================================================================
+    // Template queries
+    // =========================================================================
+
+    /// Get a template by ID
+    pub fn get_template(&self, id: &str) -> Option<&TemplateData> {
+        self.templates.get(id)
+    }
+
+    /// Get a template by name
+    pub fn get_template_by_name(&self, name: &str) -> Option<&TemplateData> {
+        self.templates.values().find(|t| t.name == name)
+    }
+
+    /// List all templates, optionally filtered by node
+    pub fn list_templates(&self, node_id: Option<&str>) -> Vec<&TemplateData> {
+        match node_id {
+            Some(nid) => self
+                .templates
+                .values()
+                .filter(|t| t.node_id == nid)
+                .collect(),
+            None => self.templates.values().collect(),
+        }
+    }
+
+    // =========================================================================
+    // Import job queries
+    // =========================================================================
+
+    /// Get an import job by ID
+    pub fn get_import_job(&self, id: &str) -> Option<&ImportJobData> {
+        self.import_jobs.get(id)
+    }
+
+    /// List import jobs, optionally filtered by state
+    pub fn list_import_jobs(&self, state: Option<ImportJobState>) -> Vec<&ImportJobData> {
+        match state {
+            Some(s) => self.import_jobs.values().filter(|j| j.state == s).collect(),
+            None => self.import_jobs.values().collect(),
+        }
     }
 
     /// Ensure the idempotency cache is initialized (after deserialization)
@@ -627,6 +737,356 @@ impl StateMachine<Command, Response> for ApiState {
                     vec![],
                 ),
             },
+
+            // =================================================================
+            // Project Commands
+            // =================================================================
+            Command::CreateProject {
+                id,
+                timestamp,
+                name,
+                description,
+                ..
+            } => {
+                // Check for duplicate name
+                if self.projects.values().any(|p| p.name == name) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Project with name '{}' already exists", name),
+                        },
+                        vec![],
+                    );
+                }
+
+                // Check for duplicate ID (idempotency)
+                if self.projects.contains_key(&id) {
+                    return (
+                        Response::Project(self.projects.get(&id).unwrap().clone()),
+                        vec![],
+                    );
+                }
+
+                let project = ProjectData {
+                    id: id.clone(),
+                    name,
+                    description,
+                    created_at: timestamp,
+                };
+
+                self.projects.insert(id, project.clone());
+                (Response::Project(project), vec![])
+            }
+
+            Command::DeleteProject { id, .. } => match self.projects.remove(&id) {
+                Some(_) => (Response::Deleted { id }, vec![]),
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("Project '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
+
+            // =================================================================
+            // Volume Commands
+            // =================================================================
+            Command::CreateVolume {
+                id,
+                timestamp,
+                project_id,
+                node_id,
+                name,
+                size_bytes,
+                template_id,
+                ..
+            } => {
+                // Check project exists
+                if !self.projects.contains_key(&project_id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Project '{}' not found", project_id),
+                        },
+                        vec![],
+                    );
+                }
+
+                // Check for duplicate ID (idempotency)
+                if self.volumes.contains_key(&id) {
+                    return (
+                        Response::Volume(self.volumes.get(&id).unwrap().clone()),
+                        vec![],
+                    );
+                }
+
+                // Check for duplicate name within project
+                if self
+                    .volumes
+                    .values()
+                    .any(|v| v.project_id == project_id && v.name == name)
+                {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!(
+                                "Volume with name '{}' already exists in project",
+                                name
+                            ),
+                        },
+                        vec![],
+                    );
+                }
+
+                // If cloning from template, verify template exists on same node
+                if let Some(ref tid) = template_id {
+                    match self.templates.get(tid) {
+                        Some(template) => {
+                            if template.node_id != node_id {
+                                return (
+                                    Response::Error {
+                                        code: 409,
+                                        message: format!(
+                                            "Template {} is on node {} but volume targets node {}",
+                                            tid, template.node_id, node_id
+                                        ),
+                                    },
+                                    vec![],
+                                );
+                            }
+                        }
+                        None => {
+                            return (
+                                Response::Error {
+                                    code: 404,
+                                    message: format!("Template '{}' not found", tid),
+                                },
+                                vec![],
+                            );
+                        }
+                    }
+                }
+
+                let volume = VolumeData {
+                    id: id.clone(),
+                    project_id,
+                    node_id,
+                    name,
+                    path: format!("/dev/zvol/pool/vol-{}", id),
+                    size_bytes,
+                    used_bytes: 0,
+                    compression_ratio: 1.0,
+                    snapshots: vec![],
+                    template_id,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                };
+
+                // Increment template clone count if cloning
+                if let Some(tid) = &volume.template_id
+                    && let Some(template) = self.templates.get_mut(tid)
+                {
+                    template.clone_count += 1;
+                }
+
+                self.volumes.insert(id, volume.clone());
+                (Response::Volume(volume), vec![])
+            }
+
+            Command::DeleteVolume { id, .. } => match self.volumes.remove(&id) {
+                Some(vol) => {
+                    // Decrement template clone count if was cloned
+                    if let Some(tid) = &vol.template_id
+                        && let Some(template) = self.templates.get_mut(tid)
+                    {
+                        template.clone_count = template.clone_count.saturating_sub(1);
+                    }
+                    (Response::Deleted { id }, vec![])
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("Volume '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
+
+            Command::ResizeVolume {
+                id,
+                timestamp,
+                size_bytes,
+                ..
+            } => match self.volumes.get_mut(&id) {
+                Some(vol) => {
+                    // Only allow growing, not shrinking
+                    if size_bytes < vol.size_bytes {
+                        return (
+                            Response::Error {
+                                code: 400,
+                                message: "Cannot shrink volume".to_string(),
+                            },
+                            vec![],
+                        );
+                    }
+                    vol.size_bytes = size_bytes;
+                    vol.updated_at = timestamp;
+                    (Response::Volume(vol.clone()), vec![])
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("Volume '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
+
+            Command::CreateSnapshot {
+                id,
+                timestamp,
+                volume_id,
+                name,
+                ..
+            } => match self.volumes.get_mut(&volume_id) {
+                Some(vol) => {
+                    // Check for duplicate snapshot name
+                    if vol.snapshots.iter().any(|s| s.name == name) {
+                        return (
+                            Response::Error {
+                                code: 409,
+                                message: format!(
+                                    "Snapshot with name '{}' already exists on volume",
+                                    name
+                                ),
+                            },
+                            vec![],
+                        );
+                    }
+
+                    let snapshot = SnapshotData {
+                        id,
+                        name,
+                        created_at: timestamp.clone(),
+                        used_bytes: 0,
+                    };
+                    vol.snapshots.push(snapshot);
+                    vol.updated_at = timestamp;
+                    (Response::Volume(vol.clone()), vec![])
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("Volume '{}' not found", volume_id),
+                    },
+                    vec![],
+                ),
+            },
+
+            // =================================================================
+            // Template Commands
+            // =================================================================
+            Command::CreateTemplate {
+                id,
+                timestamp,
+                node_id,
+                name,
+                size_bytes,
+                ..
+            } => {
+                // Check for duplicate name
+                if self.templates.values().any(|t| t.name == name) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Template with name '{}' already exists", name),
+                        },
+                        vec![],
+                    );
+                }
+
+                // Check for duplicate ID (idempotency)
+                if self.templates.contains_key(&id) {
+                    return (
+                        Response::Template(self.templates.get(&id).unwrap().clone()),
+                        vec![],
+                    );
+                }
+
+                let template = TemplateData {
+                    id: id.clone(),
+                    node_id,
+                    name,
+                    size_bytes,
+                    clone_count: 0,
+                    created_at: timestamp,
+                };
+
+                self.templates.insert(id, template.clone());
+                (Response::Template(template), vec![])
+            }
+
+            // =================================================================
+            // Import Job Commands
+            // =================================================================
+            Command::CreateImportJob {
+                id,
+                timestamp,
+                node_id,
+                template_name,
+                url,
+                total_bytes,
+                ..
+            } => {
+                // Check for duplicate ID (idempotency)
+                if self.import_jobs.contains_key(&id) {
+                    return (
+                        Response::ImportJob(self.import_jobs.get(&id).unwrap().clone()),
+                        vec![],
+                    );
+                }
+
+                let job = ImportJobData {
+                    id: id.clone(),
+                    node_id,
+                    template_name,
+                    url,
+                    state: ImportJobState::Pending,
+                    bytes_written: 0,
+                    total_bytes,
+                    error: None,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                };
+
+                self.import_jobs.insert(id, job.clone());
+                (Response::ImportJob(job), vec![])
+            }
+
+            Command::UpdateImportJob {
+                id,
+                timestamp,
+                bytes_written,
+                state,
+                error,
+                ..
+            } => match self.import_jobs.get_mut(&id) {
+                Some(job) => {
+                    job.bytes_written = bytes_written;
+                    job.state = state;
+                    job.error = error;
+                    job.updated_at = timestamp;
+                    (Response::ImportJob(job.clone()), vec![])
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("Import job '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
         };
 
         // Cache the response
@@ -1111,6 +1571,680 @@ mod tests {
             id: "non-existent".to_string(),
         };
         let response = apply(&mut state, delete_cmd);
+
+        assert!(matches!(response, Response::Error { code: 404, .. }));
+    }
+
+    // =========================================================================
+    // Project Tests
+    // =========================================================================
+
+    fn create_project_cmd(request_id: &str, id: &str, name: &str) -> Command {
+        Command::CreateProject {
+            request_id: request_id.to_string(),
+            id: id.to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            name: name.to_string(),
+            description: Some("Test project".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_create_project() {
+        let mut state = ApiState::default();
+        let cmd = create_project_cmd("req-1", "proj-1", "my-project");
+        let response = apply(&mut state, cmd);
+
+        match response {
+            Response::Project(data) => {
+                assert_eq!(data.id, "proj-1");
+                assert_eq!(data.name, "my-project");
+                assert_eq!(data.description, Some("Test project".to_string()));
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+
+        assert!(state.get_project("proj-1").is_some());
+        assert_eq!(state.list_projects().len(), 1);
+    }
+
+    #[test]
+    fn test_create_project_duplicate_name() {
+        let mut state = ApiState::default();
+
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "dup-name"),
+        );
+
+        let response = apply(
+            &mut state,
+            create_project_cmd("req-2", "proj-2", "dup-name"),
+        );
+        assert!(matches!(response, Response::Error { code: 409, .. }));
+    }
+
+    #[test]
+    fn test_delete_project() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "to-delete"),
+        );
+
+        let delete_cmd = Command::DeleteProject {
+            request_id: "req-2".to_string(),
+            id: "proj-1".to_string(),
+        };
+        let response = apply(&mut state, delete_cmd);
+
+        assert!(matches!(response, Response::Deleted { .. }));
+        assert!(state.get_project("proj-1").is_none());
+    }
+
+    #[test]
+    fn test_delete_project_not_found() {
+        let mut state = ApiState::default();
+
+        let delete_cmd = Command::DeleteProject {
+            request_id: "req-1".to_string(),
+            id: "non-existent".to_string(),
+        };
+        let response = apply(&mut state, delete_cmd);
+
+        assert!(matches!(response, Response::Error { code: 404, .. }));
+    }
+
+    #[test]
+    fn test_get_project_by_name() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-uuid", "findme"),
+        );
+
+        let project = state.get_project_by_name("findme");
+        assert!(project.is_some());
+        assert_eq!(project.unwrap().id, "proj-uuid");
+
+        assert!(state.get_project_by_name("unknown").is_none());
+    }
+
+    // =========================================================================
+    // Volume Tests
+    // =========================================================================
+
+    fn create_volume_cmd(
+        request_id: &str,
+        id: &str,
+        project_id: &str,
+        node_id: &str,
+        name: &str,
+        size: u64,
+    ) -> Command {
+        Command::CreateVolume {
+            request_id: request_id.to_string(),
+            id: id.to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            project_id: project_id.to_string(),
+            node_id: node_id.to_string(),
+            name: name.to_string(),
+            size_bytes: size,
+            template_id: None,
+        }
+    }
+
+    #[test]
+    fn test_create_volume() {
+        let mut state = ApiState::default();
+
+        // Create project first
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+
+        // Create volume
+        let cmd = create_volume_cmd(
+            "req-2",
+            "vol-1",
+            "proj-1",
+            "node-1",
+            "my-volume",
+            10_000_000,
+        );
+        let response = apply(&mut state, cmd);
+
+        match response {
+            Response::Volume(data) => {
+                assert_eq!(data.id, "vol-1");
+                assert_eq!(data.project_id, "proj-1");
+                assert_eq!(data.node_id, "node-1");
+                assert_eq!(data.name, "my-volume");
+                assert_eq!(data.size_bytes, 10_000_000);
+                assert!(data.path.contains("vol-1"));
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+
+        assert!(state.get_volume("vol-1").is_some());
+    }
+
+    #[test]
+    fn test_create_volume_project_not_found() {
+        let mut state = ApiState::default();
+
+        let cmd = create_volume_cmd("req-1", "vol-1", "non-existent", "node-1", "volume", 1000);
+        let response = apply(&mut state, cmd);
+
+        assert!(matches!(response, Response::Error { code: 404, .. }));
+    }
+
+    #[test]
+    fn test_create_volume_duplicate_name_in_project() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+        apply(
+            &mut state,
+            create_volume_cmd("req-2", "vol-1", "proj-1", "node-1", "dup-name", 1000),
+        );
+
+        let response = apply(
+            &mut state,
+            create_volume_cmd("req-3", "vol-2", "proj-1", "node-1", "dup-name", 1000),
+        );
+        assert!(matches!(response, Response::Error { code: 409, .. }));
+    }
+
+    #[test]
+    fn test_resize_volume() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+        apply(
+            &mut state,
+            create_volume_cmd("req-2", "vol-1", "proj-1", "node-1", "volume", 1000),
+        );
+
+        // Resize larger
+        let resize_cmd = Command::ResizeVolume {
+            request_id: "req-3".to_string(),
+            id: "vol-1".to_string(),
+            timestamp: "2024-01-01T00:00:01Z".to_string(),
+            size_bytes: 2000,
+        };
+        let response = apply(&mut state, resize_cmd);
+
+        match response {
+            Response::Volume(data) => {
+                assert_eq!(data.size_bytes, 2000);
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resize_volume_cannot_shrink() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+        apply(
+            &mut state,
+            create_volume_cmd("req-2", "vol-1", "proj-1", "node-1", "volume", 2000),
+        );
+
+        // Try to shrink
+        let resize_cmd = Command::ResizeVolume {
+            request_id: "req-3".to_string(),
+            id: "vol-1".to_string(),
+            timestamp: "2024-01-01T00:00:01Z".to_string(),
+            size_bytes: 1000,
+        };
+        let response = apply(&mut state, resize_cmd);
+
+        assert!(matches!(response, Response::Error { code: 400, .. }));
+    }
+
+    #[test]
+    fn test_create_snapshot() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+        apply(
+            &mut state,
+            create_volume_cmd("req-2", "vol-1", "proj-1", "node-1", "volume", 1000),
+        );
+
+        let snap_cmd = Command::CreateSnapshot {
+            request_id: "req-3".to_string(),
+            id: "snap-1".to_string(),
+            timestamp: "2024-01-01T00:00:01Z".to_string(),
+            volume_id: "vol-1".to_string(),
+            name: "my-snapshot".to_string(),
+        };
+        let response = apply(&mut state, snap_cmd);
+
+        match response {
+            Response::Volume(data) => {
+                assert_eq!(data.snapshots.len(), 1);
+                assert_eq!(data.snapshots[0].name, "my-snapshot");
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_create_snapshot_duplicate_name() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+        apply(
+            &mut state,
+            create_volume_cmd("req-2", "vol-1", "proj-1", "node-1", "volume", 1000),
+        );
+
+        // Create first snapshot
+        apply(
+            &mut state,
+            Command::CreateSnapshot {
+                request_id: "req-3".to_string(),
+                id: "snap-1".to_string(),
+                timestamp: "2024-01-01T00:00:01Z".to_string(),
+                volume_id: "vol-1".to_string(),
+                name: "dup-snap".to_string(),
+            },
+        );
+
+        // Try to create duplicate
+        let response = apply(
+            &mut state,
+            Command::CreateSnapshot {
+                request_id: "req-4".to_string(),
+                id: "snap-2".to_string(),
+                timestamp: "2024-01-01T00:00:02Z".to_string(),
+                volume_id: "vol-1".to_string(),
+                name: "dup-snap".to_string(),
+            },
+        );
+
+        assert!(matches!(response, Response::Error { code: 409, .. }));
+    }
+
+    #[test]
+    fn test_delete_volume() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+        apply(
+            &mut state,
+            create_volume_cmd("req-2", "vol-1", "proj-1", "node-1", "volume", 1000),
+        );
+
+        let delete_cmd = Command::DeleteVolume {
+            request_id: "req-3".to_string(),
+            id: "vol-1".to_string(),
+        };
+        let response = apply(&mut state, delete_cmd);
+
+        assert!(matches!(response, Response::Deleted { .. }));
+        assert!(state.get_volume("vol-1").is_none());
+    }
+
+    #[test]
+    fn test_list_volumes_filter() {
+        let mut state = ApiState::default();
+        apply(&mut state, create_project_cmd("req-1", "proj-1", "proj-1"));
+        apply(&mut state, create_project_cmd("req-2", "proj-2", "proj-2"));
+
+        apply(
+            &mut state,
+            create_volume_cmd("req-3", "vol-1", "proj-1", "node-1", "vol-1", 1000),
+        );
+        apply(
+            &mut state,
+            create_volume_cmd("req-4", "vol-2", "proj-1", "node-2", "vol-2", 1000),
+        );
+        apply(
+            &mut state,
+            create_volume_cmd("req-5", "vol-3", "proj-2", "node-1", "vol-3", 1000),
+        );
+
+        // All volumes
+        assert_eq!(state.list_volumes(None, None).len(), 3);
+
+        // Filter by project
+        assert_eq!(state.list_volumes(Some("proj-1"), None).len(), 2);
+
+        // Filter by node
+        assert_eq!(state.list_volumes(None, Some("node-1")).len(), 2);
+
+        // Filter by both
+        assert_eq!(state.list_volumes(Some("proj-1"), Some("node-1")).len(), 1);
+    }
+
+    // =========================================================================
+    // Template Tests
+    // =========================================================================
+
+    fn create_template_cmd(request_id: &str, id: &str, node_id: &str, name: &str) -> Command {
+        Command::CreateTemplate {
+            request_id: request_id.to_string(),
+            id: id.to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            node_id: node_id.to_string(),
+            name: name.to_string(),
+            size_bytes: 1_000_000_000,
+        }
+    }
+
+    #[test]
+    fn test_create_template() {
+        let mut state = ApiState::default();
+
+        let cmd = create_template_cmd("req-1", "tmpl-1", "node-1", "ubuntu-22.04");
+        let response = apply(&mut state, cmd);
+
+        match response {
+            Response::Template(data) => {
+                assert_eq!(data.id, "tmpl-1");
+                assert_eq!(data.node_id, "node-1");
+                assert_eq!(data.name, "ubuntu-22.04");
+                assert_eq!(data.clone_count, 0);
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+
+        assert!(state.get_template("tmpl-1").is_some());
+    }
+
+    #[test]
+    fn test_create_template_duplicate_name() {
+        let mut state = ApiState::default();
+
+        apply(
+            &mut state,
+            create_template_cmd("req-1", "tmpl-1", "node-1", "dup-name"),
+        );
+
+        let response = apply(
+            &mut state,
+            create_template_cmd("req-2", "tmpl-2", "node-2", "dup-name"),
+        );
+        assert!(matches!(response, Response::Error { code: 409, .. }));
+    }
+
+    #[test]
+    fn test_volume_from_template_increments_clone_count() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+        apply(
+            &mut state,
+            create_template_cmd("req-2", "tmpl-1", "node-1", "ubuntu"),
+        );
+
+        // Clone from template
+        let vol_cmd = Command::CreateVolume {
+            request_id: "req-3".to_string(),
+            id: "vol-1".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            project_id: "proj-1".to_string(),
+            node_id: "node-1".to_string(),
+            name: "cloned-vol".to_string(),
+            size_bytes: 10_000_000,
+            template_id: Some("tmpl-1".to_string()),
+        };
+        apply(&mut state, vol_cmd);
+
+        // Check clone count incremented
+        let template = state.get_template("tmpl-1").unwrap();
+        assert_eq!(template.clone_count, 1);
+    }
+
+    #[test]
+    fn test_delete_volume_decrements_clone_count() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+        apply(
+            &mut state,
+            create_template_cmd("req-2", "tmpl-1", "node-1", "ubuntu"),
+        );
+
+        // Clone from template
+        apply(
+            &mut state,
+            Command::CreateVolume {
+                request_id: "req-3".to_string(),
+                id: "vol-1".to_string(),
+                timestamp: "2024-01-01T00:00:00Z".to_string(),
+                project_id: "proj-1".to_string(),
+                node_id: "node-1".to_string(),
+                name: "cloned-vol".to_string(),
+                size_bytes: 10_000_000,
+                template_id: Some("tmpl-1".to_string()),
+            },
+        );
+
+        assert_eq!(state.get_template("tmpl-1").unwrap().clone_count, 1);
+
+        // Delete volume
+        apply(
+            &mut state,
+            Command::DeleteVolume {
+                request_id: "req-4".to_string(),
+                id: "vol-1".to_string(),
+            },
+        );
+
+        assert_eq!(state.get_template("tmpl-1").unwrap().clone_count, 0);
+    }
+
+    #[test]
+    fn test_volume_from_template_wrong_node() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "proj-1", "test-proj"),
+        );
+        apply(
+            &mut state,
+            create_template_cmd("req-2", "tmpl-1", "node-1", "ubuntu"),
+        );
+
+        // Try to clone on different node
+        let vol_cmd = Command::CreateVolume {
+            request_id: "req-3".to_string(),
+            id: "vol-1".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            project_id: "proj-1".to_string(),
+            node_id: "node-2".to_string(), // Different node!
+            name: "cloned-vol".to_string(),
+            size_bytes: 10_000_000,
+            template_id: Some("tmpl-1".to_string()),
+        };
+        let response = apply(&mut state, vol_cmd);
+
+        assert!(matches!(response, Response::Error { code: 409, .. }));
+    }
+
+    // =========================================================================
+    // Import Job Tests
+    // =========================================================================
+
+    #[test]
+    fn test_create_import_job() {
+        let mut state = ApiState::default();
+
+        let cmd = Command::CreateImportJob {
+            request_id: "req-1".to_string(),
+            id: "job-1".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            node_id: "node-1".to_string(),
+            template_name: "ubuntu-22.04".to_string(),
+            url: "https://example.com/ubuntu.qcow2".to_string(),
+            total_bytes: 2_000_000_000,
+        };
+        let response = apply(&mut state, cmd);
+
+        match response {
+            Response::ImportJob(data) => {
+                assert_eq!(data.id, "job-1");
+                assert_eq!(data.state, ImportJobState::Pending);
+                assert_eq!(data.bytes_written, 0);
+                assert_eq!(data.total_bytes, 2_000_000_000);
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+
+        assert!(state.get_import_job("job-1").is_some());
+    }
+
+    #[test]
+    fn test_update_import_job_progress() {
+        let mut state = ApiState::default();
+
+        // Create import job
+        apply(
+            &mut state,
+            Command::CreateImportJob {
+                request_id: "req-1".to_string(),
+                id: "job-1".to_string(),
+                timestamp: "2024-01-01T00:00:00Z".to_string(),
+                node_id: "node-1".to_string(),
+                template_name: "ubuntu".to_string(),
+                url: "https://example.com/ubuntu.qcow2".to_string(),
+                total_bytes: 1000,
+            },
+        );
+
+        // Update to running with progress
+        let update_cmd = Command::UpdateImportJob {
+            request_id: "req-2".to_string(),
+            id: "job-1".to_string(),
+            timestamp: "2024-01-01T00:00:01Z".to_string(),
+            bytes_written: 500,
+            state: ImportJobState::Running,
+            error: None,
+        };
+        let response = apply(&mut state, update_cmd);
+
+        match response {
+            Response::ImportJob(data) => {
+                assert_eq!(data.state, ImportJobState::Running);
+                assert_eq!(data.bytes_written, 500);
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_update_import_job_completed() {
+        let mut state = ApiState::default();
+
+        apply(
+            &mut state,
+            Command::CreateImportJob {
+                request_id: "req-1".to_string(),
+                id: "job-1".to_string(),
+                timestamp: "2024-01-01T00:00:00Z".to_string(),
+                node_id: "node-1".to_string(),
+                template_name: "ubuntu".to_string(),
+                url: "https://example.com/ubuntu.qcow2".to_string(),
+                total_bytes: 1000,
+            },
+        );
+
+        // Complete the job
+        let update_cmd = Command::UpdateImportJob {
+            request_id: "req-2".to_string(),
+            id: "job-1".to_string(),
+            timestamp: "2024-01-01T00:00:01Z".to_string(),
+            bytes_written: 1000,
+            state: ImportJobState::Completed,
+            error: None,
+        };
+        let response = apply(&mut state, update_cmd);
+
+        match response {
+            Response::ImportJob(data) => {
+                assert_eq!(data.state, ImportJobState::Completed);
+                assert_eq!(data.bytes_written, 1000);
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_update_import_job_failed() {
+        let mut state = ApiState::default();
+
+        apply(
+            &mut state,
+            Command::CreateImportJob {
+                request_id: "req-1".to_string(),
+                id: "job-1".to_string(),
+                timestamp: "2024-01-01T00:00:00Z".to_string(),
+                node_id: "node-1".to_string(),
+                template_name: "ubuntu".to_string(),
+                url: "https://example.com/ubuntu.qcow2".to_string(),
+                total_bytes: 1000,
+            },
+        );
+
+        // Fail the job
+        let update_cmd = Command::UpdateImportJob {
+            request_id: "req-2".to_string(),
+            id: "job-1".to_string(),
+            timestamp: "2024-01-01T00:00:01Z".to_string(),
+            bytes_written: 100,
+            state: ImportJobState::Failed,
+            error: Some("Download failed: connection reset".to_string()),
+        };
+        let response = apply(&mut state, update_cmd);
+
+        match response {
+            Response::ImportJob(data) => {
+                assert_eq!(data.state, ImportJobState::Failed);
+                assert_eq!(
+                    data.error,
+                    Some("Download failed: connection reset".to_string())
+                );
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_update_import_job_not_found() {
+        let mut state = ApiState::default();
+
+        let update_cmd = Command::UpdateImportJob {
+            request_id: "req-1".to_string(),
+            id: "non-existent".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            bytes_written: 0,
+            state: ImportJobState::Running,
+            error: None,
+        };
+        let response = apply(&mut state, update_cmd);
 
         assert!(matches!(response, Response::Error { code: 404, .. }));
     }

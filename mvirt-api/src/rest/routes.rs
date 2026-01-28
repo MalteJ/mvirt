@@ -7,6 +7,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use super::handlers::{self, AppState};
+use super::ui_handlers;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -92,7 +93,8 @@ use super::handlers::{self, AppState};
 pub struct ApiDoc;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    let api_routes = Router::new()
+    // Internal API routes (for hypervisor nodes, cluster management)
+    let internal_routes = Router::new()
         // System
         .route("/version", get(handlers::get_version))
         // Cluster
@@ -108,29 +110,67 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/nodes/{id}/status",
             patch(handlers::update_hypervisor_node_status),
         )
-        .route("/nodes/{id}", delete(handlers::deregister_hypervisor_node))
-        // Networks
-        .route("/networks", get(handlers::list_networks))
-        .route("/networks", post(handlers::create_network))
-        .route("/networks/{id}", get(handlers::get_network))
-        .route("/networks/{id}", patch(handlers::update_network))
-        .route("/networks/{id}", delete(handlers::delete_network))
-        // NICs
-        .route("/nics", get(handlers::list_nics))
-        .route("/nics", post(handlers::create_nic))
-        .route("/nics/{id}", get(handlers::get_nic))
-        .route("/nics/{id}", patch(handlers::update_nic))
-        .route("/nics/{id}", delete(handlers::delete_nic))
-        // VMs
-        .route("/vms", get(handlers::list_vms))
-        .route("/vms", post(handlers::create_vm))
-        .route("/vms/{id}", get(handlers::get_vm))
-        .route("/vms/{id}/spec", patch(handlers::update_vm_spec))
-        .route("/vms/{id}/status", patch(handlers::update_vm_status))
-        .route("/vms/{id}", delete(handlers::delete_vm));
+        .route("/nodes/{id}", delete(handlers::deregister_hypervisor_node));
+
+    // UI-compatible API routes
+    let ui_routes = Router::new()
+        // Projects
+        .route("/projects", get(ui_handlers::list_projects))
+        .route("/projects", post(ui_handlers::create_project))
+        .route("/projects/{id}", get(ui_handlers::get_project))
+        .route("/projects/{id}", delete(ui_handlers::delete_project))
+        // VMs (UI-compatible)
+        .route("/vms", get(ui_handlers::list_vms))
+        .route("/vms", post(ui_handlers::create_vm))
+        .route("/vms/{id}", get(ui_handlers::get_vm))
+        .route("/vms/{id}", delete(ui_handlers::delete_vm))
+        .route("/vms/{id}/start", post(ui_handlers::start_vm))
+        .route("/vms/{id}/stop", post(ui_handlers::stop_vm))
+        .route("/vms/{id}/kill", post(ui_handlers::kill_vm))
+        .route("/vms/{id}/console", get(ui_handlers::console_ws))
+        .route("/events/vms", get(ui_handlers::vm_events))
+        // Networks (UI-compatible)
+        .route("/networks", get(ui_handlers::list_networks))
+        .route("/networks", post(ui_handlers::create_network))
+        .route("/networks/{id}", get(ui_handlers::get_network))
+        .route("/networks/{id}", delete(ui_handlers::delete_network))
+        // NICs (UI-compatible)
+        .route("/nics", get(ui_handlers::list_nics))
+        .route("/nics", post(ui_handlers::create_nic))
+        .route("/nics/{id}", get(ui_handlers::get_nic))
+        .route("/nics/{id}", delete(ui_handlers::delete_nic))
+        .route("/nics/{id}/attach", post(ui_handlers::attach_nic))
+        .route("/nics/{id}/detach", post(ui_handlers::detach_nic))
+        // Storage
+        .route("/storage/volumes", get(ui_handlers::list_volumes))
+        .route("/storage/volumes", post(ui_handlers::create_volume))
+        .route("/storage/volumes/{id}", get(ui_handlers::get_volume))
+        .route("/storage/volumes/{id}", delete(ui_handlers::delete_volume))
+        .route(
+            "/storage/volumes/{id}/resize",
+            post(ui_handlers::resize_volume),
+        )
+        .route(
+            "/storage/volumes/{id}/snapshots",
+            post(ui_handlers::create_snapshot),
+        )
+        .route("/storage/templates", get(ui_handlers::list_templates))
+        .route(
+            "/storage/templates/import",
+            post(ui_handlers::import_template),
+        )
+        .route(
+            "/storage/import-jobs/{id}",
+            get(ui_handlers::get_import_job),
+        )
+        .route("/storage/pool", get(ui_handlers::get_pool_stats))
+        // Logs
+        .route("/logs", get(ui_handlers::query_logs))
+        .route("/logs/stream", get(ui_handlers::log_events));
 
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-        .nest("/api/v1", api_routes)
+        .nest("/api/v1", internal_routes)
+        .nest("/api/v1", ui_routes)
         .with_state(state)
 }

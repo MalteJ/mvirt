@@ -153,6 +153,89 @@ impl ApiAuditLogger {
             vec![vm_id.to_string()],
         );
     }
+
+    pub fn vm_started(&self, vm_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("VM started: {}", vm_id),
+            vec![vm_id.to_string()],
+        );
+    }
+
+    pub fn vm_stopped(&self, vm_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("VM stopped: {}", vm_id),
+            vec![vm_id.to_string()],
+        );
+    }
+
+    pub fn vm_killed(&self, vm_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("VM killed: {}", vm_id),
+            vec![vm_id.to_string()],
+        );
+    }
+
+    // Project events
+    pub fn project_created(&self, project_id: &str, project_name: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Project created: {} ({})", project_name, project_id),
+            vec![project_id.to_string()],
+        );
+    }
+
+    pub fn project_deleted(&self, project_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Project deleted: {}", project_id),
+            vec![project_id.to_string()],
+        );
+    }
+
+    // Volume events
+    pub fn volume_created(&self, volume_id: &str, volume_name: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Volume created: {} ({})", volume_name, volume_id),
+            vec![volume_id.to_string()],
+        );
+    }
+
+    pub fn volume_deleted(&self, volume_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Volume deleted: {}", volume_id),
+            vec![volume_id.to_string()],
+        );
+    }
+
+    pub fn volume_resized(&self, volume_id: &str, new_size: u64) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Volume resized: {} to {} bytes", volume_id, new_size),
+            vec![volume_id.to_string()],
+        );
+    }
+
+    pub fn snapshot_created(&self, volume_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Snapshot created on volume: {}", volume_id),
+            vec![volume_id.to_string()],
+        );
+    }
+
+    // Template events
+    pub fn template_import_started(&self, job_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Template import started: {}", job_id),
+            vec![job_id.to_string()],
+        );
+    }
 }
 
 pub fn create_audit_logger(log_endpoint: &str) -> Arc<ApiAuditLogger> {

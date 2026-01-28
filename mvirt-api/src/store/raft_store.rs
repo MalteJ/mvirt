@@ -8,14 +8,22 @@ use mraft::RaftNode;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::command::{
-    Command, NetworkData, NicData, NodeData, Response, VmData, VmPhase, VmStatus,
+    Command, ImportJobData, ImportJobState, NetworkData, NicData, NodeData, ProjectData, Response,
+    TemplateData, VmData, VmPhase, VmStatus, VolumeData,
 };
 use crate::scheduler::Scheduler;
 use crate::state::ApiState;
 
 use super::error::{Result, StoreError};
 use super::event::Event;
-use super::traits::*;
+use super::traits::{
+    ClusterInfo, ClusterStore, CreateNetworkRequest, CreateNicRequest, CreateProjectRequest,
+    CreateSnapshotRequest, CreateVmRequest, CreateVolumeRequest, DataStore, DeleteNetworkResult,
+    ImportTemplateRequest, Membership, MembershipNode, NetworkStore, NicStore, NodeStore,
+    ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, TemplateStore, UpdateNetworkRequest,
+    UpdateNicRequest, UpdateNodeStatusRequest, UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore,
+    VolumeStore,
+};
 
 /// RaftStore wraps a RaftNode and implements the DataStore trait.
 ///
@@ -471,6 +479,218 @@ impl ClusterStore for RaftStore {
             }
             _ => StoreError::Internal(e.to_string()),
         })
+    }
+}
+
+#[async_trait]
+impl ProjectStore for RaftStore {
+    async fn list_projects(&self) -> Result<Vec<ProjectData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_projects().into_iter().cloned().collect())
+    }
+
+    async fn get_project(&self, id: &str) -> Result<Option<ProjectData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_project(id).cloned())
+    }
+
+    async fn get_project_by_name(&self, name: &str) -> Result<Option<ProjectData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_project_by_name(name).cloned())
+    }
+
+    async fn create_project(&self, req: CreateProjectRequest) -> Result<ProjectData> {
+        let cmd = Command::CreateProject {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            name: req.name,
+            description: req.description,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Project(data) => Ok(data),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn delete_project(&self, id: &str) -> Result<()> {
+        let cmd = Command::DeleteProject {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+}
+
+#[async_trait]
+impl VolumeStore for RaftStore {
+    async fn list_volumes(
+        &self,
+        project_id: Option<&str>,
+        node_id: Option<&str>,
+    ) -> Result<Vec<VolumeData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state
+            .list_volumes(project_id, node_id)
+            .into_iter()
+            .cloned()
+            .collect())
+    }
+
+    async fn get_volume(&self, id: &str) -> Result<Option<VolumeData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_volume(id).cloned())
+    }
+
+    async fn create_volume(&self, req: CreateVolumeRequest) -> Result<VolumeData> {
+        let cmd = Command::CreateVolume {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            project_id: req.project_id,
+            node_id: req.node_id,
+            name: req.name,
+            size_bytes: req.size_bytes,
+            template_id: req.template_id,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Volume(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn delete_volume(&self, id: &str) -> Result<()> {
+        let cmd = Command::DeleteVolume {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn resize_volume(&self, id: &str, req: ResizeVolumeRequest) -> Result<VolumeData> {
+        let cmd = Command::ResizeVolume {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            size_bytes: req.size_bytes,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Volume(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 400, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn create_snapshot(
+        &self,
+        volume_id: &str,
+        req: CreateSnapshotRequest,
+    ) -> Result<VolumeData> {
+        let cmd = Command::CreateSnapshot {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            volume_id: volume_id.to_string(),
+            name: req.name,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Volume(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+}
+
+#[async_trait]
+impl TemplateStore for RaftStore {
+    async fn list_templates(&self, node_id: Option<&str>) -> Result<Vec<TemplateData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_templates(node_id).into_iter().cloned().collect())
+    }
+
+    async fn get_template(&self, id: &str) -> Result<Option<TemplateData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_template(id).cloned())
+    }
+
+    async fn import_template(&self, req: ImportTemplateRequest) -> Result<ImportJobData> {
+        let cmd = Command::CreateImportJob {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            node_id: req.node_id,
+            template_name: req.name,
+            url: req.url,
+            total_bytes: req.total_bytes,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::ImportJob(data) => Ok(data),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn get_import_job(&self, id: &str) -> Result<Option<ImportJobData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_import_job(id).cloned())
+    }
+
+    async fn update_import_job(
+        &self,
+        id: &str,
+        bytes_written: u64,
+        state: ImportJobState,
+        error: Option<String>,
+    ) -> Result<ImportJobData> {
+        let cmd = Command::UpdateImportJob {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            bytes_written,
+            state,
+            error,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::ImportJob(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
     }
 }
 

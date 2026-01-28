@@ -1,3 +1,6 @@
+// Allow dead code for legacy handlers during transition to UI-compatible API
+#![allow(dead_code)]
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -1174,6 +1177,7 @@ pub async fn create_vm(
 
     let spec = VmSpec {
         name: req.name.clone(),
+        project_id: None,
         node_selector: req.node_selector,
         cpu_cores: req.cpu_cores,
         memory_mb: req.memory_mb,
@@ -1181,6 +1185,7 @@ pub async fn create_vm(
         network_id: req.network_id,
         nic_id: req.nic_id,
         image: req.image,
+        disks: vec![],
         desired_state,
     };
 

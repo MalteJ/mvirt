@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::command::{
-    NetworkData, NicData, NodeData, NodeResources, NodeStatus, VmData, VmDesiredState, VmSpec,
-    VmStatus,
+    ImportJobData, ImportJobState, NetworkData, NicData, NodeData, NodeResources, NodeStatus,
+    ProjectData, TemplateData, VmData, VmDesiredState, VmSpec, VmStatus, VolumeData,
 };
 use std::collections::HashMap;
 
@@ -104,6 +104,56 @@ pub struct UpdateVmSpecRequest {
 #[derive(Debug, Clone)]
 pub struct UpdateVmStatusRequest {
     pub status: VmStatus,
+}
+
+// =============================================================================
+// Project Request DTOs
+// =============================================================================
+
+/// Request to create a new project.
+#[derive(Debug, Clone)]
+pub struct CreateProjectRequest {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+// =============================================================================
+// Volume Request DTOs
+// =============================================================================
+
+/// Request to create a new volume.
+#[derive(Debug, Clone)]
+pub struct CreateVolumeRequest {
+    pub project_id: String,
+    pub node_id: String, // Caller picks node (Shared Nothing)
+    pub name: String,
+    pub size_bytes: u64,
+    pub template_id: Option<String>, // Clone from template
+}
+
+/// Request to resize a volume.
+#[derive(Debug, Clone)]
+pub struct ResizeVolumeRequest {
+    pub size_bytes: u64,
+}
+
+/// Request to create a snapshot.
+#[derive(Debug, Clone)]
+pub struct CreateSnapshotRequest {
+    pub name: String,
+}
+
+// =============================================================================
+// Template Request DTOs
+// =============================================================================
+
+/// Request to import a template.
+#[derive(Debug, Clone)]
+pub struct ImportTemplateRequest {
+    pub node_id: String,
+    pub name: String,
+    pub url: String,
+    pub total_bytes: u64,
 }
 
 // =============================================================================
@@ -260,6 +310,80 @@ pub trait ClusterStore: Send + Sync {
     async fn remove_node(&self, node_id: u64) -> Result<()>;
 }
 
+/// Store trait for project operations.
+#[async_trait]
+pub trait ProjectStore: Send + Sync {
+    /// List all projects.
+    async fn list_projects(&self) -> Result<Vec<ProjectData>>;
+
+    /// Get a project by ID.
+    async fn get_project(&self, id: &str) -> Result<Option<ProjectData>>;
+
+    /// Get a project by name.
+    async fn get_project_by_name(&self, name: &str) -> Result<Option<ProjectData>>;
+
+    /// Create a new project.
+    async fn create_project(&self, req: CreateProjectRequest) -> Result<ProjectData>;
+
+    /// Delete a project.
+    async fn delete_project(&self, id: &str) -> Result<()>;
+}
+
+/// Store trait for volume operations.
+#[async_trait]
+pub trait VolumeStore: Send + Sync {
+    /// List all volumes, optionally filtered by project or node.
+    async fn list_volumes(
+        &self,
+        project_id: Option<&str>,
+        node_id: Option<&str>,
+    ) -> Result<Vec<VolumeData>>;
+
+    /// Get a volume by ID.
+    async fn get_volume(&self, id: &str) -> Result<Option<VolumeData>>;
+
+    /// Create a new volume.
+    async fn create_volume(&self, req: CreateVolumeRequest) -> Result<VolumeData>;
+
+    /// Delete a volume.
+    async fn delete_volume(&self, id: &str) -> Result<()>;
+
+    /// Resize a volume.
+    async fn resize_volume(&self, id: &str, req: ResizeVolumeRequest) -> Result<VolumeData>;
+
+    /// Create a snapshot on a volume.
+    async fn create_snapshot(
+        &self,
+        volume_id: &str,
+        req: CreateSnapshotRequest,
+    ) -> Result<VolumeData>;
+}
+
+/// Store trait for template operations.
+#[async_trait]
+pub trait TemplateStore: Send + Sync {
+    /// List all templates, optionally filtered by node.
+    async fn list_templates(&self, node_id: Option<&str>) -> Result<Vec<TemplateData>>;
+
+    /// Get a template by ID.
+    async fn get_template(&self, id: &str) -> Result<Option<TemplateData>>;
+
+    /// Import a template (starts an import job).
+    async fn import_template(&self, req: ImportTemplateRequest) -> Result<ImportJobData>;
+
+    /// Get an import job by ID.
+    async fn get_import_job(&self, id: &str) -> Result<Option<ImportJobData>>;
+
+    /// Update an import job's progress.
+    async fn update_import_job(
+        &self,
+        id: &str,
+        bytes_written: u64,
+        state: ImportJobState,
+        error: Option<String>,
+    ) -> Result<ImportJobData>;
+}
+
 // =============================================================================
 // Composite DataStore Trait
 // =============================================================================
@@ -271,10 +395,22 @@ pub trait ClusterStore: Send + Sync {
 /// - Network CRUD operations
 /// - NIC CRUD operations
 /// - VM CRUD operations
+/// - Project CRUD operations
+/// - Volume CRUD operations
+/// - Template and import operations
 /// - Cluster management operations
 /// - Event subscription for real-time updates
 pub trait DataStore:
-    NodeStore + NetworkStore + NicStore + VmStore + ClusterStore + Send + Sync
+    NodeStore
+    + NetworkStore
+    + NicStore
+    + VmStore
+    + ProjectStore
+    + VolumeStore
+    + TemplateStore
+    + ClusterStore
+    + Send
+    + Sync
 {
     /// Subscribe to state change events.
     ///

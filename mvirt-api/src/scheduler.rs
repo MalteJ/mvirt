@@ -204,6 +204,7 @@ mod tests {
     fn make_spec(cpu: u32, memory: u64, storage: u64) -> VmSpec {
         VmSpec {
             name: "test-vm".to_string(),
+            project_id: None,
             node_selector: None,
             cpu_cores: cpu,
             memory_mb: memory,
@@ -211,6 +212,7 @@ mod tests {
             network_id: "net-1".to_string(),
             nic_id: None,
             image: "ubuntu:22.04".to_string(),
+            disks: vec![],
             desired_state: VmDesiredState::Running,
         }
     }

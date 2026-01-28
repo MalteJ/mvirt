@@ -111,6 +111,77 @@ pub enum Command {
         request_id: String,
         id: String,
     },
+
+    // Project operations
+    CreateProject {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        name: String,
+        description: Option<String>,
+    },
+    DeleteProject {
+        request_id: String,
+        id: String,
+    },
+
+    // Volume operations (node_id for data locality - Shared Nothing architecture)
+    CreateVolume {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        project_id: String,
+        node_id: String,
+        name: String,
+        size_bytes: u64,
+        template_id: Option<String>,
+    },
+    DeleteVolume {
+        request_id: String,
+        id: String,
+    },
+    ResizeVolume {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        size_bytes: u64,
+    },
+    CreateSnapshot {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        volume_id: String,
+        name: String,
+    },
+
+    // Template operations (node_id for locality)
+    CreateTemplate {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        node_id: String,
+        name: String,
+        size_bytes: u64,
+    },
+
+    // Import job operations
+    CreateImportJob {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        node_id: String,
+        template_name: String,
+        url: String,
+        total_bytes: u64,
+    },
+    UpdateImportJob {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        bytes_written: u64,
+        state: ImportJobState,
+        error: Option<String>,
+    },
 }
 
 impl Command {
@@ -129,6 +200,15 @@ impl Command {
             Command::UpdateVmSpec { request_id, .. } => request_id,
             Command::UpdateVmStatus { request_id, .. } => request_id,
             Command::DeleteVm { request_id, .. } => request_id,
+            Command::CreateProject { request_id, .. } => request_id,
+            Command::DeleteProject { request_id, .. } => request_id,
+            Command::CreateVolume { request_id, .. } => request_id,
+            Command::DeleteVolume { request_id, .. } => request_id,
+            Command::ResizeVolume { request_id, .. } => request_id,
+            Command::CreateSnapshot { request_id, .. } => request_id,
+            Command::CreateTemplate { request_id, .. } => request_id,
+            Command::CreateImportJob { request_id, .. } => request_id,
+            Command::UpdateImportJob { request_id, .. } => request_id,
         }
     }
 }
@@ -237,6 +317,7 @@ pub struct VmData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmSpec {
     pub name: String,
+    pub project_id: Option<String>,    // Project this VM belongs to
     pub node_selector: Option<String>, // Optional: require specific node
     pub cpu_cores: u32,
     pub memory_mb: u64,
@@ -244,7 +325,15 @@ pub struct VmSpec {
     pub network_id: String,
     pub nic_id: Option<String>, // Will be auto-created if not provided
     pub image: String,          // Boot image reference
+    pub disks: Vec<DiskConfig>, // Additional disk volumes
     pub desired_state: VmDesiredState,
+}
+
+/// Disk configuration for a VM
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskConfig {
+    pub volume_id: String,
+    pub readonly: bool,
 }
 
 /// Desired power state for a VM
@@ -306,6 +395,89 @@ pub enum ResourcePhase {
     Failed,
 }
 
+// =============================================================================
+// Project Types
+// =============================================================================
+
+/// Project data stored in the state machine
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectData {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
+// =============================================================================
+// Storage Types (Volumes, Templates, Import Jobs)
+// =============================================================================
+
+/// Volume data stored in the state machine (bound to a specific node)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeData {
+    pub id: String,
+    pub project_id: String,
+    pub node_id: String, // Node where the volume is stored (Shared Nothing)
+    pub name: String,
+    pub path: String, // ZFS path e.g., /dev/zvol/pool/vol-xxx
+    pub size_bytes: u64,
+    pub used_bytes: u64,
+    pub compression_ratio: f64,
+    pub snapshots: Vec<SnapshotData>,
+    pub template_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Snapshot data stored inline in VolumeData
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotData {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    pub used_bytes: u64,
+}
+
+/// Template data stored in the state machine (bound to a specific node)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateData {
+    pub id: String,
+    pub node_id: String, // Node where the template is stored
+    pub name: String,
+    pub size_bytes: u64,
+    pub clone_count: u32,
+    pub created_at: String,
+}
+
+/// Import job data stored in the state machine
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportJobData {
+    pub id: String,
+    pub node_id: String,
+    pub template_name: String,
+    pub url: String,
+    pub state: ImportJobState,
+    pub bytes_written: u64,
+    pub total_bytes: u64,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Import job state
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum ImportJobState {
+    #[default]
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+// =============================================================================
+// Response Types
+// =============================================================================
+
 /// Response from applying a command
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
@@ -313,6 +485,10 @@ pub enum Response {
     Network(NetworkData),
     Nic(NicData),
     Vm(VmData),
+    Project(ProjectData),
+    Volume(VolumeData),
+    Template(TemplateData),
+    ImportJob(ImportJobData),
     Deleted { id: String },
     DeletedWithCount { id: String, nics_deleted: u32 },
     Error { code: u32, message: String },

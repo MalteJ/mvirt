@@ -259,7 +259,7 @@ async fn test_e2e_joined_node_receives_data() {
             "/networks",
             &json!({
                 "name": "pre-join-network",
-                "ipv4_subnet": "10.0.0.0/24"
+                "ipv4Subnet": "10.0.0.0/24"
             }),
         )
         .await;
@@ -291,7 +291,7 @@ async fn test_e2e_joined_node_receives_data() {
 
     let body: Value = get_resp.json().await.unwrap();
     assert_eq!(body["name"].as_str().unwrap(), "pre-join-network");
-    assert_eq!(body["ipv4_subnet"].as_str().unwrap(), "10.0.0.0/24");
+    assert_eq!(body["ipv4Subnet"].as_str().unwrap(), "10.0.0.0/24");
 
     TestCluster::shutdown_all(vec![node1, node2]).await;
 }
