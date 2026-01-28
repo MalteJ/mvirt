@@ -839,10 +839,7 @@ pub async fn list_security_groups(
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<String>,
 ) -> Result<Json<SecurityGroupListResponse>, ApiError> {
-    let groups = state
-        .store
-        .list_security_groups(Some(&project_id))
-        .await?;
+    let groups = state.store.list_security_groups(Some(&project_id)).await?;
     Ok(Json(SecurityGroupListResponse {
         security_groups: groups.into_iter().map(UiSecurityGroup::from).collect(),
     }))

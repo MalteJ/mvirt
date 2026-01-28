@@ -259,10 +259,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/templates/import", post(ui_handlers::import_template))
         // Security Groups
         .route("/security-groups", get(ui_handlers::list_security_groups))
-        .route(
-            "/security-groups",
-            post(ui_handlers::create_security_group),
-        );
+        .route("/security-groups", post(ui_handlers::create_security_group));
 
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
