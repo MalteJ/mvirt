@@ -58,6 +58,12 @@ pub struct IfMac {
 pub const ACTION_DROP: u8 = 0;
 pub const ACTION_REDIRECT: u8 = 1;
 pub const ACTION_PASS: u8 = 2;
+pub const ACTION_TUNNEL_ENCAP: u8 = 3;
+
+// IPv6 tunnel constants
+pub const IPV6_HDR_SIZE: usize = 40;
+pub const IPPROTO_IPIP: u8 = 4; // IPv4-in-IPv6
+pub const IPPROTO_IPV6_ENCAP: u8 = 41; // IPv6-in-IPv6
 
 // EtherTypes
 pub const ETH_P_IP: u16 = 0x0800;
@@ -271,6 +277,80 @@ impl NicSecurityConfig {
             _padding: [0; 3],
             rules_start: 0,
             rules_count: 0,
+        }
+    }
+}
+
+/// Tunnel endpoint for remote hypervisors.
+/// Maps inner destination subnet to remote HV prefix.
+/// Note: Encapsulated packets are passed to kernel routing (TC_ACT_OK),
+/// so no MAC/ifindex needed - kernel handles ND and forwarding.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TunnelEndpoint {
+    /// Remote hypervisor /80 prefix (for outer dst address construction)
+    pub remote_prefix: [u8; 10],
+    /// Alignment padding
+    _pad: [u8; 6],
+}
+
+impl TunnelEndpoint {
+    pub const fn new(remote_prefix: [u8; 10]) -> Self {
+        Self {
+            remote_prefix,
+            _pad: [0; 6],
+        }
+    }
+}
+
+/// Local NIC metadata for tunnel source address construction.
+/// Embedded in outer IPv6 source address for security policy enforcement.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LocalNicInfo {
+    /// Network Function ID (identifies VM/NIC)
+    pub nf_id: u16,
+    /// Security Group ID (24 bits used, for ingress filtering on destination)
+    pub sg_id: u32,
+    /// Local hypervisor /80 prefix
+    pub local_prefix: [u8; 10],
+    /// Alignment padding
+    _pad: [u8; 2],
+}
+
+impl LocalNicInfo {
+    pub const fn new(nf_id: u16, sg_id: u32, local_prefix: [u8; 10]) -> Self {
+        Self {
+            nf_id,
+            sg_id,
+            local_prefix,
+            _pad: [0; 2],
+        }
+    }
+}
+
+/// Extracted metadata from decapsulated tunnel packet.
+/// Used for security policy enforcement on the receiving side.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TunnelMetadata {
+    /// Network Function ID (from outer source address)
+    pub nf_id: u16,
+    /// Security Group ID (from outer source address, 24 bits)
+    pub sg_id: u32,
+    /// Inner packet IP version (4 or 6)
+    pub inner_ip_version: u8,
+    /// Alignment padding (public for direct struct initialization)
+    pub _pad: u8,
+}
+
+impl TunnelMetadata {
+    pub const fn new() -> Self {
+        Self {
+            nf_id: 0,
+            sg_id: 0,
+            inner_ip_version: 0,
+            _pad: 0,
         }
     }
 }

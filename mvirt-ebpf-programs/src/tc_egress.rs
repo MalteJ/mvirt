@@ -27,8 +27,9 @@ use mvirt_ebpf_programs::{
     ACTION_DROP, ACTION_PASS, ACTION_REDIRECT, CT_STATE_NEW, ConnTrackEntry, ConnTrackKey,
     DHCP_CLIENT_PORT, DHCP_SERVER_PORT, DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT, DIRECTION_EGRESS,
     ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, ICMPV6_NEIGHBOR_ADVERTISEMENT, ICMPV6_NEIGHBOR_SOLICITATION,
-    ICMPV6_ROUTER_ADVERTISEMENT, ICMPV6_ROUTER_SOLICITATION, IPPROTO_TCP, IPPROTO_UDP, IfMac,
-    NicSecurityConfig, PROTO_ALL, RouteEntry, SecurityRule,
+    ICMPV6_ROUTER_ADVERTISEMENT, ICMPV6_ROUTER_SOLICITATION, IPPROTO_IPIP, IPPROTO_IPV6_ENCAP,
+    IPPROTO_TCP, IPPROTO_UDP, IPV6_HDR_SIZE, IfMac, LocalNicInfo, NicSecurityConfig, PROTO_ALL,
+    RouteEntry, SecurityRule, TunnelEndpoint,
 };
 
 // Local protocol constants
@@ -63,6 +64,18 @@ static NIC_SECURITY: HashMap<u32, NicSecurityConfig> = HashMap::with_max_entries
 /// Connection tracking table (5-tuple -> entry)
 #[map]
 static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackEntry> = HashMap::with_max_entries(65536, 0);
+
+/// Remote subnet -> tunnel endpoint for IPv4 (LPM lookup)
+#[map]
+static TUNNEL_ENDPOINTS_V4: LpmTrie<[u8; 4], TunnelEndpoint> = LpmTrie::with_max_entries(1024, 0);
+
+/// Remote subnet -> tunnel endpoint for IPv6 (LPM lookup)
+#[map]
+static TUNNEL_ENDPOINTS_V6: LpmTrie<[u8; 16], TunnelEndpoint> = LpmTrie::with_max_entries(1024, 0);
+
+/// Local TAP ifindex -> NIC metadata for tunnel source construction
+#[map]
+static LOCAL_NIC_INFO: HashMap<u32, LocalNicInfo> = HashMap::with_max_entries(256, 0);
 
 #[classifier]
 pub fn tc_egress(ctx: TcContext) -> i32 {
@@ -154,6 +167,13 @@ fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
                 return handle_route(ctx, route);
             }
 
+            // Tunnel lookup for remote subnets
+            if let Some(tunnel) = TUNNEL_ENDPOINTS_V4.get(&key) {
+                return handle_tunnel_encap_v4(
+                    ctx, ifindex, &dst_ip4, tunnel, src_port, dst_port, proto,
+                );
+            }
+
             // No route found: pass to kernel stack
             Ok(TC_ACT_OK)
         }
@@ -233,6 +253,13 @@ fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
 
             if let Some(route) = ROUTES_V6.get(&key) {
                 return handle_route(ctx, route);
+            }
+
+            // Tunnel lookup for remote subnets
+            if let Some(tunnel) = TUNNEL_ENDPOINTS_V6.get(&key) {
+                return handle_tunnel_encap_v6(
+                    ctx, ifindex, &dst_addr, tunnel, src_port, dst_port, next_hdr,
+                );
             }
 
             // No route found: pass to kernel stack
@@ -399,6 +426,272 @@ fn handle_route(ctx: &TcContext, route: &RouteEntry) -> Result<i32, ()> {
         }
         _ => Ok(TC_ACT_OK),
     }
+}
+
+/// Compute a simple 20-bit flow label from ports and protocol.
+/// Avoids iterating over addresses to reduce stack usage.
+#[inline(always)]
+fn compute_flow_label_simple(src_port: u16, dst_port: u16, protocol: u8) -> u32 {
+    let mut hash: u32 = 0;
+
+    // XOR ports and protocol
+    hash ^= (src_port as u32) << 16;
+    hash ^= dst_port as u32;
+    hash ^= (protocol as u32) << 8;
+
+    // Mix the hash
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x85ebca6b);
+    hash ^= hash >> 13;
+
+    // Mask to 20 bits for IPv6 flow label
+    hash & 0x000F_FFFF
+}
+
+/// Handle tunnel encapsulation for IPv4 inner packets.
+/// Encapsulates the packet in an IPv6 header and passes to kernel routing.
+/// Writes directly to packet buffer to minimize stack usage.
+#[inline(always)]
+fn handle_tunnel_encap_v4(
+    ctx: &TcContext,
+    ifindex: u32,
+    inner_dst: &[u8; 4],
+    tunnel: &TunnelEndpoint,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+) -> Result<i32, ()> {
+    // Get local NIC info for source address construction
+    let nic_info = match unsafe { LOCAL_NIC_INFO.get(&ifindex) } {
+        Some(info) => info,
+        None => return Ok(TC_ACT_OK), // No NIC info, pass to kernel
+    };
+
+    // Compute flow label from ports (simpler to reduce stack usage)
+    let flow_label = compute_flow_label_simple(src_port, dst_port, protocol);
+
+    // Get inner packet length (total length from IPv4 header)
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+    if data + ETH_HLEN + 4 > data_end {
+        return Ok(TC_ACT_OK);
+    }
+    let inner_len = u16::from_be(unsafe { *((data + ETH_HLEN + 2) as *const u16) }) as u32;
+
+    // Encapsulate: adjust room and write header directly
+    const BPF_ADJ_ROOM_NET: u32 = 0;
+    const BPF_F_ADJ_ROOM_ENCAP_L3_IPV6: u64 = 4;
+
+    let ret = unsafe {
+        aya_ebpf::helpers::bpf_skb_adjust_room(
+            ctx.skb.skb as *mut _,
+            IPV6_HDR_SIZE as i32,
+            BPF_ADJ_ROOM_NET,
+            BPF_F_ADJ_ROOM_ENCAP_L3_IPV6,
+        )
+    };
+
+    if ret != 0 {
+        return Ok(TC_ACT_OK);
+    }
+
+    // Re-fetch data pointers
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+
+    if data + ETH_HLEN + IPV6_HDR_SIZE > data_end {
+        return Ok(TC_ACT_OK);
+    }
+
+    let ipv6_ptr = data + ETH_HLEN;
+
+    // Write IPv6 header directly to packet buffer
+    unsafe {
+        // Version/TC/Flow Label
+        let ver_tc_flow: u32 = (6 << 28) | (flow_label & 0x000F_FFFF);
+        *((ipv6_ptr) as *mut u32) = ver_tc_flow.to_be();
+
+        // Payload Length
+        *((ipv6_ptr + 4) as *mut u16) = (inner_len as u16).to_be();
+
+        // Next Header (IPIP = 4)
+        *((ipv6_ptr + 6) as *mut u8) = IPPROTO_IPIP;
+
+        // Hop Limit
+        *((ipv6_ptr + 7) as *mut u8) = 64;
+
+        // Source Address: prefix(0-9) + rsv(10) + nf_id(11-12) + sg_id(13-15)
+        let src_ptr = ipv6_ptr + 8;
+        // Write prefix bytes directly
+        *((src_ptr) as *mut u8) = nic_info.local_prefix[0];
+        *((src_ptr + 1) as *mut u8) = nic_info.local_prefix[1];
+        *((src_ptr + 2) as *mut u8) = nic_info.local_prefix[2];
+        *((src_ptr + 3) as *mut u8) = nic_info.local_prefix[3];
+        *((src_ptr + 4) as *mut u8) = nic_info.local_prefix[4];
+        *((src_ptr + 5) as *mut u8) = nic_info.local_prefix[5];
+        *((src_ptr + 6) as *mut u8) = nic_info.local_prefix[6];
+        *((src_ptr + 7) as *mut u8) = nic_info.local_prefix[7];
+        *((src_ptr + 8) as *mut u8) = nic_info.local_prefix[8];
+        *((src_ptr + 9) as *mut u8) = nic_info.local_prefix[9];
+        *((src_ptr + 10) as *mut u8) = 0; // Reserved
+        *((src_ptr + 11) as *mut u8) = (nic_info.nf_id >> 8) as u8;
+        *((src_ptr + 12) as *mut u8) = nic_info.nf_id as u8;
+        *((src_ptr + 13) as *mut u8) = ((nic_info.sg_id >> 16) & 0xFF) as u8;
+        *((src_ptr + 14) as *mut u8) = ((nic_info.sg_id >> 8) & 0xFF) as u8;
+        *((src_ptr + 15) as *mut u8) = (nic_info.sg_id & 0xFF) as u8;
+
+        // Destination Address: remote_prefix(0-9) + rsv(10-11) + inner_ipv4(12-15)
+        let dst_ptr = ipv6_ptr + 24;
+        *((dst_ptr) as *mut u8) = tunnel.remote_prefix[0];
+        *((dst_ptr + 1) as *mut u8) = tunnel.remote_prefix[1];
+        *((dst_ptr + 2) as *mut u8) = tunnel.remote_prefix[2];
+        *((dst_ptr + 3) as *mut u8) = tunnel.remote_prefix[3];
+        *((dst_ptr + 4) as *mut u8) = tunnel.remote_prefix[4];
+        *((dst_ptr + 5) as *mut u8) = tunnel.remote_prefix[5];
+        *((dst_ptr + 6) as *mut u8) = tunnel.remote_prefix[6];
+        *((dst_ptr + 7) as *mut u8) = tunnel.remote_prefix[7];
+        *((dst_ptr + 8) as *mut u8) = tunnel.remote_prefix[8];
+        *((dst_ptr + 9) as *mut u8) = tunnel.remote_prefix[9];
+        *((dst_ptr + 10) as *mut u8) = 0;
+        *((dst_ptr + 11) as *mut u8) = 0;
+        *((dst_ptr + 12) as *mut u8) = inner_dst[0];
+        *((dst_ptr + 13) as *mut u8) = inner_dst[1];
+        *((dst_ptr + 14) as *mut u8) = inner_dst[2];
+        *((dst_ptr + 15) as *mut u8) = inner_dst[3];
+    }
+
+    // Update EtherType to IPv6
+    if data + 14 > data_end {
+        return Ok(TC_ACT_OK);
+    }
+    unsafe {
+        *((data + 12) as *mut u16) = ETH_P_IPV6.to_be();
+    }
+
+    Ok(TC_ACT_OK)
+}
+
+/// Handle tunnel encapsulation for IPv6 inner packets.
+/// Encapsulates the packet in an outer IPv6 header and passes to kernel routing.
+/// Writes directly to packet buffer to minimize stack usage.
+#[inline(always)]
+fn handle_tunnel_encap_v6(
+    ctx: &TcContext,
+    ifindex: u32,
+    inner_dst: &[u8; 16],
+    tunnel: &TunnelEndpoint,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+) -> Result<i32, ()> {
+    // Get local NIC info for source address construction
+    let nic_info = match unsafe { LOCAL_NIC_INFO.get(&ifindex) } {
+        Some(info) => info,
+        None => return Ok(TC_ACT_OK), // No NIC info, pass to kernel
+    };
+
+    // Compute flow label from ports
+    let flow_label = compute_flow_label_simple(src_port, dst_port, protocol);
+
+    // Get inner packet length (payload length + 40 bytes IPv6 header)
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+    if data + ETH_HLEN + 6 > data_end {
+        return Ok(TC_ACT_OK);
+    }
+    let payload_len = u16::from_be(unsafe { *((data + ETH_HLEN + 4) as *const u16) });
+    let inner_len = (payload_len as u32) + (IPV6_HDR_SIZE as u32);
+
+    // Encapsulate: adjust room and write header directly
+    const BPF_ADJ_ROOM_NET: u32 = 0;
+    const BPF_F_ADJ_ROOM_ENCAP_L3_IPV6: u64 = 4;
+
+    let ret = unsafe {
+        aya_ebpf::helpers::bpf_skb_adjust_room(
+            ctx.skb.skb as *mut _,
+            IPV6_HDR_SIZE as i32,
+            BPF_ADJ_ROOM_NET,
+            BPF_F_ADJ_ROOM_ENCAP_L3_IPV6,
+        )
+    };
+
+    if ret != 0 {
+        return Ok(TC_ACT_OK);
+    }
+
+    // Re-fetch data pointers
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+
+    if data + ETH_HLEN + IPV6_HDR_SIZE > data_end {
+        return Ok(TC_ACT_OK);
+    }
+
+    let ipv6_ptr = data + ETH_HLEN;
+
+    // Write IPv6 header directly to packet buffer
+    unsafe {
+        // Version/TC/Flow Label
+        let ver_tc_flow: u32 = (6 << 28) | (flow_label & 0x000F_FFFF);
+        *((ipv6_ptr) as *mut u32) = ver_tc_flow.to_be();
+
+        // Payload Length
+        *((ipv6_ptr + 4) as *mut u16) = (inner_len as u16).to_be();
+
+        // Next Header (IPv6 encap = 41)
+        *((ipv6_ptr + 6) as *mut u8) = IPPROTO_IPV6_ENCAP;
+
+        // Hop Limit
+        *((ipv6_ptr + 7) as *mut u8) = 64;
+
+        // Source Address: prefix(0-9) + rsv(10) + nf_id(11-12) + sg_id(13-15)
+        let src_ptr = ipv6_ptr + 8;
+        *((src_ptr) as *mut u8) = nic_info.local_prefix[0];
+        *((src_ptr + 1) as *mut u8) = nic_info.local_prefix[1];
+        *((src_ptr + 2) as *mut u8) = nic_info.local_prefix[2];
+        *((src_ptr + 3) as *mut u8) = nic_info.local_prefix[3];
+        *((src_ptr + 4) as *mut u8) = nic_info.local_prefix[4];
+        *((src_ptr + 5) as *mut u8) = nic_info.local_prefix[5];
+        *((src_ptr + 6) as *mut u8) = nic_info.local_prefix[6];
+        *((src_ptr + 7) as *mut u8) = nic_info.local_prefix[7];
+        *((src_ptr + 8) as *mut u8) = nic_info.local_prefix[8];
+        *((src_ptr + 9) as *mut u8) = nic_info.local_prefix[9];
+        *((src_ptr + 10) as *mut u8) = 0; // Reserved
+        *((src_ptr + 11) as *mut u8) = (nic_info.nf_id >> 8) as u8;
+        *((src_ptr + 12) as *mut u8) = nic_info.nf_id as u8;
+        *((src_ptr + 13) as *mut u8) = ((nic_info.sg_id >> 16) & 0xFF) as u8;
+        *((src_ptr + 14) as *mut u8) = ((nic_info.sg_id >> 8) & 0xFF) as u8;
+        *((src_ptr + 15) as *mut u8) = (nic_info.sg_id & 0xFF) as u8;
+
+        // Destination Address: remote_prefix(0-9) + last 6 bytes of inner dst(10-15)
+        let dst_ptr = ipv6_ptr + 24;
+        *((dst_ptr) as *mut u8) = tunnel.remote_prefix[0];
+        *((dst_ptr + 1) as *mut u8) = tunnel.remote_prefix[1];
+        *((dst_ptr + 2) as *mut u8) = tunnel.remote_prefix[2];
+        *((dst_ptr + 3) as *mut u8) = tunnel.remote_prefix[3];
+        *((dst_ptr + 4) as *mut u8) = tunnel.remote_prefix[4];
+        *((dst_ptr + 5) as *mut u8) = tunnel.remote_prefix[5];
+        *((dst_ptr + 6) as *mut u8) = tunnel.remote_prefix[6];
+        *((dst_ptr + 7) as *mut u8) = tunnel.remote_prefix[7];
+        *((dst_ptr + 8) as *mut u8) = tunnel.remote_prefix[8];
+        *((dst_ptr + 9) as *mut u8) = tunnel.remote_prefix[9];
+        *((dst_ptr + 10) as *mut u8) = inner_dst[10];
+        *((dst_ptr + 11) as *mut u8) = inner_dst[11];
+        *((dst_ptr + 12) as *mut u8) = inner_dst[12];
+        *((dst_ptr + 13) as *mut u8) = inner_dst[13];
+        *((dst_ptr + 14) as *mut u8) = inner_dst[14];
+        *((dst_ptr + 15) as *mut u8) = inner_dst[15];
+    }
+
+    // Update EtherType to IPv6
+    if data + 14 > data_end {
+        return Ok(TC_ACT_OK);
+    }
+    unsafe {
+        *((data + 12) as *mut u16) = ETH_P_IPV6.to_be();
+    }
+
+    Ok(TC_ACT_OK)
 }
 
 #[cfg(not(test))]

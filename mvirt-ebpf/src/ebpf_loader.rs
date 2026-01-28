@@ -3,7 +3,7 @@
 //! This module handles loading the TC eBPF programs and managing the BPF maps
 //! for routing. The actual eBPF programs are compiled separately in mvirt-ebpf-programs.
 
-use aya::maps::{HashMap, MapData};
+use aya::maps::{HashMap, LpmTrie, MapData, lpm_trie::Key};
 use aya::programs::{SchedClassifier, TcAttachType, tc::TcOptions};
 use aya::{Bpf, BpfLoader};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -160,6 +160,54 @@ pub struct ConnTrackEntry {
 }
 
 unsafe impl aya::Pod for ConnTrackEntry {}
+
+/// Tunnel endpoint for remote hypervisors.
+/// Maps inner destination subnet to remote HV prefix.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TunnelEndpoint {
+    /// Remote hypervisor /80 prefix (for outer dst address construction)
+    pub remote_prefix: [u8; 10],
+    _pad: [u8; 6],
+}
+
+impl TunnelEndpoint {
+    pub fn new(remote_prefix: [u8; 10]) -> Self {
+        Self {
+            remote_prefix,
+            _pad: [0; 6],
+        }
+    }
+}
+
+unsafe impl aya::Pod for TunnelEndpoint {}
+
+/// Local NIC metadata for tunnel source address construction.
+/// Embedded in outer IPv6 source address for security policy enforcement.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LocalNicInfo {
+    /// Network Function ID (identifies VM/NIC)
+    pub nf_id: u16,
+    /// Security Group ID (24 bits used, for ingress filtering on destination)
+    pub sg_id: u32,
+    /// Local hypervisor /80 prefix
+    pub local_prefix: [u8; 10],
+    _pad: [u8; 2],
+}
+
+impl LocalNicInfo {
+    pub fn new(nf_id: u16, sg_id: u32, local_prefix: [u8; 10]) -> Self {
+        Self {
+            nf_id,
+            sg_id,
+            local_prefix,
+            _pad: [0; 2],
+        }
+    }
+}
+
+unsafe impl aya::Pod for LocalNicInfo {}
 
 /// eBPF loader errors.
 #[derive(Debug, Error)]
@@ -621,6 +669,127 @@ impl EbpfManager {
             .try_into()?;
 
         configs.insert(if_index, config, 0)?;
+        Ok(())
+    }
+
+    // ========== Tunnel Endpoint Management ==========
+
+    /// Add IPv4 tunnel endpoint for remote subnet.
+    /// Maps inner destination subnet to remote hypervisor prefix.
+    pub async fn add_tunnel_endpoint_v4(
+        &self,
+        subnet: Ipv4Addr,
+        prefix_len: u8,
+        remote_prefix: [u8; 10],
+    ) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut endpoints: LpmTrie<&mut MapData, [u8; 4], TunnelEndpoint> = bpf
+            .map_mut("TUNNEL_ENDPOINTS_V4")
+            .ok_or_else(|| EbpfError::MapNotFound("TUNNEL_ENDPOINTS_V4".to_string()))?
+            .try_into()?;
+
+        let key = Key::new(prefix_len as u32, subnet.octets());
+        endpoints.insert(&key, TunnelEndpoint::new(remote_prefix), 0)?;
+        Ok(())
+    }
+
+    /// Remove IPv4 tunnel endpoint.
+    pub async fn remove_tunnel_endpoint_v4(&self, subnet: Ipv4Addr, prefix_len: u8) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut endpoints: LpmTrie<&mut MapData, [u8; 4], TunnelEndpoint> = bpf
+            .map_mut("TUNNEL_ENDPOINTS_V4")
+            .ok_or_else(|| EbpfError::MapNotFound("TUNNEL_ENDPOINTS_V4".to_string()))?
+            .try_into()?;
+
+        let key = Key::new(prefix_len as u32, subnet.octets());
+        endpoints.remove(&key)?;
+        Ok(())
+    }
+
+    /// Add IPv6 tunnel endpoint for remote subnet.
+    /// Maps inner destination subnet to remote hypervisor prefix.
+    pub async fn add_tunnel_endpoint_v6(
+        &self,
+        subnet: Ipv6Addr,
+        prefix_len: u8,
+        remote_prefix: [u8; 10],
+    ) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut endpoints: LpmTrie<&mut MapData, [u8; 16], TunnelEndpoint> = bpf
+            .map_mut("TUNNEL_ENDPOINTS_V6")
+            .ok_or_else(|| EbpfError::MapNotFound("TUNNEL_ENDPOINTS_V6".to_string()))?
+            .try_into()?;
+
+        let key = Key::new(prefix_len as u32, subnet.octets());
+        endpoints.insert(&key, TunnelEndpoint::new(remote_prefix), 0)?;
+        Ok(())
+    }
+
+    /// Remove IPv6 tunnel endpoint.
+    pub async fn remove_tunnel_endpoint_v6(&self, subnet: Ipv6Addr, prefix_len: u8) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut endpoints: LpmTrie<&mut MapData, [u8; 16], TunnelEndpoint> = bpf
+            .map_mut("TUNNEL_ENDPOINTS_V6")
+            .ok_or_else(|| EbpfError::MapNotFound("TUNNEL_ENDPOINTS_V6".to_string()))?
+            .try_into()?;
+
+        let key = Key::new(prefix_len as u32, subnet.octets());
+        endpoints.remove(&key)?;
+        Ok(())
+    }
+
+    /// Set local NIC metadata for tunnel source address construction.
+    /// The NF_ID and SG_ID are embedded in the outer IPv6 source address.
+    pub async fn set_local_nic_info(&self, ifindex: u32, info: LocalNicInfo) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut nic_info: HashMap<&mut MapData, u32, LocalNicInfo> = bpf
+            .map_mut("LOCAL_NIC_INFO")
+            .ok_or_else(|| EbpfError::MapNotFound("LOCAL_NIC_INFO".to_string()))?
+            .try_into()?;
+
+        nic_info.insert(ifindex, info, 0)?;
+        Ok(())
+    }
+
+    /// Remove local NIC metadata.
+    pub async fn remove_local_nic_info(&self, ifindex: u32) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut nic_info: HashMap<&mut MapData, u32, LocalNicInfo> = bpf
+            .map_mut("LOCAL_NIC_INFO")
+            .ok_or_else(|| EbpfError::MapNotFound("LOCAL_NIC_INFO".to_string()))?
+            .try_into()?;
+
+        let _ = nic_info.remove(&ifindex);
         Ok(())
     }
 }

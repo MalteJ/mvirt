@@ -24,7 +24,8 @@ use aya_ebpf::{
 use mvirt_ebpf_programs::{
     ACTION_DROP, ACTION_PASS, ACTION_REDIRECT, CT_FLAG_SEEN_REPLY, CT_STATE_ESTABLISHED,
     CT_STATE_NEW, ConnTrackEntry, ConnTrackKey, DIRECTION_INGRESS, ETH_P_IP, ETH_P_IPV6,
-    IPPROTO_TCP, IPPROTO_UDP, IfMac, NicSecurityConfig, PROTO_ALL, RouteEntry, SecurityRule,
+    IPPROTO_IPIP, IPPROTO_IPV6_ENCAP, IPPROTO_TCP, IPPROTO_UDP, IPV6_HDR_SIZE, IfMac,
+    NicSecurityConfig, PROTO_ALL, RouteEntry, SecurityRule, TunnelMetadata,
 };
 
 // Header sizes
@@ -148,14 +149,19 @@ fn try_tc_ingress(ctx: &TcContext) -> Result<i32, ()> {
             let ipv6_ptr = data + ETH_HLEN;
 
             // Get next header (protocol)
-            let proto = unsafe { *((ipv6_ptr + 6) as *const u8) };
+            let next_hdr = unsafe { *((ipv6_ptr + 6) as *const u8) };
+
+            // Check for tunnel encapsulation (IPv4-in-IPv6 or IPv6-in-IPv6)
+            if next_hdr == IPPROTO_IPIP || next_hdr == IPPROTO_IPV6_ENCAP {
+                return handle_tunnel_decap(ctx, next_hdr);
+            }
 
             // Get source and destination IP
             let src_addr: [u8; 16] = unsafe { *((ipv6_ptr + 8) as *const [u8; 16]) };
             let dst_addr: [u8; 16] = unsafe { *((ipv6_ptr + 24) as *const [u8; 16]) };
 
             // Extract ports for TCP/UDP
-            let (src_port, dst_port) = if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
+            let (src_port, dst_port) = if next_hdr == IPPROTO_TCP || next_hdr == IPPROTO_UDP {
                 let transport_offset = ETH_HLEN + IPV6_HLEN;
                 if data + transport_offset + 4 > data_end {
                     (0u16, 0u16)
@@ -183,7 +189,7 @@ fn try_tc_ingress(ctx: &TcContext) -> Result<i32, ()> {
                 &dst_addr,
                 src_port,
                 dst_port,
-                proto,
+                next_hdr,
                 6,
             ) {
                 return Ok(TC_ACT_SHOT);
@@ -366,6 +372,188 @@ fn handle_route(ctx: &TcContext, route: &RouteEntry) -> Result<i32, ()> {
             Ok(ret as i32)
         }
         _ => Ok(TC_ACT_OK),
+    }
+}
+
+/// Extract tunnel metadata from outer IPv6 source address.
+/// Layout: prefix(0-9) + reserved(10) + nf_id(11-12) + sg_id(13-15)
+#[inline(always)]
+fn extract_tunnel_metadata(outer_src: &[u8; 16], inner_ip_version: u8) -> TunnelMetadata {
+    // Extract NF_ID from bytes 11-12 (big endian)
+    let nf_id = ((outer_src[11] as u16) << 8) | (outer_src[12] as u16);
+
+    // Extract SG_ID from bytes 13-15 (big endian, 24 bits)
+    let sg_id =
+        ((outer_src[13] as u32) << 16) | ((outer_src[14] as u32) << 8) | (outer_src[15] as u32);
+
+    TunnelMetadata {
+        nf_id,
+        sg_id,
+        inner_ip_version,
+        _pad: 0,
+    }
+}
+
+/// Handle decapsulation of tunneled packets.
+/// Removes the outer IPv6 header and routes the inner packet.
+#[inline(always)]
+fn handle_tunnel_decap(ctx: &TcContext, next_hdr: u8) -> Result<i32, ()> {
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+
+    // Need outer IPv6 header + at least inner IP header
+    let min_inner = if next_hdr == IPPROTO_IPIP { 20 } else { 40 };
+    if data + ETH_HLEN + IPV6_HDR_SIZE + min_inner > data_end {
+        return Ok(TC_ACT_SHOT);
+    }
+
+    let ipv6_ptr = data + ETH_HLEN;
+
+    // Extract metadata from outer source address
+    let outer_src: [u8; 16] = unsafe { *((ipv6_ptr + 8) as *const [u8; 16]) };
+    let inner_ip_version = if next_hdr == IPPROTO_IPIP { 4 } else { 6 };
+    let _metadata = extract_tunnel_metadata(&outer_src, inner_ip_version);
+
+    // TODO: Use metadata.sg_id for security policy enforcement
+    // For now, we just extract it for future use
+
+    // Decapsulate: remove outer IPv6 header
+    // BPF_F_ADJ_ROOM_DECAP_L3_IPV6 = 256 (undocumented but used in kernel)
+    const BPF_ADJ_ROOM_NET: u32 = 0;
+    const BPF_F_ADJ_ROOM_DECAP_L3: u64 = 256;
+
+    let ret = unsafe {
+        aya_ebpf::helpers::bpf_skb_adjust_room(
+            ctx.skb.skb as *mut _,
+            -(IPV6_HDR_SIZE as i32),
+            BPF_ADJ_ROOM_NET,
+            BPF_F_ADJ_ROOM_DECAP_L3,
+        )
+    };
+
+    if ret != 0 {
+        return Ok(TC_ACT_SHOT); // Decapsulation failed
+    }
+
+    // Re-fetch data pointers after adjust_room
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+
+    // Update EtherType based on inner protocol
+    if data + 14 > data_end {
+        return Ok(TC_ACT_SHOT);
+    }
+
+    let new_ethertype = if next_hdr == IPPROTO_IPIP {
+        ETH_P_IP
+    } else {
+        ETH_P_IPV6
+    };
+    unsafe {
+        *((data + 12) as *mut u16) = new_ethertype.to_be();
+    }
+
+    // Now route the inner packet
+    if next_hdr == IPPROTO_IPIP {
+        // Inner IPv4 packet
+        if data + ETH_HLEN + 20 > data_end {
+            return Ok(TC_ACT_SHOT);
+        }
+
+        let ip_ptr = data + ETH_HLEN;
+        let version_ihl = unsafe { *(ip_ptr as *const u8) };
+        let ihl = ((version_ihl & 0x0f) * 4) as usize;
+        let proto = unsafe { *((ip_ptr + 9) as *const u8) };
+        let src_ip4: [u8; 4] = unsafe { *((ip_ptr + 12) as *const [u8; 4]) };
+        let dst_ip4: [u8; 4] = unsafe { *((ip_ptr + 16) as *const [u8; 4]) };
+
+        // Extract ports
+        let (src_port, dst_port) = if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
+            let transport_offset = ETH_HLEN + ihl;
+            if data + transport_offset + 4 > data_end {
+                (0u16, 0u16)
+            } else {
+                let sp = u16::from_be(unsafe { *((data + transport_offset) as *const u16) });
+                let dp = u16::from_be(unsafe { *((data + transport_offset + 2) as *const u16) });
+                (sp, dp)
+            }
+        } else {
+            (0u16, 0u16)
+        };
+
+        // Route lookup
+        let key = Key::new(32, dst_ip4);
+        let route = match TUN_ROUTES_V4.get(&key) {
+            Some(r) => r,
+            None => return Ok(TC_ACT_SHOT),
+        };
+
+        // Convert to 16-byte format for security check
+        let mut src_addr = [0u8; 16];
+        let mut dst_addr = [0u8; 16];
+        src_addr[..4].copy_from_slice(&src_ip4);
+        dst_addr[..4].copy_from_slice(&dst_ip4);
+
+        // Check security (using extracted SG_ID in future)
+        if !check_security_ingress(
+            route.target_ifindex,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            proto,
+            4,
+        ) {
+            return Ok(TC_ACT_SHOT);
+        }
+
+        handle_route(ctx, route)
+    } else {
+        // Inner IPv6 packet
+        if data + ETH_HLEN + IPV6_HLEN > data_end {
+            return Ok(TC_ACT_SHOT);
+        }
+
+        let ipv6_ptr = data + ETH_HLEN;
+        let proto = unsafe { *((ipv6_ptr + 6) as *const u8) };
+        let src_addr: [u8; 16] = unsafe { *((ipv6_ptr + 8) as *const [u8; 16]) };
+        let dst_addr: [u8; 16] = unsafe { *((ipv6_ptr + 24) as *const [u8; 16]) };
+
+        // Extract ports
+        let (src_port, dst_port) = if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
+            let transport_offset = ETH_HLEN + IPV6_HLEN;
+            if data + transport_offset + 4 > data_end {
+                (0u16, 0u16)
+            } else {
+                let sp = u16::from_be(unsafe { *((data + transport_offset) as *const u16) });
+                let dp = u16::from_be(unsafe { *((data + transport_offset + 2) as *const u16) });
+                (sp, dp)
+            }
+        } else {
+            (0u16, 0u16)
+        };
+
+        // Route lookup
+        let key = Key::new(128, dst_addr);
+        let route = match TUN_ROUTES_V6.get(&key) {
+            Some(r) => r,
+            None => return Ok(TC_ACT_SHOT),
+        };
+
+        // Check security
+        if !check_security_ingress(
+            route.target_ifindex,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            proto,
+            6,
+        ) {
+            return Ok(TC_ACT_SHOT);
+        }
+
+        handle_route(ctx, route)
     }
 }
 
