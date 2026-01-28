@@ -2510,6 +2510,7 @@ dependencies = [
  "nix 0.29.0",
  "oci-distribution",
  "prost 0.13.5",
+ "reqwest",
  "rtnetlink",
  "serde",
  "serde_json",

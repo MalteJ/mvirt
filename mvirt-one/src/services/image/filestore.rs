@@ -3,7 +3,7 @@
 //! Handles layer extraction and rootfs assembly.
 //! Based on FeOS image-service/filestore.rs pattern.
 
-use super::{ImageInfo, ImageState, PulledImageData};
+use super::{ImageConfig, ImageInfo, ImageState, PulledImageData};
 use crate::error::ImageError;
 use flate2::read::GzDecoder;
 use log::{error, info, warn};
@@ -20,6 +20,14 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Serialize, Deserialize)]
 struct ImageMetadata {
     image_ref: String,
+    #[serde(default)]
+    entrypoint: Vec<String>,
+    #[serde(default)]
+    cmd: Vec<String>,
+    #[serde(default)]
+    env: Vec<String>,
+    #[serde(default)]
+    working_dir: String,
 }
 
 /// Commands for the FileStore actor.
@@ -146,14 +154,21 @@ impl FileStore {
             }
         }
 
-        // Write config.json
+        // Parse image config (Entrypoint, Cmd, Env, etc.)
+        let image_config = super::parse_image_config(&image_data.config);
+
+        // Write config.json (raw OCI image config)
         fs::write(final_dir.join("config.json"), image_data.config)
             .await
             .map_err(ImageError::Storage)?;
 
-        // Write metadata.json
+        // Write metadata.json (with parsed config for easy loading)
         let metadata = ImageMetadata {
             image_ref: image_ref.to_string(),
+            entrypoint: image_config.entrypoint,
+            cmd: image_config.cmd,
+            env: image_config.env,
+            working_dir: image_config.working_dir,
         };
         let metadata_json = serde_json::to_string_pretty(&metadata)
             .map_err(|e| ImageError::Storage(std::io::Error::other(e)))?;
@@ -201,6 +216,12 @@ impl FileStore {
                                 image_ref: metadata.image_ref,
                                 rootfs_path: rootfs_path.to_string_lossy().to_string(),
                                 state: ImageState::Ready,
+                                config: ImageConfig {
+                                    entrypoint: metadata.entrypoint,
+                                    cmd: metadata.cmd,
+                                    env: metadata.env,
+                                    working_dir: metadata.working_dir,
+                                },
                             };
                             store.insert(uuid.to_string(), image_info);
                         } else {

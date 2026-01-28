@@ -1,6 +1,7 @@
 //! OCI Runtime Spec generation for containers.
 
 use crate::proto::ContainerSpec;
+use crate::services::image::ImageConfig;
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -11,12 +12,24 @@ pub async fn generate_oci_spec(
     container_spec: &ContainerSpec,
     rootfs_path: &str,
     bundle_path: &Path,
+    image_config: &ImageConfig,
 ) -> Result<(), std::io::Error> {
-    let spec = OciSpec::new(container_spec, rootfs_path);
+    info!(
+        "OCI spec: image entrypoint={:?}, cmd={:?}",
+        image_config.entrypoint, image_config.cmd
+    );
+    let spec = OciSpec::new(container_spec, rootfs_path, image_config);
     let spec_json = serde_json::to_string_pretty(&spec)?;
 
+    // Log the process.args from the JSON for debugging
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&spec_json)
+        && let Some(args) = v.get("process").and_then(|p| p.get("args"))
+    {
+        info!("OCI spec process.args: {}", args);
+    }
+
     fs::create_dir_all(bundle_path).await?;
-    fs::write(bundle_path.join("config.json"), spec_json).await?;
+    fs::write(bundle_path.join("config.json"), &spec_json).await?;
 
     info!(
         "Generated OCI spec for container {} at {}",
@@ -46,31 +59,18 @@ struct Root {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct Process {
     terminal: bool,
     user: User,
     args: Vec<String>,
     env: Vec<String>,
     cwd: String,
-    capabilities: Capabilities,
-    no_new_privileges: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct User {
     uid: u32,
     gid: u32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Capabilities {
-    bounding: Vec<String>,
-    effective: Vec<String>,
-    inheritable: Vec<String>,
-    permitted: Vec<String>,
-    ambient: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,9 +86,6 @@ struct Mount {
 #[serde(rename_all = "camelCase")]
 struct Linux {
     namespaces: Vec<Namespace>,
-    resources: Resources,
-    masked_paths: Vec<String>,
-    readonly_paths: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,53 +96,63 @@ struct Namespace {
     path: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Resources {
-    devices: Vec<DeviceRule>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DeviceRule {
-    allow: bool,
-    access: String,
-}
-
 impl OciSpec {
-    fn new(container_spec: &ContainerSpec, rootfs_path: &str) -> Self {
-        let mut args = container_spec.command.clone();
-        args.extend(container_spec.args.clone());
-        if args.is_empty() {
-            args = vec!["/bin/sh".to_string()];
-        }
+    fn new(container_spec: &ContainerSpec, rootfs_path: &str, image_config: &ImageConfig) -> Self {
+        // Determine process args following Kubernetes/CRI semantics:
+        // - command overrides ENTRYPOINT
+        // - args overrides CMD
+        // - If only args is set, use image ENTRYPOINT + container args
+        let args = match (
+            container_spec.command.is_empty(),
+            container_spec.args.is_empty(),
+        ) {
+            // Both empty: use image ENTRYPOINT + CMD
+            (true, true) => {
+                let mut args = image_config.entrypoint.clone();
+                args.extend(image_config.cmd.clone());
+                if args.is_empty() {
+                    vec!["/bin/sh".to_string()]
+                } else {
+                    args
+                }
+            }
+            // Only command set: use command (ignore image CMD)
+            (false, true) => container_spec.command.clone(),
+            // Only args set: use image ENTRYPOINT + container args
+            (true, false) => {
+                let mut args = image_config.entrypoint.clone();
+                args.extend(container_spec.args.clone());
+                if args.is_empty() {
+                    // Fallback if image has no entrypoint
+                    container_spec.args.clone()
+                } else {
+                    args
+                }
+            }
+            // Both set: use command + args
+            (false, false) => {
+                let mut args = container_spec.command.clone();
+                args.extend(container_spec.args.clone());
+                args
+            }
+        };
 
+        // Start with standard PATH, add image env, then container env
         let mut env = vec![
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
             "TERM=xterm".to_string(),
         ];
+        env.extend(image_config.env.clone());
         env.extend(container_spec.env.clone());
 
-        let cwd = if container_spec.working_dir.is_empty() {
-            "/".to_string()
-        } else {
+        // Use container working_dir, or image working_dir, or default to /
+        let cwd = if !container_spec.working_dir.is_empty() {
             container_spec.working_dir.clone()
+        } else if !image_config.working_dir.is_empty() {
+            image_config.working_dir.clone()
+        } else {
+            "/".to_string()
         };
-
-        let capabilities = vec![
-            "CAP_CHOWN".to_string(),
-            "CAP_DAC_OVERRIDE".to_string(),
-            "CAP_FSETID".to_string(),
-            "CAP_FOWNER".to_string(),
-            "CAP_MKNOD".to_string(),
-            "CAP_NET_RAW".to_string(),
-            "CAP_SETGID".to_string(),
-            "CAP_SETUID".to_string(),
-            "CAP_SETFCAP".to_string(),
-            "CAP_SETPCAP".to_string(),
-            "CAP_NET_BIND_SERVICE".to_string(),
-            "CAP_SYS_CHROOT".to_string(),
-            "CAP_KILL".to_string(),
-            "CAP_AUDIT_WRITE".to_string(),
-        ];
 
         OciSpec {
             oci_version: "1.0.0".to_string(),
@@ -159,14 +166,6 @@ impl OciSpec {
                 args,
                 env,
                 cwd,
-                capabilities: Capabilities {
-                    bounding: capabilities.clone(),
-                    effective: capabilities.clone(),
-                    inheritable: capabilities.clone(),
-                    permitted: capabilities.clone(),
-                    ambient: capabilities,
-                },
-                no_new_privileges: true,
             },
             hostname: container_spec.name.clone(),
             mounts: vec![
@@ -200,18 +199,6 @@ impl OciSpec {
                     ],
                 },
                 Mount {
-                    destination: "/dev/shm".to_string(),
-                    mount_type: "tmpfs".to_string(),
-                    source: "shm".to_string(),
-                    options: vec![
-                        "nosuid".to_string(),
-                        "noexec".to_string(),
-                        "nodev".to_string(),
-                        "mode=1777".to_string(),
-                        "size=65536k".to_string(),
-                    ],
-                },
-                Mount {
                     destination: "/sys".to_string(),
                     mount_type: "sysfs".to_string(),
                     source: "sysfs".to_string(),
@@ -222,20 +209,35 @@ impl OciSpec {
                         "ro".to_string(),
                     ],
                 },
+                // Writable /tmp for applications that need it
                 Mount {
-                    destination: "/sys/fs/cgroup".to_string(),
-                    mount_type: "cgroup2".to_string(),
-                    source: "cgroup".to_string(),
+                    destination: "/tmp".to_string(),
+                    mount_type: "tmpfs".to_string(),
+                    source: "tmpfs".to_string(),
                     options: vec![
                         "nosuid".to_string(),
-                        "noexec".to_string(),
                         "nodev".to_string(),
-                        "relatime".to_string(),
-                        "ro".to_string(),
+                        "mode=1777".to_string(),
+                    ],
+                },
+                // Writable /run for PID files and sockets
+                Mount {
+                    destination: "/run".to_string(),
+                    mount_type: "tmpfs".to_string(),
+                    source: "tmpfs".to_string(),
+                    options: vec![
+                        "nosuid".to_string(),
+                        "nodev".to_string(),
+                        "mode=755".to_string(),
                     ],
                 },
             ],
             linux: Linux {
+                // Create only pid and mount namespaces.
+                // Network namespace is NOT listed, so the container inherits
+                // the parent's network namespace (per OCI runtime spec).
+                // IPC and UTS namespaces are not used since they require
+                // additional kernel support.
                 namespaces: vec![
                     Namespace {
                         ns_type: "pid".to_string(),
@@ -245,31 +247,6 @@ impl OciSpec {
                         ns_type: "mount".to_string(),
                         path: None,
                     },
-                    // Note: network, ipc, uts namespaces are shared within a pod
-                ],
-                resources: Resources {
-                    devices: vec![DeviceRule {
-                        allow: false,
-                        access: "rwm".to_string(),
-                    }],
-                },
-                masked_paths: vec![
-                    "/proc/acpi".to_string(),
-                    "/proc/kcore".to_string(),
-                    "/proc/keys".to_string(),
-                    "/proc/latency_stats".to_string(),
-                    "/proc/timer_list".to_string(),
-                    "/proc/timer_stats".to_string(),
-                    "/proc/sched_debug".to_string(),
-                    "/sys/firmware".to_string(),
-                ],
-                readonly_paths: vec![
-                    "/proc/asound".to_string(),
-                    "/proc/bus".to_string(),
-                    "/proc/fs".to_string(),
-                    "/proc/irq".to_string(),
-                    "/proc/sys".to_string(),
-                    "/proc/sysrq-trigger".to_string(),
                 ],
             },
         }

@@ -68,13 +68,18 @@ pub async fn create_pod(
                 error: format!("Failed to create bundle directory: {}", e),
             })?;
 
-        // Generate OCI spec
-        generate_oci_spec(&spec, &pull_response.rootfs_path, &bundle_path)
-            .await
-            .map_err(|e| PodError::ContainerFailed {
-                container_id: spec.id.clone(),
-                error: format!("Failed to generate OCI spec: {}", e),
-            })?;
+        // Generate OCI spec (use image config for Entrypoint/Cmd if not specified)
+        generate_oci_spec(
+            &spec,
+            &pull_response.rootfs_path,
+            &bundle_path,
+            &pull_response.config,
+        )
+        .await
+        .map_err(|e| PodError::ContainerFailed {
+            container_id: spec.id.clone(),
+            error: format!("Failed to generate OCI spec: {}", e),
+        })?;
 
         container_data.push(ContainerData {
             id: spec.id.clone(),

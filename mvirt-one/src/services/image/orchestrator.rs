@@ -4,7 +4,7 @@
 
 use super::filestore::{FileCommand, FileStore};
 use super::puller::pull_oci_image;
-use super::{Command, ImageInfo, ImageState, PullResponse};
+use super::{Command, ImageConfig, ImageInfo, ImageState, PullResponse, parse_image_config};
 use crate::error::ImageError;
 use log::{error, info};
 use std::collections::HashMap;
@@ -74,6 +74,7 @@ impl ImageOrchestrator {
                         let _ = responder.send(Ok(PullResponse {
                             image_id: id.clone(),
                             rootfs_path: info.rootfs_path.clone(),
+                            config: info.config.clone(),
                         }));
                         return;
                     }
@@ -93,6 +94,7 @@ impl ImageOrchestrator {
                         image_ref: image_ref.clone(),
                         rootfs_path: String::new(),
                         state: ImageState::Downloading,
+                        config: ImageConfig::default(),
                     },
                 );
 
@@ -109,9 +111,13 @@ impl ImageOrchestrator {
                     }
                 };
 
-                // Update state to extracting
+                // Parse image config (Entrypoint, Cmd, Env, etc.)
+                let image_config = parse_image_config(&image_data.config);
+
+                // Update state to extracting and store config
                 if let Some(info) = self.store.get_mut(&image_id) {
                     info.state = ImageState::Extracting;
+                    info.config = image_config.clone();
                 }
 
                 // Store the image
@@ -144,6 +150,7 @@ impl ImageOrchestrator {
                         let _ = responder.send(Ok(PullResponse {
                             image_id,
                             rootfs_path,
+                            config: image_config,
                         }));
                     }
                     Ok(Err(e)) => {

@@ -42,6 +42,16 @@ pub enum Command {
 pub struct PullResponse {
     pub image_id: String,
     pub rootfs_path: String,
+    pub config: ImageConfig,
+}
+
+/// Parsed image configuration (Entrypoint, Cmd, Env, etc.)
+#[derive(Debug, Clone, Default)]
+pub struct ImageConfig {
+    pub entrypoint: Vec<String>,
+    pub cmd: Vec<String>,
+    pub env: Vec<String>,
+    pub working_dir: String,
 }
 
 /// Information about a cached image.
@@ -51,6 +61,7 @@ pub struct ImageInfo {
     pub image_ref: String,
     pub rootfs_path: String,
     pub state: ImageState,
+    pub config: ImageConfig,
 }
 
 /// State of an image in the cache.
@@ -74,4 +85,42 @@ pub struct PulledImageData {
 pub struct PulledLayer {
     pub media_type: String,
     pub data: Vec<u8>,
+}
+
+/// Parse image config from OCI image config JSON blob.
+pub fn parse_image_config(config_json: &[u8]) -> ImageConfig {
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Default)]
+    struct OciImageSpec {
+        config: Option<OciImageConfigInner>,
+    }
+
+    #[derive(Deserialize, Default)]
+    struct OciImageConfigInner {
+        #[serde(rename = "Entrypoint")]
+        entrypoint: Option<Vec<String>>,
+        #[serde(rename = "Cmd")]
+        cmd: Option<Vec<String>>,
+        #[serde(rename = "Env")]
+        env: Option<Vec<String>>,
+        #[serde(rename = "WorkingDir")]
+        working_dir: Option<String>,
+    }
+
+    match serde_json::from_slice::<OciImageSpec>(config_json) {
+        Ok(spec) => {
+            let config = spec.config.unwrap_or_default();
+            ImageConfig {
+                entrypoint: config.entrypoint.unwrap_or_default(),
+                cmd: config.cmd.unwrap_or_default(),
+                env: config.env.unwrap_or_default(),
+                working_dir: config.working_dir.unwrap_or_default(),
+            }
+        }
+        Err(e) => {
+            log::warn!("Failed to parse image config: {}", e);
+            ImageConfig::default()
+        }
+    }
 }

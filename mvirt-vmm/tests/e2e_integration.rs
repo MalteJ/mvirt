@@ -168,6 +168,9 @@ async fn test_e2e_nginx() {
     println!("  IP: {}\n", nic_ip);
 
     // 3. Create pod with nginx container
+    // Note: We explicitly specify the command to bypass docker-entrypoint.sh
+    // because the entrypoint script uses features not available in the minimal MicroVM.
+    // This is equivalent to: docker run nginx:alpine nginx -g "daemon off;"
     println!("Step 3: Creating pod with nginx container...");
     let pod = pod_client
         .create_pod(CreatePodRequest {
@@ -176,8 +179,8 @@ async fn test_e2e_nginx() {
                 id: String::new(),
                 name: "nginx".into(),
                 image: "nginx:alpine".into(),
-                command: vec![],
-                args: vec![],
+                command: vec!["nginx".into()],
+                args: vec!["-g".into(), "daemon off;".into()],
                 env: vec![],
                 working_dir: String::new(),
             }],
