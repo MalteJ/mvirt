@@ -26,6 +26,18 @@ struct Args {
     /// Path to youki binary
     #[arg(long)]
     youki: Option<PathBuf>,
+
+    /// Base data directory for images and pods (default: /tmp/mvirt-one)
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+
+    /// Root directory for youki container state (default: /run/youki)
+    #[arg(long)]
+    youki_root: Option<PathBuf>,
+
+    /// Port to listen on (default: 50051)
+    #[arg(long, default_value = "50051")]
+    port: u16,
 }
 
 #[tokio::main]
@@ -46,7 +58,12 @@ async fn main() -> Result<()> {
 
     // Parse CLI args (only in non-PID1 mode)
     let args = if is_pid1 {
-        Args { youki: None }
+        Args {
+            youki: None,
+            data_dir: None,
+            youki_root: None,
+            port: 50051,
+        }
     } else {
         Args::parse()
     };
@@ -147,13 +164,26 @@ async fn run_local(args: Args) -> Result<()> {
         config.youki_path = youki_path;
     }
 
+    // Override data directory if provided via CLI
+    if let Some(data_dir) = args.data_dir {
+        info!("Using custom data directory: {}", data_dir.display());
+        config.images_dir = data_dir.join("images");
+        config.pods_dir = data_dir.join("pods");
+    }
+
+    // Override youki root if provided via CLI
+    if let Some(youki_root) = args.youki_root {
+        info!("Using custom youki root: {}", youki_root.display());
+        config.youki_root = Some(youki_root);
+    }
+
     let services = initialize_services(config).await?;
 
     // Start TCP server for local testing (instead of vsock)
-    info!("Starting TCP server on 127.0.0.1:50051");
+    let addr: SocketAddr = format!("127.0.0.1:{}", args.port).parse()?;
+    info!("Starting TCP server on {}", addr);
     let api_handler = create_api_handler(services.pod_tx, services.shutdown_tx);
 
-    let addr: SocketAddr = "127.0.0.1:50051".parse()?;
     let listener = TcpListener::bind(addr).await?;
 
     info!("mvirt-one ready, listening on {}", addr);

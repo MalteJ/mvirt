@@ -1,10 +1,12 @@
 //! Test helpers for mvirt-one integration tests.
 
+use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+use uuid::Uuid;
 
 const YOUKI_VERSION: &str = "0.5.0";
 const YOUKI_URL: &str =
@@ -14,6 +16,7 @@ const YOUKI_URL: &str =
 pub struct TestServer {
     process: Child,
     pub addr: String,
+    test_dir: PathBuf,
 }
 
 impl TestServer {
@@ -22,9 +25,12 @@ impl TestServer {
     /// This will:
     /// 1. Check for root privileges (required for container operations)
     /// 2. Download youki if not already present
-    /// 3. Clean up old test data
-    /// 4. Start the mvirt-one server with the --youki parameter
-    /// 5. Wait for the server to be ready
+    /// 3. Create a unique test directory for this test instance
+    /// 4. Allocate a dynamic port for this test instance
+    /// 5. Start the mvirt-one server with --youki, --data-dir, and --port parameters
+    /// 6. Wait for the server to be ready
+    ///
+    /// Each test gets its own isolated directory and port, allowing parallel test execution.
     pub async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Root check
         if !nix::unistd::Uid::effective().is_root() {
@@ -36,31 +42,55 @@ impl TestServer {
         // Ensure youki is installed
         let youki_path = ensure_youki_installed()?;
 
-        // Clean up old test data
-        let _ = std::fs::remove_dir_all("/tmp/mvirt-one");
+        // Create unique test directory for this test instance
+        let test_id = Uuid::new_v4();
+        let test_dir = PathBuf::from(format!("/tmp/mvirt-one-{}", test_id));
+        std::fs::create_dir_all(&test_dir)?;
+
+        // Allocate a dynamic port
+        let listener = StdTcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        drop(listener); // Release the port so mvirt-one can bind to it
 
         // Get path to the mvirt-one binary
         let bin = env!("CARGO_BIN_EXE_mvirt-one");
 
-        // Start server with --youki parameter
+        // Create youki root directory for this test
+        let youki_root = test_dir.join("youki");
+        std::fs::create_dir_all(&youki_root)?;
+
+        // Start server with --youki, --data-dir, --youki-root, and --port parameters
         let process = Command::new(bin)
             .arg("--youki")
             .arg(&youki_path)
+            .arg("--data-dir")
+            .arg(&test_dir)
+            .arg("--youki-root")
+            .arg(&youki_root)
+            .arg("--port")
+            .arg(port.to_string())
             .env("RUST_LOG", "info")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
 
-        let addr = "http://127.0.0.1:50051".to_string();
+        let addr = format!("http://127.0.0.1:{}", port);
+        let connect_addr = format!("127.0.0.1:{}", port);
 
         // Wait for server to be ready (up to 5 seconds)
         for _ in 0..50 {
-            if TcpStream::connect("127.0.0.1:50051").await.is_ok() {
-                return Ok(Self { process, addr });
+            if TcpStream::connect(&connect_addr).await.is_ok() {
+                return Ok(Self {
+                    process,
+                    addr,
+                    test_dir,
+                });
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
+        // Cleanup on failure
+        let _ = std::fs::remove_dir_all(&test_dir);
         Err("Server did not start in time".into())
     }
 }
@@ -74,8 +104,8 @@ impl Drop for TestServer {
         );
         let _ = self.process.wait();
 
-        // Clean up test data
-        let _ = std::fs::remove_dir_all("/tmp/mvirt-one");
+        // Clean up this test's data directory
+        let _ = std::fs::remove_dir_all(&self.test_dir);
     }
 }
 

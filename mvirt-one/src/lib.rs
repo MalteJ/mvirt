@@ -34,6 +34,8 @@ pub struct Config {
     pub pods_dir: PathBuf,
     /// Path to youki binary.
     pub youki_path: PathBuf,
+    /// Root directory for youki container state (default: /run/youki).
+    pub youki_root: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -44,6 +46,7 @@ impl Default for Config {
                 images_dir: PathBuf::from("/run/images"),
                 pods_dir: PathBuf::from("/run/pods"),
                 youki_path: PathBuf::from("/usr/bin/youki"),
+                youki_root: None, // Use youki's default (/run/youki)
             }
         } else {
             // Running locally for development
@@ -51,6 +54,7 @@ impl Default for Config {
                 images_dir: PathBuf::from("/tmp/mvirt-one/images"),
                 pods_dir: PathBuf::from("/tmp/mvirt-one/pods"),
                 youki_path: PathBuf::from("youki"),
+                youki_root: None, // Use youki's default (/run/youki)
             }
         }
     }
@@ -80,7 +84,12 @@ pub async fn initialize_services(config: Config) -> anyhow::Result<Services> {
     // Initialize Task Service
     let (task_tx, task_rx) = mpsc::channel::<TaskCommand>(32);
     let (task_event_tx, task_event_rx) = mpsc::channel::<TaskEvent>(32);
-    let task_dispatcher = TaskDispatcher::new(task_rx, task_event_tx, config.youki_path.clone());
+    let task_dispatcher = TaskDispatcher::new(
+        task_rx,
+        task_event_tx,
+        config.youki_path.clone(),
+        config.youki_root,
+    );
     tokio::spawn(async move {
         task_dispatcher.run().await;
     });

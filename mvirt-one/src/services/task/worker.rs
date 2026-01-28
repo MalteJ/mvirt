@@ -14,15 +14,30 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
 /// Run a short-lived youki command.
-async fn run_youki_command(youki_path: &PathBuf, args: &[&str]) -> Result<(), ContainerError> {
+///
+/// If `youki_root` is Some, prepends `--root <path>` to the command.
+/// This allows using a custom root directory for youki container state.
+async fn run_youki_command(
+    youki_path: &PathBuf,
+    youki_root: Option<&PathBuf>,
+    args: &[&str],
+) -> Result<String, ContainerError> {
+    // Build full args as owned strings: optionally prepend --root <path>
+    let mut full_args: Vec<String> = Vec::new();
+    if let Some(root) = youki_root {
+        full_args.push("--root".to_string());
+        full_args.push(root.to_string_lossy().to_string());
+    }
+    full_args.extend(args.iter().map(|s| s.to_string()));
+
     info!(
         "Worker: Executing youki {} {}",
         youki_path.display(),
-        args.join(" ")
+        full_args.join(" ")
     );
 
     let output = Command::new(youki_path)
-        .args(args)
+        .args(&full_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -41,28 +56,40 @@ async fn run_youki_command(youki_path: &PathBuf, args: &[&str]) -> Result<(), Co
     }
 
     debug!("Worker: youki command successful");
-    Ok(())
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    Ok(stdout)
 }
 
 /// Handle container creation.
+///
+/// Note: `youki create` spawns a container init process that remains running.
+/// The parent youki process writes a PID file and then exec's into the init.
+/// We spawn the process and poll for the PID file to detect completion.
 pub async fn handle_create(
     container_id: String,
     bundle_path: String,
     event_tx: mpsc::Sender<Event>,
     responder: oneshot::Sender<Result<CreateResponse, ContainerError>>,
     youki_path: Arc<PathBuf>,
+    youki_root: Option<Arc<PathBuf>>,
 ) {
     let id = container_id.clone();
     let pid_file = format!("{}/container.pid", bundle_path);
 
-    let args = &[
-        "create",
-        "--bundle",
-        &bundle_path,
-        "--pid-file",
-        &pid_file,
-        &id,
-    ];
+    // Build args: optionally prepend --root <path>
+    let mut args: Vec<String> = Vec::new();
+    if let Some(ref root) = youki_root {
+        args.push("--root".to_string());
+        args.push(root.to_string_lossy().to_string());
+    }
+    args.extend([
+        "create".to_string(),
+        "--bundle".to_string(),
+        bundle_path.clone(),
+        "--pid-file".to_string(),
+        pid_file.clone(),
+        id.clone(),
+    ]);
 
     info!(
         "Worker: Spawning youki create: {} {}",
@@ -70,13 +97,13 @@ pub async fn handle_create(
         args.join(" ")
     );
 
-    let child_result = Command::new(youki_path.as_ref())
-        .args(args)
-        .stdout(Stdio::null())
+    // Spawn youki create - it becomes the container init process and doesn't exit
+    let mut child = match Command::new(youki_path.as_ref())
+        .args(&args)
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn();
-
-    let mut child = match child_result {
+        .spawn()
+    {
         Ok(child) => child,
         Err(e) => {
             let err = ContainerError::YoukiCommand(format!("Failed to spawn youki create: {e}"));
@@ -91,10 +118,66 @@ pub async fn handle_create(
         }
     };
 
-    let status = match child.wait().await {
-        Ok(status) => status,
-        Err(e) => {
-            let err = ContainerError::YoukiCommand(format!("Failed to wait for youki create: {e}"));
+    // Poll for PID file to appear (indicates create phase completed)
+    // Timeout after 30 seconds
+    let pid_file_path = std::path::Path::new(&pid_file);
+    let mut attempts = 0;
+    const MAX_ATTEMPTS: u32 = 300; // 30 seconds at 100ms intervals
+
+    loop {
+        // Check if process exited with error
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                // Process exited with error - read stderr
+                let mut stderr_buf = Vec::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use tokio::io::AsyncReadExt;
+                    let _ = stderr.read_to_end(&mut stderr_buf).await;
+                }
+                let stderr = String::from_utf8_lossy(&stderr_buf);
+                error!("Worker: youki create failed: stderr='{}'", stderr);
+                let err = ContainerError::YoukiCommand(format!(
+                    "youki create exited with {}: stderr='{}'",
+                    status, stderr
+                ));
+                let _ = event_tx
+                    .send(Event::ContainerCreateFailed {
+                        id,
+                        error: err.to_string(),
+                    })
+                    .await;
+                let _ = responder.send(Err(err));
+                return;
+            }
+            Ok(Some(_)) => {
+                // Process exited successfully - PID file should exist
+            }
+            Ok(None) => {
+                // Process still running - this is expected, it becomes the init
+            }
+            Err(e) => {
+                let err =
+                    ContainerError::YoukiCommand(format!("Failed to check youki status: {e}"));
+                let _ = event_tx
+                    .send(Event::ContainerCreateFailed {
+                        id,
+                        error: err.to_string(),
+                    })
+                    .await;
+                let _ = responder.send(Err(err));
+                return;
+            }
+        }
+
+        // Check if PID file exists
+        if pid_file_path.exists() {
+            break;
+        }
+
+        attempts += 1;
+        if attempts >= MAX_ATTEMPTS {
+            let err =
+                ContainerError::YoukiCommand("Timeout waiting for container PID file".to_string());
             let _ = event_tx
                 .send(Event::ContainerCreateFailed {
                     id,
@@ -102,21 +185,12 @@ pub async fn handle_create(
                 })
                 .await;
             let _ = responder.send(Err(err));
+            // Kill the process
+            let _ = child.kill().await;
             return;
         }
-    };
 
-    if !status.success() {
-        let err =
-            ContainerError::YoukiCommand(format!("youki create exited with non-zero: {status}"));
-        let _ = event_tx
-            .send(Event::ContainerCreateFailed {
-                id,
-                error: err.to_string(),
-            })
-            .await;
-        let _ = responder.send(Err(err));
-        return;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
     // Read PID from file
@@ -128,7 +202,7 @@ pub async fn handle_create(
             .trim()
             .parse::<i32>()
             .map_err(|e| ContainerError::YoukiCommand(format!("Failed to parse PID: {e}")))?;
-        let _ = tokio::fs::remove_file(&pid_file).await;
+        // Don't remove PID file - youki state command may need it
         Ok(pid)
     }
     .await;
@@ -158,12 +232,25 @@ pub async fn handle_start(
     event_tx: mpsc::Sender<Event>,
     responder: oneshot::Sender<Result<(), ContainerError>>,
     youki_path: Arc<PathBuf>,
+    youki_root: Option<Arc<PathBuf>>,
 ) {
     let id = container_id.clone();
-    let result = run_youki_command(&youki_path, &["start", &id]).await;
+    let root_ref = youki_root.as_deref();
+    let result = run_youki_command(&youki_path, root_ref, &["start", &id]).await;
 
     match result {
         Ok(_) => {
+            // Check container state after start for debugging
+            if let Ok(state_output) =
+                run_youki_command(&youki_path, root_ref, &["state", &id]).await
+            {
+                info!(
+                    "Worker: Container {} state after start: {}",
+                    id,
+                    state_output.trim()
+                );
+            }
+
             let _ = event_tx
                 .send(Event::ContainerStarted { id: id.clone() })
                 .await;
@@ -190,9 +277,16 @@ pub async fn handle_kill(
     signal: i32,
     responder: oneshot::Sender<Result<(), ContainerError>>,
     youki_path: Arc<PathBuf>,
+    youki_root: Option<Arc<PathBuf>>,
 ) {
     let signal_str = signal.to_string();
-    let result = run_youki_command(&youki_path, &["kill", &container_id, &signal_str]).await;
+    let result = run_youki_command(
+        &youki_path,
+        youki_root.as_deref(),
+        &["kill", &container_id, &signal_str],
+    )
+    .await
+    .map(|_| ());
     let _ = responder.send(result);
 }
 
@@ -202,9 +296,15 @@ pub async fn handle_delete(
     event_tx: mpsc::Sender<Event>,
     responder: oneshot::Sender<Result<(), ContainerError>>,
     youki_path: Arc<PathBuf>,
+    youki_root: Option<Arc<PathBuf>>,
 ) {
     let id = container_id.clone();
-    let result = run_youki_command(&youki_path, &["delete", "--force", &id]).await;
+    let result = run_youki_command(
+        &youki_path,
+        youki_root.as_deref(),
+        &["delete", "--force", &id],
+    )
+    .await;
 
     if let Err(e) = result {
         let _ = responder.send(Err(e));

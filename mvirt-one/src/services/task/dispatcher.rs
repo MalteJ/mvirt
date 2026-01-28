@@ -16,6 +16,8 @@ pub struct TaskDispatcher {
     container_pids: HashMap<String, i32>,
     /// Path to youki binary
     youki_path: Arc<PathBuf>,
+    /// Root directory for youki container state (None = use default /run/youki)
+    youki_root: Option<Arc<PathBuf>>,
 }
 
 impl TaskDispatcher {
@@ -24,12 +26,14 @@ impl TaskDispatcher {
         command_rx: mpsc::Receiver<Command>,
         event_tx: mpsc::Sender<Event>,
         youki_path: PathBuf,
+        youki_root: Option<PathBuf>,
     ) -> Self {
         Self {
             command_rx,
             event_tx,
             container_pids: HashMap::new(),
             youki_path: Arc::new(youki_path),
+            youki_root: youki_root.map(Arc::new),
         }
     }
 
@@ -58,6 +62,7 @@ impl TaskDispatcher {
                     self.event_tx.clone(),
                     responder,
                     self.youki_path.clone(),
+                    self.youki_root.clone(),
                 )
                 .await;
             }
@@ -74,6 +79,7 @@ impl TaskDispatcher {
                     self.event_tx.clone(),
                     responder,
                     self.youki_path.clone(),
+                    self.youki_root.clone(),
                 )
                 .await;
             }
@@ -86,7 +92,14 @@ impl TaskDispatcher {
                     "TaskDispatcher: Kill container {} with signal {}",
                     container_id, signal
                 );
-                worker::handle_kill(container_id, signal, responder, self.youki_path.clone()).await;
+                worker::handle_kill(
+                    container_id,
+                    signal,
+                    responder,
+                    self.youki_path.clone(),
+                    self.youki_root.clone(),
+                )
+                .await;
             }
             Command::Delete {
                 container_id,
@@ -99,6 +112,7 @@ impl TaskDispatcher {
                     self.event_tx.clone(),
                     responder,
                     self.youki_path.clone(),
+                    self.youki_root.clone(),
                 )
                 .await;
             }

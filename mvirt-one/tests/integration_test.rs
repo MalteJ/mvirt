@@ -5,7 +5,9 @@
 //! - Network access (for image pull from Docker registry)
 //! - Linux with namespace/cgroup support
 //!
-//! Run with: sudo cargo test -p mvirt-one --test integration_test -- --test-threads=1
+//! Run with: sudo cargo test -p mvirt-one --test integration_test
+//!
+//! Note: Tests are parallel-safe. Each test uses a unique data directory and port.
 
 mod common;
 
@@ -252,4 +254,213 @@ async fn test_get_nonexistent_pod() {
         .await;
 
     assert!(result.is_err(), "Should return error for nonexistent pod");
+}
+
+/// Test: nginx container serves HTTP content.
+///
+/// This test verifies the full container stack works by:
+/// 1. Pulling nginx:alpine image
+/// 2. Starting nginx container
+/// 3. Making HTTP request and verifying response
+#[tokio::test]
+async fn test_nginx_http_response() {
+    let server = TestServer::start().await.expect("Failed to start server");
+    let mut client = UosServiceClient::connect(server.addr.clone())
+        .await
+        .expect("Failed to connect to server");
+
+    // Create Pod with nginx
+    // nginx:alpine default config listens on port 80, we need to run as root
+    // and the container has network namespace so it can bind to 80
+    let pod = client
+        .create_pod(CreatePodRequest {
+            id: "nginx-http-test".into(),
+            name: "nginx-http-test".into(),
+            containers: vec![ContainerSpec {
+                id: "nginx".into(),
+                name: "nginx".into(),
+                image: "docker.io/library/nginx:alpine".into(),
+                command: vec![], // Uses image's Entrypoint + Cmd automatically
+                args: vec![],
+                env: vec![],
+                working_dir: String::new(),
+            }],
+        })
+        .await
+        .expect("CreatePod failed")
+        .into_inner();
+
+    eprintln!("Pod created: {:?}", pod.state);
+
+    // Start Pod
+    let pod = client
+        .start_pod(StartPodRequest {
+            id: "nginx-http-test".into(),
+        })
+        .await
+        .expect("StartPod failed")
+        .into_inner();
+
+    eprintln!("Pod started: {:?}", pod.state);
+    assert_eq!(pod.state, PodState::Running as i32, "Pod should be running");
+
+    // Wait for nginx to start (give it time to initialize)
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // nginx listens on port 80 by default inside the container
+    // Since the container shares the host network namespace (no net namespace in spec),
+    // we can connect to localhost:80
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    // Try to connect to nginx
+    let response = http_client.get("http://127.0.0.1:80/").send().await;
+
+    match &response {
+        Ok(resp) => eprintln!(
+            "HTTP response: {} {}",
+            resp.status(),
+            resp.status().as_str()
+        ),
+        Err(e) => eprintln!("HTTP error: {}", e),
+    }
+
+    let response = response.expect("HTTP request to nginx failed");
+    assert!(
+        response.status().is_success(),
+        "nginx should return 2xx status"
+    );
+
+    let body = response.text().await.expect("Failed to read response body");
+    assert!(
+        body.contains("nginx") || body.contains("Welcome"),
+        "Response should contain nginx welcome page"
+    );
+
+    eprintln!("nginx HTTP test passed!");
+
+    // Cleanup - use force delete in case container already exited
+    let _ = client
+        .stop_pod(StopPodRequest {
+            id: "nginx-http-test".into(),
+            timeout_seconds: 5,
+        })
+        .await;
+
+    client
+        .delete_pod(DeletePodRequest {
+            id: "nginx-http-test".into(),
+            force: true,
+        })
+        .await
+        .expect("DeletePod failed");
+}
+
+/// Test: busybox httpd serves HTTP content.
+///
+/// A simpler HTTP test using busybox that doesn't require nginx config.
+#[tokio::test]
+async fn test_busybox_http_response() {
+    let server = TestServer::start().await.expect("Failed to start server");
+    let mut client = UosServiceClient::connect(server.addr.clone())
+        .await
+        .expect("Failed to connect to server");
+
+    const TEST_PORT: u16 = 8081;
+
+    // Create Pod with busybox httpd
+    let pod = client
+        .create_pod(CreatePodRequest {
+            id: "busybox-http-test".into(),
+            name: "busybox-http-test".into(),
+            containers: vec![ContainerSpec {
+                id: "httpd".into(),
+                name: "httpd".into(),
+                image: "docker.io/library/busybox:latest".into(),
+                command: vec!["/bin/sh".into()],
+                args: vec![
+                    "-c".into(),
+                    format!(
+                        "echo '<html><body>Hello from busybox</body></html>' > /tmp/index.html && httpd -f -p {} -h /tmp",
+                        TEST_PORT
+                    ),
+                ],
+                env: vec![],
+                working_dir: String::new(),
+            }],
+        })
+        .await
+        .expect("CreatePod failed")
+        .into_inner();
+
+    eprintln!("Pod created: {:?}", pod.state);
+
+    // Start Pod
+    let pod = client
+        .start_pod(StartPodRequest {
+            id: "busybox-http-test".into(),
+        })
+        .await
+        .expect("StartPod failed")
+        .into_inner();
+
+    eprintln!("Pod started: {:?}", pod.state);
+    assert_eq!(pod.state, PodState::Running as i32, "Pod should be running");
+
+    // Wait for httpd to start
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Make HTTP request
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    let url = format!("http://127.0.0.1:{}/index.html", TEST_PORT);
+    eprintln!("Making HTTP request to: {}", url);
+
+    let response = http_client.get(&url).send().await;
+
+    match &response {
+        Ok(resp) => eprintln!(
+            "HTTP response: {} {}",
+            resp.status(),
+            resp.status().as_str()
+        ),
+        Err(e) => eprintln!("HTTP error: {}", e),
+    }
+
+    let response = response.expect("HTTP request to busybox httpd failed");
+    assert!(
+        response.status().is_success(),
+        "httpd should return 2xx status"
+    );
+
+    let body = response.text().await.expect("Failed to read response body");
+    eprintln!("Response body: {}", body);
+    assert!(
+        body.contains("Hello from busybox"),
+        "Response should contain our test content"
+    );
+
+    eprintln!("busybox HTTP test passed!");
+
+    // Cleanup
+    client
+        .stop_pod(StopPodRequest {
+            id: "busybox-http-test".into(),
+            timeout_seconds: 5,
+        })
+        .await
+        .expect("StopPod failed");
+
+    client
+        .delete_pod(DeletePodRequest {
+            id: "busybox-http-test".into(),
+            force: false,
+        })
+        .await
+        .expect("DeletePod failed");
 }
