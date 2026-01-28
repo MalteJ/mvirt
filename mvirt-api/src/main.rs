@@ -36,7 +36,7 @@ struct Args {
     raft_listen: String,
 
     /// Listen address for REST API (client)
-    #[arg(short, long, default_value = "[::1]:50055")]
+    #[arg(short, long, default_value = "[::]:8080")]
     listen: String,
 
     /// Listen address for gRPC API (mvirt-node agents)
