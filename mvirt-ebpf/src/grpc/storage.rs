@@ -35,6 +35,18 @@ pub enum StorageError {
 
     #[error("IP address already in use: {0}")]
     IpAddressInUse(String),
+
+    #[error("Security group not found: {0}")]
+    SecurityGroupNotFound(String),
+
+    #[error("Security group name already exists: {0}")]
+    SecurityGroupNameExists(String),
+
+    #[error("Security group rule not found: {0}")]
+    SecurityGroupRuleNotFound(String),
+
+    #[error("Security group has attached NICs: {0}")]
+    SecurityGroupHasNics(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -131,6 +143,149 @@ impl NicData {
             self.mac_address[5]
         )
     }
+}
+
+/// Rule direction enum matching proto definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum RuleDirection {
+    Unspecified = 0,
+    Ingress = 1,
+    Egress = 2,
+}
+
+impl From<i32> for RuleDirection {
+    fn from(v: i32) -> Self {
+        match v {
+            1 => RuleDirection::Ingress,
+            2 => RuleDirection::Egress,
+            _ => RuleDirection::Unspecified,
+        }
+    }
+}
+
+impl From<RuleDirection> for i32 {
+    fn from(d: RuleDirection) -> i32 {
+        d as i32
+    }
+}
+
+impl RuleDirection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuleDirection::Ingress => "ingress",
+            RuleDirection::Egress => "egress",
+            RuleDirection::Unspecified => "unspecified",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "ingress" => RuleDirection::Ingress,
+            "egress" => RuleDirection::Egress,
+            _ => RuleDirection::Unspecified,
+        }
+    }
+}
+
+/// Rule protocol enum matching proto definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum RuleProtocol {
+    Unspecified = 0,
+    All = 1,
+    Tcp = 2,
+    Udp = 3,
+    Icmp = 4,
+    Icmpv6 = 5,
+}
+
+impl From<i32> for RuleProtocol {
+    fn from(v: i32) -> Self {
+        match v {
+            1 => RuleProtocol::All,
+            2 => RuleProtocol::Tcp,
+            3 => RuleProtocol::Udp,
+            4 => RuleProtocol::Icmp,
+            5 => RuleProtocol::Icmpv6,
+            _ => RuleProtocol::Unspecified,
+        }
+    }
+}
+
+impl From<RuleProtocol> for i32 {
+    fn from(p: RuleProtocol) -> i32 {
+        p as i32
+    }
+}
+
+impl RuleProtocol {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuleProtocol::All => "all",
+            RuleProtocol::Tcp => "tcp",
+            RuleProtocol::Udp => "udp",
+            RuleProtocol::Icmp => "icmp",
+            RuleProtocol::Icmpv6 => "icmpv6",
+            RuleProtocol::Unspecified => "unspecified",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "all" => RuleProtocol::All,
+            "tcp" => RuleProtocol::Tcp,
+            "udp" => RuleProtocol::Udp,
+            "icmp" => RuleProtocol::Icmp,
+            "icmpv6" => RuleProtocol::Icmpv6,
+            _ => RuleProtocol::Unspecified,
+        }
+    }
+
+    /// Convert to IP protocol number for eBPF
+    pub fn to_ip_protocol(&self) -> u8 {
+        match self {
+            RuleProtocol::All => 0,
+            RuleProtocol::Tcp => 6,
+            RuleProtocol::Udp => 17,
+            RuleProtocol::Icmp => 1,
+            RuleProtocol::Icmpv6 => 58,
+            RuleProtocol::Unspecified => 0,
+        }
+    }
+}
+
+/// Security group data stored in the database.
+#[derive(Debug, Clone)]
+pub struct SecurityGroupData {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Security group rule data stored in the database.
+#[derive(Debug, Clone)]
+pub struct SecurityGroupRuleData {
+    pub id: Uuid,
+    pub security_group_id: Uuid,
+    pub direction: RuleDirection,
+    pub protocol: RuleProtocol,
+    pub port_start: Option<u16>,
+    pub port_end: Option<u16>,
+    pub cidr: Option<String>,
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// NIC-SecurityGroup association data.
+#[derive(Debug, Clone)]
+pub struct NicSecurityGroupData {
+    pub nic_id: Uuid,
+    pub security_group_id: Uuid,
+    pub created_at: DateTime<Utc>,
 }
 
 /// SQLite storage for networks and NICs.
@@ -602,6 +757,350 @@ impl Storage {
                 .unwrap()
                 .with_timezone(&Utc),
         })
+    }
+}
+
+impl Storage {
+    // ========== Security Group Operations ==========
+
+    /// Create a new security group.
+    pub fn create_security_group(&self, sg: &SecurityGroupData) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO security_groups (id, name, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                sg.id.to_string(),
+                sg.name,
+                sg.description,
+                sg.created_at.to_rfc3339(),
+                sg.updated_at.to_rfc3339(),
+            ],
+        )
+        .map_err(|e| {
+            if let rusqlite::Error::SqliteFailure(ref err, _) = e
+                && err.code == rusqlite::ErrorCode::ConstraintViolation
+            {
+                return StorageError::SecurityGroupNameExists(sg.name.clone());
+            }
+            StorageError::Database(e)
+        })?;
+
+        Ok(())
+    }
+
+    /// Get a security group by ID.
+    pub fn get_security_group_by_id(&self, id: &Uuid) -> Result<Option<SecurityGroupData>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, name, description, created_at, updated_at
+             FROM security_groups WHERE id = ?1",
+            params![id.to_string()],
+            |row| Ok(Self::row_to_security_group(row)),
+        )
+        .optional()?
+        .transpose()
+    }
+
+    /// Get a security group by name.
+    pub fn get_security_group_by_name(&self, name: &str) -> Result<Option<SecurityGroupData>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, name, description, created_at, updated_at
+             FROM security_groups WHERE name = ?1",
+            params![name],
+            |row| Ok(Self::row_to_security_group(row)),
+        )
+        .optional()?
+        .transpose()
+    }
+
+    /// List all security groups.
+    pub fn list_security_groups(&self) -> Result<Vec<SecurityGroupData>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, created_at, updated_at
+             FROM security_groups ORDER BY created_at",
+        )?;
+
+        let groups = stmt
+            .query_map([], |row| Ok(Self::row_to_security_group(row)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(groups)
+    }
+
+    /// Delete a security group by ID.
+    pub fn delete_security_group(&self, id: &Uuid) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM security_groups WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Count NICs attached to a security group.
+    pub fn count_nics_in_security_group(&self, sg_id: &Uuid) -> Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM nic_security_groups WHERE security_group_id = ?1",
+            params![sg_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    fn row_to_security_group(row: &Row) -> Result<SecurityGroupData> {
+        let id_str: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let description: Option<String> = row.get(2)?;
+        let created_at_str: String = row.get(3)?;
+        let updated_at_str: String = row.get(4)?;
+
+        Ok(SecurityGroupData {
+            id: Uuid::parse_str(&id_str).unwrap(),
+            name,
+            description,
+            created_at: DateTime::parse_from_rfc3339(&created_at_str)
+                .unwrap()
+                .with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339(&updated_at_str)
+                .unwrap()
+                .with_timezone(&Utc),
+        })
+    }
+
+    // ========== Security Group Rule Operations ==========
+
+    /// Create a new security group rule.
+    pub fn create_security_group_rule(&self, rule: &SecurityGroupRuleData) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO security_group_rules (id, security_group_id, direction, protocol, port_start, port_end, cidr, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                rule.id.to_string(),
+                rule.security_group_id.to_string(),
+                rule.direction.as_str(),
+                rule.protocol.as_str(),
+                rule.port_start.map(|p| p as i32),
+                rule.port_end.map(|p| p as i32),
+                rule.cidr,
+                rule.description,
+                rule.created_at.to_rfc3339(),
+                rule.updated_at.to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get a security group rule by ID.
+    pub fn get_security_group_rule_by_id(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<SecurityGroupRuleData>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, security_group_id, direction, protocol, port_start, port_end, cidr, description, created_at, updated_at
+             FROM security_group_rules WHERE id = ?1",
+            params![id.to_string()],
+            |row| Ok(Self::row_to_security_group_rule(row)),
+        )
+        .optional()?
+        .transpose()
+    }
+
+    /// List all rules for a security group.
+    pub fn list_rules_for_security_group(
+        &self,
+        sg_id: &Uuid,
+    ) -> Result<Vec<SecurityGroupRuleData>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, security_group_id, direction, protocol, port_start, port_end, cidr, description, created_at, updated_at
+             FROM security_group_rules WHERE security_group_id = ?1 ORDER BY created_at",
+        )?;
+
+        let rules = stmt
+            .query_map(params![sg_id.to_string()], |row| {
+                Ok(Self::row_to_security_group_rule(row))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(rules)
+    }
+
+    /// Delete a security group rule by ID.
+    pub fn delete_security_group_rule(&self, id: &Uuid) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM security_group_rules WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    fn row_to_security_group_rule(row: &Row) -> Result<SecurityGroupRuleData> {
+        let id_str: String = row.get(0)?;
+        let sg_id_str: String = row.get(1)?;
+        let direction_str: String = row.get(2)?;
+        let protocol_str: String = row.get(3)?;
+        let port_start: Option<i32> = row.get(4)?;
+        let port_end: Option<i32> = row.get(5)?;
+        let cidr: Option<String> = row.get(6)?;
+        let description: Option<String> = row.get(7)?;
+        let created_at_str: String = row.get(8)?;
+        let updated_at_str: String = row.get(9)?;
+
+        Ok(SecurityGroupRuleData {
+            id: Uuid::parse_str(&id_str).unwrap(),
+            security_group_id: Uuid::parse_str(&sg_id_str).unwrap(),
+            direction: RuleDirection::parse(&direction_str),
+            protocol: RuleProtocol::parse(&protocol_str),
+            port_start: port_start.map(|p| p as u16),
+            port_end: port_end.map(|p| p as u16),
+            cidr,
+            description,
+            created_at: DateTime::parse_from_rfc3339(&created_at_str)
+                .unwrap()
+                .with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339(&updated_at_str)
+                .unwrap()
+                .with_timezone(&Utc),
+        })
+    }
+
+    // ========== NIC-SecurityGroup Association Operations ==========
+
+    /// Attach a security group to a NIC.
+    pub fn attach_security_group(&self, nic_id: &Uuid, sg_id: &Uuid) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO nic_security_groups (nic_id, security_group_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![nic_id.to_string(), sg_id.to_string(), now],
+        )?;
+
+        Ok(result > 0)
+    }
+
+    /// Detach a security group from a NIC.
+    pub fn detach_security_group(&self, nic_id: &Uuid, sg_id: &Uuid) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM nic_security_groups WHERE nic_id = ?1 AND security_group_id = ?2",
+            params![nic_id.to_string(), sg_id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Detach all security groups from a NIC (for force delete).
+    pub fn detach_all_security_groups_from_nic(&self, nic_id: &Uuid) -> Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM nic_security_groups WHERE nic_id = ?1",
+            params![nic_id.to_string()],
+        )?;
+        Ok(rows as u32)
+    }
+
+    /// Detach a security group from all NICs (for force delete).
+    pub fn detach_security_group_from_all_nics(&self, sg_id: &Uuid) -> Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM nic_security_groups WHERE security_group_id = ?1",
+            params![sg_id.to_string()],
+        )?;
+        Ok(rows as u32)
+    }
+
+    /// List security groups attached to a NIC.
+    pub fn list_security_groups_for_nic(&self, nic_id: &Uuid) -> Result<Vec<SecurityGroupData>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT sg.id, sg.name, sg.description, sg.created_at, sg.updated_at
+             FROM security_groups sg
+             INNER JOIN nic_security_groups nsg ON sg.id = nsg.security_group_id
+             WHERE nsg.nic_id = ?1
+             ORDER BY sg.created_at",
+        )?;
+
+        let groups = stmt
+            .query_map(params![nic_id.to_string()], |row| {
+                Ok(Self::row_to_security_group(row))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(groups)
+    }
+
+    /// List NICs attached to a security group.
+    pub fn list_nics_in_security_group(&self, sg_id: &Uuid) -> Result<Vec<NicData>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.name, n.network_id, n.mac_address, n.ipv4_address, n.ipv6_address,
+                    n.routed_ipv4_prefixes, n.routed_ipv6_prefixes, n.tap_name, n.state,
+                    n.created_at, n.updated_at
+             FROM nics n
+             INNER JOIN nic_security_groups nsg ON n.id = nsg.nic_id
+             WHERE nsg.security_group_id = ?1
+             ORDER BY n.created_at",
+        )?;
+
+        let nics = stmt
+            .query_map(params![sg_id.to_string()], |row| Ok(Self::row_to_nic(row)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(nics)
+    }
+
+    /// Get all rules for all security groups attached to a NIC.
+    /// Returns rules sorted by security_group_id for consistent ordering.
+    pub fn get_all_rules_for_nic(&self, nic_id: &Uuid) -> Result<Vec<SecurityGroupRuleData>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.security_group_id, r.direction, r.protocol, r.port_start, r.port_end,
+                    r.cidr, r.description, r.created_at, r.updated_at
+             FROM security_group_rules r
+             INNER JOIN nic_security_groups nsg ON r.security_group_id = nsg.security_group_id
+             WHERE nsg.nic_id = ?1
+             ORDER BY r.security_group_id, r.created_at",
+        )?;
+
+        let rules = stmt
+            .query_map(params![nic_id.to_string()], |row| {
+                Ok(Self::row_to_security_group_rule(row))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(rules)
+    }
+
+    /// Check if a NIC has any security groups attached.
+    pub fn nic_has_security_groups(&self, nic_id: &Uuid) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM nic_security_groups WHERE nic_id = ?1",
+            params![nic_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 }
 

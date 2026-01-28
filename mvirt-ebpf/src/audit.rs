@@ -157,6 +157,56 @@ impl EbpfAuditLogger {
             vec![],
         );
     }
+
+    // === Security Group Events ===
+
+    pub fn security_group_created(&self, sg_id: &str, sg_name: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Security group '{}' created", sg_name),
+            vec![sg_id.to_string()],
+        );
+    }
+
+    pub fn security_group_deleted(&self, sg_id: &str, sg_name: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Security group '{}' deleted", sg_name),
+            vec![sg_id.to_string()],
+        );
+    }
+
+    pub fn security_group_rule_added(&self, rule_id: &str, sg_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            "Security group rule added".to_string(),
+            vec![rule_id.to_string(), sg_id.to_string()],
+        );
+    }
+
+    pub fn security_group_rule_removed(&self, rule_id: &str, sg_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            "Security group rule removed".to_string(),
+            vec![rule_id.to_string(), sg_id.to_string()],
+        );
+    }
+
+    pub fn security_group_attached(&self, sg_id: &str, nic_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            "Security group attached to NIC".to_string(),
+            vec![sg_id.to_string(), nic_id.to_string()],
+        );
+    }
+
+    pub fn security_group_detached(&self, sg_id: &str, nic_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            "Security group detached from NIC".to_string(),
+            vec![sg_id.to_string(), nic_id.to_string()],
+        );
+    }
 }
 
 /// Create a shared eBPF network audit logger

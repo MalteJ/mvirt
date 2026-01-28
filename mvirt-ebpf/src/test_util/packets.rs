@@ -1102,6 +1102,769 @@ pub fn parse_neighbor_advertisement(packet: &[u8]) -> Option<NaResponse> {
 }
 
 // ============================================================================
+// TCP Header Size
+// ============================================================================
+
+/// TCP header size (without options)
+pub const TCP_HDR_SIZE: usize = 20;
+
+// ============================================================================
+// TCP Flags
+// ============================================================================
+
+/// TCP flags for packet construction
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TcpFlags {
+    pub fin: bool,
+    pub syn: bool,
+    pub rst: bool,
+    pub psh: bool,
+    pub ack: bool,
+    pub urg: bool,
+}
+
+impl TcpFlags {
+    /// Create a SYN flag set
+    pub fn syn() -> Self {
+        Self {
+            syn: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a SYN-ACK flag set
+    pub fn syn_ack() -> Self {
+        Self {
+            syn: true,
+            ack: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create an ACK flag set
+    pub fn ack() -> Self {
+        Self {
+            ack: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a FIN-ACK flag set
+    pub fn fin_ack() -> Self {
+        Self {
+            fin: true,
+            ack: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a RST flag set
+    pub fn rst() -> Self {
+        Self {
+            rst: true,
+            ..Default::default()
+        }
+    }
+
+    /// Convert to TCP flags byte
+    fn to_byte(&self) -> u8 {
+        let mut flags = 0u8;
+        if self.fin {
+            flags |= 0x01;
+        }
+        if self.syn {
+            flags |= 0x02;
+        }
+        if self.rst {
+            flags |= 0x04;
+        }
+        if self.psh {
+            flags |= 0x08;
+        }
+        if self.ack {
+            flags |= 0x10;
+        }
+        if self.urg {
+            flags |= 0x20;
+        }
+        flags
+    }
+
+    /// Parse from TCP flags byte
+    fn from_byte(b: u8) -> Self {
+        Self {
+            fin: (b & 0x01) != 0,
+            syn: (b & 0x02) != 0,
+            rst: (b & 0x04) != 0,
+            psh: (b & 0x08) != 0,
+            ack: (b & 0x10) != 0,
+            urg: (b & 0x20) != 0,
+        }
+    }
+}
+
+// ============================================================================
+// TCP Packets
+// ============================================================================
+
+/// Parsed TCP packet info
+#[derive(Debug)]
+pub struct TcpInfo {
+    pub src_ip: [u8; 4],
+    pub dst_ip: [u8; 4],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub seq: u32,
+    pub ack: u32,
+    pub flags: TcpFlags,
+    pub payload: Vec<u8>,
+}
+
+/// Compute TCP checksum for IPv4
+fn compute_tcp4_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], tcp_data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+
+    // Pseudo-header
+    sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
+    sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
+    sum += 6u32; // Protocol (TCP)
+    sum += tcp_data.len() as u32;
+
+    // TCP data
+    let mut i = 0;
+    while i + 1 < tcp_data.len() {
+        sum += u16::from_be_bytes([tcp_data[i], tcp_data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < tcp_data.len() {
+        sum += (tcp_data[i] as u32) << 8;
+    }
+
+    // Fold to 16 bits
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+
+    let result = !(sum as u16);
+    if result == 0 { 0xffff } else { result }
+}
+
+/// Create a TCP packet (IPv4)
+pub fn create_tcp_packet(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: TcpFlags,
+    payload: &[u8],
+) -> Vec<u8> {
+    let tcp_len = TCP_HDR_SIZE + payload.len();
+    let ip_len = IP_HDR_SIZE + tcp_len;
+    let total_len = ETHERNET_HDR_SIZE + ip_len;
+
+    let mut packet = vec![0u8; total_len];
+
+    // Ethernet frame
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress(src_mac),
+        dst_addr: EthernetAddress(dst_mac),
+        ethertype: EthernetProtocol::Ipv4,
+    };
+    let mut eth_frame = EthernetFrame::new_unchecked(&mut packet[..]);
+    eth_repr.emit(&mut eth_frame);
+
+    // IPv4 packet
+    let ip_repr = Ipv4Repr {
+        src_addr: Ipv4Address::from_bytes(&src_ip),
+        dst_addr: Ipv4Address::from_bytes(&dst_ip),
+        next_header: IpProtocol::Tcp,
+        payload_len: tcp_len,
+        hop_limit: 64,
+    };
+    let mut ip_packet = Ipv4Packet::new_unchecked(eth_frame.payload_mut());
+    ip_repr.emit(
+        &mut ip_packet,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    // TCP header (manually built)
+    let tcp_start = ETHERNET_HDR_SIZE + IP_HDR_SIZE;
+    let tcp_slice = &mut packet[tcp_start..];
+
+    // Source port
+    tcp_slice[0..2].copy_from_slice(&src_port.to_be_bytes());
+    // Destination port
+    tcp_slice[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    // Sequence number
+    tcp_slice[4..8].copy_from_slice(&seq.to_be_bytes());
+    // Acknowledgment number
+    tcp_slice[8..12].copy_from_slice(&ack.to_be_bytes());
+    // Data offset (5 = 20 bytes header, no options) + reserved
+    tcp_slice[12] = 0x50; // 5 << 4
+    // Flags
+    tcp_slice[13] = flags.to_byte();
+    // Window size (64KB)
+    tcp_slice[14..16].copy_from_slice(&65535u16.to_be_bytes());
+    // Checksum (placeholder)
+    tcp_slice[16..18].fill(0);
+    // Urgent pointer
+    tcp_slice[18..20].fill(0);
+    // Payload
+    tcp_slice[20..20 + payload.len()].copy_from_slice(payload);
+
+    // Compute TCP checksum
+    let checksum = compute_tcp4_checksum(&src_ip, &dst_ip, &tcp_slice[..tcp_len]);
+    tcp_slice[16..18].copy_from_slice(&checksum.to_be_bytes());
+
+    packet
+}
+
+/// Create a TCP SYN packet
+pub fn create_tcp_syn(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+) -> Vec<u8> {
+    create_tcp_packet(
+        src_mac,
+        dst_mac,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        0,
+        TcpFlags::syn(),
+        &[],
+    )
+}
+
+/// Create a TCP SYN-ACK packet
+pub fn create_tcp_syn_ack(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+) -> Vec<u8> {
+    create_tcp_packet(
+        src_mac,
+        dst_mac,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        TcpFlags::syn_ack(),
+        &[],
+    )
+}
+
+/// Create a TCP ACK packet
+pub fn create_tcp_ack(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+) -> Vec<u8> {
+    create_tcp_packet(
+        src_mac,
+        dst_mac,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        TcpFlags::ack(),
+        &[],
+    )
+}
+
+/// Parse a TCP packet (IPv4)
+pub fn parse_tcp_packet(packet: &[u8]) -> Option<TcpInfo> {
+    let eth_frame = EthernetFrame::new_checked(packet).ok()?;
+    if eth_frame.ethertype() != EthernetProtocol::Ipv4 {
+        return None;
+    }
+
+    let ip_packet = Ipv4Packet::new_checked(eth_frame.payload()).ok()?;
+    if ip_packet.next_header() != IpProtocol::Tcp {
+        return None;
+    }
+
+    let tcp_data = ip_packet.payload();
+    if tcp_data.len() < TCP_HDR_SIZE {
+        return None;
+    }
+
+    let src_port = u16::from_be_bytes([tcp_data[0], tcp_data[1]]);
+    let dst_port = u16::from_be_bytes([tcp_data[2], tcp_data[3]]);
+    let seq = u32::from_be_bytes([tcp_data[4], tcp_data[5], tcp_data[6], tcp_data[7]]);
+    let ack = u32::from_be_bytes([tcp_data[8], tcp_data[9], tcp_data[10], tcp_data[11]]);
+    let data_offset = ((tcp_data[12] >> 4) as usize) * 4;
+    let flags = TcpFlags::from_byte(tcp_data[13]);
+
+    let payload = if data_offset <= tcp_data.len() {
+        tcp_data[data_offset..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Some(TcpInfo {
+        src_ip: ip_packet.src_addr().0,
+        dst_ip: ip_packet.dst_addr().0,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        flags,
+        payload,
+    })
+}
+
+// ============================================================================
+// Generic UDP Packets (not just DHCP)
+// ============================================================================
+
+/// Parsed UDP packet info
+#[derive(Debug)]
+pub struct UdpInfo {
+    pub src_ip: [u8; 4],
+    pub dst_ip: [u8; 4],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub payload: Vec<u8>,
+}
+
+/// Create a generic UDP packet (IPv4)
+pub fn create_udp_packet(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let udp_len = UDP_HDR_SIZE + payload.len();
+    let ip_len = IP_HDR_SIZE + udp_len;
+    let total_len = ETHERNET_HDR_SIZE + ip_len;
+
+    let mut packet = vec![0u8; total_len];
+
+    // Ethernet frame
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress(src_mac),
+        dst_addr: EthernetAddress(dst_mac),
+        ethertype: EthernetProtocol::Ipv4,
+    };
+    let mut eth_frame = EthernetFrame::new_unchecked(&mut packet[..]);
+    eth_repr.emit(&mut eth_frame);
+
+    // IPv4 packet
+    let ip_repr = Ipv4Repr {
+        src_addr: Ipv4Address::from_bytes(&src_ip),
+        dst_addr: Ipv4Address::from_bytes(&dst_ip),
+        next_header: IpProtocol::Udp,
+        payload_len: udp_len,
+        hop_limit: 64,
+    };
+    let mut ip_packet = Ipv4Packet::new_unchecked(eth_frame.payload_mut());
+    ip_repr.emit(
+        &mut ip_packet,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    // UDP packet
+    let udp_repr = UdpRepr { src_port, dst_port };
+    let mut udp_packet = UdpPacket::new_unchecked(ip_packet.payload_mut());
+    udp_repr.emit(
+        &mut udp_packet,
+        &ip_repr.src_addr.into(),
+        &ip_repr.dst_addr.into(),
+        payload.len(),
+        |buf| buf.copy_from_slice(payload),
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    packet
+}
+
+/// Parse a generic UDP packet (IPv4)
+pub fn parse_udp_packet(packet: &[u8]) -> Option<UdpInfo> {
+    let eth_frame = EthernetFrame::new_checked(packet).ok()?;
+    if eth_frame.ethertype() != EthernetProtocol::Ipv4 {
+        return None;
+    }
+
+    let ip_packet = Ipv4Packet::new_checked(eth_frame.payload()).ok()?;
+    if ip_packet.next_header() != IpProtocol::Udp {
+        return None;
+    }
+
+    let udp_packet = UdpPacket::new_checked(ip_packet.payload()).ok()?;
+
+    Some(UdpInfo {
+        src_ip: ip_packet.src_addr().0,
+        dst_ip: ip_packet.dst_addr().0,
+        src_port: udp_packet.src_port(),
+        dst_port: udp_packet.dst_port(),
+        payload: udp_packet.payload().to_vec(),
+    })
+}
+
+// ============================================================================
+// IPv6 TCP Packets
+// ============================================================================
+
+/// Parsed TCP6 packet info
+#[derive(Debug)]
+pub struct Tcp6Info {
+    pub src_ip: Ipv6Addr,
+    pub dst_ip: Ipv6Addr,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub seq: u32,
+    pub ack: u32,
+    pub flags: TcpFlags,
+    pub payload: Vec<u8>,
+}
+
+/// Compute TCP checksum for IPv6
+fn compute_tcp6_checksum(src_ip: &Ipv6Address, dst_ip: &Ipv6Address, tcp_data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+
+    // Pseudo-header
+    for chunk in src_ip.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    for chunk in dst_ip.0.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    sum += tcp_data.len() as u32; // TCP length
+    sum += 6u32; // Next header (TCP)
+
+    // TCP data
+    let mut i = 0;
+    while i + 1 < tcp_data.len() {
+        sum += u16::from_be_bytes([tcp_data[i], tcp_data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < tcp_data.len() {
+        sum += (tcp_data[i] as u32) << 8;
+    }
+
+    // Fold to 16 bits
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+
+    let result = !(sum as u16);
+    if result == 0 { 0xffff } else { result }
+}
+
+/// Create a TCP packet (IPv6)
+pub fn create_tcp6_packet(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: Ipv6Addr,
+    dst_ip: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: TcpFlags,
+    payload: &[u8],
+) -> Vec<u8> {
+    let tcp_len = TCP_HDR_SIZE + payload.len();
+    let total_len = ETHERNET_HDR_SIZE + IPV6_HDR_SIZE + tcp_len;
+
+    let mut packet = vec![0u8; total_len];
+
+    let src_addr = Ipv6Address::from_bytes(&src_ip.octets());
+    let dst_addr = Ipv6Address::from_bytes(&dst_ip.octets());
+
+    // Ethernet frame
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress(src_mac),
+        dst_addr: EthernetAddress(dst_mac),
+        ethertype: EthernetProtocol::Ipv6,
+    };
+    let mut eth_frame = EthernetFrame::new_unchecked(&mut packet[..]);
+    eth_repr.emit(&mut eth_frame);
+
+    // IPv6 header
+    let ipv6_repr = Ipv6Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Tcp,
+        payload_len: tcp_len,
+        hop_limit: 64,
+    };
+    let mut ipv6_packet = Ipv6Packet::new_unchecked(eth_frame.payload_mut());
+    ipv6_repr.emit(&mut ipv6_packet);
+
+    // TCP header (manually built)
+    let tcp_start = ETHERNET_HDR_SIZE + IPV6_HDR_SIZE;
+    let tcp_slice = &mut packet[tcp_start..];
+
+    // Source port
+    tcp_slice[0..2].copy_from_slice(&src_port.to_be_bytes());
+    // Destination port
+    tcp_slice[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    // Sequence number
+    tcp_slice[4..8].copy_from_slice(&seq.to_be_bytes());
+    // Acknowledgment number
+    tcp_slice[8..12].copy_from_slice(&ack.to_be_bytes());
+    // Data offset (5 = 20 bytes header, no options) + reserved
+    tcp_slice[12] = 0x50; // 5 << 4
+    // Flags
+    tcp_slice[13] = flags.to_byte();
+    // Window size (64KB)
+    tcp_slice[14..16].copy_from_slice(&65535u16.to_be_bytes());
+    // Checksum (placeholder)
+    tcp_slice[16..18].fill(0);
+    // Urgent pointer
+    tcp_slice[18..20].fill(0);
+    // Payload
+    tcp_slice[20..20 + payload.len()].copy_from_slice(payload);
+
+    // Compute TCP checksum
+    let checksum = compute_tcp6_checksum(&src_addr, &dst_addr, &tcp_slice[..tcp_len]);
+    tcp_slice[16..18].copy_from_slice(&checksum.to_be_bytes());
+
+    packet
+}
+
+/// Create a TCP SYN packet (IPv6)
+pub fn create_tcp6_syn(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: Ipv6Addr,
+    dst_ip: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+) -> Vec<u8> {
+    create_tcp6_packet(
+        src_mac,
+        dst_mac,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        0,
+        TcpFlags::syn(),
+        &[],
+    )
+}
+
+/// Create a TCP SYN-ACK packet (IPv6)
+pub fn create_tcp6_syn_ack(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: Ipv6Addr,
+    dst_ip: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+) -> Vec<u8> {
+    create_tcp6_packet(
+        src_mac,
+        dst_mac,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        TcpFlags::syn_ack(),
+        &[],
+    )
+}
+
+/// Create a TCP ACK packet (IPv6)
+pub fn create_tcp6_ack(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: Ipv6Addr,
+    dst_ip: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+) -> Vec<u8> {
+    create_tcp6_packet(
+        src_mac,
+        dst_mac,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        TcpFlags::ack(),
+        &[],
+    )
+}
+
+/// Parse a TCP packet (IPv6)
+pub fn parse_tcp6_packet(packet: &[u8]) -> Option<Tcp6Info> {
+    let eth_frame = EthernetFrame::new_checked(packet).ok()?;
+    if eth_frame.ethertype() != EthernetProtocol::Ipv6 {
+        return None;
+    }
+
+    let ipv6_packet = Ipv6Packet::new_checked(eth_frame.payload()).ok()?;
+    if ipv6_packet.next_header() != IpProtocol::Tcp {
+        return None;
+    }
+
+    let tcp_data = ipv6_packet.payload();
+    if tcp_data.len() < TCP_HDR_SIZE {
+        return None;
+    }
+
+    let src_port = u16::from_be_bytes([tcp_data[0], tcp_data[1]]);
+    let dst_port = u16::from_be_bytes([tcp_data[2], tcp_data[3]]);
+    let seq = u32::from_be_bytes([tcp_data[4], tcp_data[5], tcp_data[6], tcp_data[7]]);
+    let ack = u32::from_be_bytes([tcp_data[8], tcp_data[9], tcp_data[10], tcp_data[11]]);
+    let data_offset = ((tcp_data[12] >> 4) as usize) * 4;
+    let flags = TcpFlags::from_byte(tcp_data[13]);
+
+    let payload = if data_offset <= tcp_data.len() {
+        tcp_data[data_offset..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Some(Tcp6Info {
+        src_ip: Ipv6Addr::from(ipv6_packet.src_addr().0),
+        dst_ip: Ipv6Addr::from(ipv6_packet.dst_addr().0),
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        flags,
+        payload,
+    })
+}
+
+// ============================================================================
+// IPv6 UDP Packets
+// ============================================================================
+
+/// Parsed UDP6 packet info
+#[derive(Debug)]
+pub struct Udp6Info {
+    pub src_ip: Ipv6Addr,
+    pub dst_ip: Ipv6Addr,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub payload: Vec<u8>,
+}
+
+/// Create a generic UDP packet (IPv6)
+pub fn create_udp6_packet(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: Ipv6Addr,
+    dst_ip: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let udp_len = UDP_HDR_SIZE + payload.len();
+    let total_len = ETHERNET_HDR_SIZE + IPV6_HDR_SIZE + udp_len;
+
+    let mut packet = vec![0u8; total_len];
+
+    let src_addr = Ipv6Address::from_bytes(&src_ip.octets());
+    let dst_addr = Ipv6Address::from_bytes(&dst_ip.octets());
+
+    // Ethernet header
+    let eth_repr = EthernetRepr {
+        src_addr: EthernetAddress(src_mac),
+        dst_addr: EthernetAddress(dst_mac),
+        ethertype: EthernetProtocol::Ipv6,
+    };
+    let mut eth_frame = EthernetFrame::new_unchecked(&mut packet[..]);
+    eth_repr.emit(&mut eth_frame);
+
+    // IPv6 header
+    let ipv6_repr = Ipv6Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Udp,
+        payload_len: udp_len,
+        hop_limit: 64,
+    };
+    let mut ipv6_packet = Ipv6Packet::new_unchecked(eth_frame.payload_mut());
+    ipv6_repr.emit(&mut ipv6_packet);
+
+    // UDP header and payload
+    let udp_start = ETHERNET_HDR_SIZE + IPV6_HDR_SIZE;
+    let udp_slice = &mut packet[udp_start..];
+
+    // Write UDP header manually
+    udp_slice[0..2].copy_from_slice(&src_port.to_be_bytes());
+    udp_slice[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    udp_slice[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    udp_slice[6..8].fill(0); // checksum placeholder
+    udp_slice[8..8 + payload.len()].copy_from_slice(payload);
+
+    // Compute UDP checksum
+    let checksum = compute_udp6_checksum(&src_addr, &dst_addr, &udp_slice[..udp_len]);
+    udp_slice[6..8].copy_from_slice(&checksum.to_be_bytes());
+
+    packet
+}
+
+/// Parse a generic UDP packet (IPv6)
+pub fn parse_udp6_packet(packet: &[u8]) -> Option<Udp6Info> {
+    let eth_frame = EthernetFrame::new_checked(packet).ok()?;
+    if eth_frame.ethertype() != EthernetProtocol::Ipv6 {
+        return None;
+    }
+
+    let ipv6_packet = Ipv6Packet::new_checked(eth_frame.payload()).ok()?;
+    if ipv6_packet.next_header() != IpProtocol::Udp {
+        return None;
+    }
+
+    let udp_packet = UdpPacket::new_checked(ipv6_packet.payload()).ok()?;
+
+    Some(Udp6Info {
+        src_ip: Ipv6Addr::from(ipv6_packet.src_addr().0),
+        dst_ip: Ipv6Addr::from(ipv6_packet.dst_addr().0),
+        src_port: udp_packet.src_port(),
+        dst_port: udp_packet.dst_port(),
+        payload: udp_packet.payload().to_vec(),
+    })
+}
+
+// ============================================================================
 // ICMPv6 Echo Request / Echo Reply (ping6)
 // ============================================================================
 
@@ -1350,5 +2113,135 @@ mod tests {
         let target_bytes: [u8; 16] = icmpv6_payload[8..24].try_into().unwrap();
         let parsed_target = Ipv6Addr::from(target_bytes);
         assert_eq!(parsed_target, target_ip);
+    }
+
+    #[test]
+    fn test_tcp_syn_packet() {
+        let src_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let dst_mac = [0x52, 0x54, 0x00, 0xab, 0xcd, 0xef];
+        let src_ip = [10, 0, 0, 100];
+        let dst_ip = [10, 0, 0, 1];
+
+        let packet = create_tcp_syn(src_mac, dst_mac, src_ip, dst_ip, 12345, 80, 1000);
+
+        // Parse and verify
+        let info = parse_tcp_packet(&packet).expect("TCP parse failed");
+        assert_eq!(info.src_ip, src_ip);
+        assert_eq!(info.dst_ip, dst_ip);
+        assert_eq!(info.src_port, 12345);
+        assert_eq!(info.dst_port, 80);
+        assert_eq!(info.seq, 1000);
+        assert_eq!(info.ack, 0);
+        assert!(info.flags.syn);
+        assert!(!info.flags.ack);
+        assert!(!info.flags.fin);
+        assert!(info.payload.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_syn_ack_packet() {
+        let src_mac = [0x52, 0x54, 0x00, 0xab, 0xcd, 0xef];
+        let dst_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let src_ip = [10, 0, 0, 1];
+        let dst_ip = [10, 0, 0, 100];
+
+        let packet = create_tcp_syn_ack(src_mac, dst_mac, src_ip, dst_ip, 80, 12345, 2000, 1001);
+
+        // Parse and verify
+        let info = parse_tcp_packet(&packet).expect("TCP parse failed");
+        assert_eq!(info.src_port, 80);
+        assert_eq!(info.dst_port, 12345);
+        assert_eq!(info.seq, 2000);
+        assert_eq!(info.ack, 1001);
+        assert!(info.flags.syn);
+        assert!(info.flags.ack);
+    }
+
+    #[test]
+    fn test_tcp_with_payload() {
+        let src_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let dst_mac = [0x52, 0x54, 0x00, 0xab, 0xcd, 0xef];
+        let src_ip = [10, 0, 0, 100];
+        let dst_ip = [10, 0, 0, 1];
+        let payload = b"GET / HTTP/1.1\r\n";
+
+        let packet = create_tcp_packet(
+            src_mac,
+            dst_mac,
+            src_ip,
+            dst_ip,
+            12345,
+            80,
+            1002,
+            2001,
+            TcpFlags::ack(),
+            payload,
+        );
+
+        let info = parse_tcp_packet(&packet).expect("TCP parse failed");
+        assert_eq!(info.seq, 1002);
+        assert_eq!(info.ack, 2001);
+        assert!(info.flags.ack);
+        assert!(!info.flags.syn);
+        assert_eq!(info.payload, payload);
+    }
+
+    #[test]
+    fn test_udp_packet() {
+        let src_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let dst_mac = [0x52, 0x54, 0x00, 0xab, 0xcd, 0xef];
+        let src_ip = [10, 0, 0, 100];
+        let dst_ip = [10, 0, 0, 1];
+        let payload = b"Hello, UDP!";
+
+        let packet = create_udp_packet(src_mac, dst_mac, src_ip, dst_ip, 5000, 53, payload);
+
+        // Parse and verify
+        let info = parse_udp_packet(&packet).expect("UDP parse failed");
+        assert_eq!(info.src_ip, src_ip);
+        assert_eq!(info.dst_ip, dst_ip);
+        assert_eq!(info.src_port, 5000);
+        assert_eq!(info.dst_port, 53);
+        assert_eq!(info.payload, payload);
+    }
+
+    #[test]
+    fn test_tcp6_syn_packet() {
+        let src_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let dst_mac = [0x52, 0x54, 0x00, 0xab, 0xcd, 0xef];
+        let src_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 100);
+        let dst_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+
+        let packet = create_tcp6_syn(src_mac, dst_mac, src_ip, dst_ip, 12345, 443, 1000);
+
+        // Parse and verify
+        let info = parse_tcp6_packet(&packet).expect("TCP6 parse failed");
+        assert_eq!(info.src_ip, src_ip);
+        assert_eq!(info.dst_ip, dst_ip);
+        assert_eq!(info.src_port, 12345);
+        assert_eq!(info.dst_port, 443);
+        assert_eq!(info.seq, 1000);
+        assert_eq!(info.ack, 0);
+        assert!(info.flags.syn);
+        assert!(!info.flags.ack);
+    }
+
+    #[test]
+    fn test_udp6_packet() {
+        let src_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let dst_mac = [0x52, 0x54, 0x00, 0xab, 0xcd, 0xef];
+        let src_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 100);
+        let dst_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+        let payload = b"Hello, UDP6!";
+
+        let packet = create_udp6_packet(src_mac, dst_mac, src_ip, dst_ip, 5000, 53, payload);
+
+        // Parse and verify
+        let info = parse_udp6_packet(&packet).expect("UDP6 parse failed");
+        assert_eq!(info.src_ip, src_ip);
+        assert_eq!(info.dst_ip, dst_ip);
+        assert_eq!(info.src_port, 5000);
+        assert_eq!(info.dst_port, 53);
+        assert_eq!(info.payload, payload);
     }
 }

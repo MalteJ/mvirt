@@ -638,4 +638,81 @@ impl NetService for NetServiceImpl {
             message: "vhost-user socket ready".to_string(),
         }))
     }
+
+    // ========== Security Group Operations (not supported in mvirt-net) ==========
+    //
+    // Security Groups are only supported in mvirt-ebpf (eBPF-based networking).
+    // These stub implementations return Unimplemented for the vhost-user backend.
+
+    async fn create_security_group(
+        &self,
+        _request: Request<CreateSecurityGroupRequest>,
+    ) -> Result<Response<SecurityGroup>, Status> {
+        Err(Status::unimplemented(
+            "Security groups are only supported in mvirt-ebpf",
+        ))
+    }
+
+    async fn get_security_group(
+        &self,
+        _request: Request<GetSecurityGroupRequest>,
+    ) -> Result<Response<SecurityGroup>, Status> {
+        Err(Status::unimplemented(
+            "Security groups are only supported in mvirt-ebpf",
+        ))
+    }
+
+    async fn list_security_groups(
+        &self,
+        _request: Request<ListSecurityGroupsRequest>,
+    ) -> Result<Response<ListSecurityGroupsResponse>, Status> {
+        Err(Status::unimplemented(
+            "Security groups are only supported in mvirt-ebpf",
+        ))
+    }
+
+    async fn delete_security_group(
+        &self,
+        _request: Request<DeleteSecurityGroupRequest>,
+    ) -> Result<Response<DeleteSecurityGroupResponse>, Status> {
+        Err(Status::unimplemented(
+            "Security groups are only supported in mvirt-ebpf",
+        ))
+    }
+
+    async fn add_security_group_rule(
+        &self,
+        _request: Request<AddSecurityGroupRuleRequest>,
+    ) -> Result<Response<SecurityGroupRule>, Status> {
+        Err(Status::unimplemented(
+            "Security groups are only supported in mvirt-ebpf",
+        ))
+    }
+
+    async fn remove_security_group_rule(
+        &self,
+        _request: Request<RemoveSecurityGroupRuleRequest>,
+    ) -> Result<Response<RemoveSecurityGroupRuleResponse>, Status> {
+        Err(Status::unimplemented(
+            "Security groups are only supported in mvirt-ebpf",
+        ))
+    }
+
+    async fn attach_security_group(
+        &self,
+        _request: Request<AttachSecurityGroupRequest>,
+    ) -> Result<Response<AttachSecurityGroupResponse>, Status> {
+        Err(Status::unimplemented(
+            "Security groups are only supported in mvirt-ebpf",
+        ))
+    }
+
+    async fn detach_security_group(
+        &self,
+        _request: Request<DetachSecurityGroupRequest>,
+    ) -> Result<Response<DetachSecurityGroupResponse>, Status> {
+        Err(Status::unimplemented(
+            "Security groups are only supported in mvirt-ebpf",
+        ))
+    }
 }

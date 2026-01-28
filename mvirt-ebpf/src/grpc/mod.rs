@@ -10,4 +10,7 @@ pub mod proto {
 }
 
 pub use service::EbpfNetServiceImpl;
-pub use storage::{NetworkData, NicData, NicState, Storage};
+pub use storage::{
+    NetworkData, NicData, NicState, RuleDirection, RuleProtocol, SecurityGroupData,
+    SecurityGroupRuleData, Storage,
+};

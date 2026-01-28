@@ -56,6 +56,111 @@ pub struct IfMac {
 
 unsafe impl aya::Pod for IfMac {}
 
+/// Security rule for packet filtering.
+/// Must match the eBPF struct exactly.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SecurityRule {
+    /// Rule is active (1) or disabled (0)
+    pub enabled: u8,
+    /// Direction: 0=ingress, 1=egress
+    pub direction: u8,
+    /// Protocol: 0=all, 1=ICMP, 6=TCP, 17=UDP, 58=ICMPv6
+    pub protocol: u8,
+    /// IP version: 4=IPv4, 6=IPv6, 0=both
+    pub ip_version: u8,
+    /// Start of port range
+    pub port_start: u16,
+    /// End of port range
+    pub port_end: u16,
+    /// CIDR network address (IPv4 in first 4 bytes, IPv6 uses all 16)
+    pub cidr_addr: [u8; 16],
+    /// CIDR prefix length
+    pub cidr_prefix_len: u8,
+    _padding: [u8; 3],
+}
+
+impl SecurityRule {
+    pub fn new(
+        direction: u8,
+        protocol: u8,
+        ip_version: u8,
+        port_start: u16,
+        port_end: u16,
+        cidr_addr: [u8; 16],
+        cidr_prefix_len: u8,
+    ) -> Self {
+        Self {
+            enabled: 1,
+            direction,
+            protocol,
+            ip_version,
+            port_start,
+            port_end,
+            cidr_addr,
+            cidr_prefix_len,
+            _padding: [0; 3],
+        }
+    }
+}
+
+unsafe impl aya::Pod for SecurityRule {}
+
+/// NIC security configuration.
+/// Must match the eBPF struct exactly.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct NicSecurityConfig {
+    /// Whether security filtering is enabled
+    pub enabled: u8,
+    _padding: [u8; 3],
+    /// Start index into SECURITY_RULES map
+    pub rules_start: u32,
+    /// Number of rules
+    pub rules_count: u32,
+}
+
+impl NicSecurityConfig {
+    pub fn new(enabled: bool, rules_start: u32, rules_count: u32) -> Self {
+        Self {
+            enabled: if enabled { 1 } else { 0 },
+            _padding: [0; 3],
+            rules_start,
+            rules_count,
+        }
+    }
+}
+
+unsafe impl aya::Pod for NicSecurityConfig {}
+
+/// Connection tracking key.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ConnTrackKey {
+    pub src_addr: [u8; 16],
+    pub dst_addr: [u8; 16],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub ip_version: u8,
+    _padding: [u8; 2],
+}
+
+unsafe impl aya::Pod for ConnTrackKey {}
+
+/// Connection tracking entry.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ConnTrackEntry {
+    pub state: u8,
+    pub flags: u8,
+    _padding: [u8; 2],
+    pub last_seen_ns: u64,
+    pub packet_count: u64,
+}
+
+unsafe impl aya::Pod for ConnTrackEntry {}
+
 /// eBPF loader errors.
 #[derive(Debug, Error)]
 pub enum EbpfError {
@@ -400,6 +505,122 @@ impl EbpfManager {
             .try_into()?;
 
         macs.insert(if_index, IfMac { mac }, 0)?;
+        Ok(())
+    }
+
+    // ========== Security Rule Management ==========
+
+    /// Set a security rule in the egress SECURITY_RULES map.
+    pub async fn set_security_rule(&self, rule_index: u32, rule: SecurityRule) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut rules: HashMap<&mut MapData, u32, SecurityRule> = bpf
+            .map_mut("SECURITY_RULES")
+            .ok_or_else(|| EbpfError::MapNotFound("SECURITY_RULES".to_string()))?
+            .try_into()?;
+
+        rules.insert(rule_index, rule, 0)?;
+        Ok(())
+    }
+
+    /// Remove a security rule from the egress SECURITY_RULES map.
+    pub async fn remove_security_rule(&self, rule_index: u32) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut rules: HashMap<&mut MapData, u32, SecurityRule> = bpf
+            .map_mut("SECURITY_RULES")
+            .ok_or_else(|| EbpfError::MapNotFound("SECURITY_RULES".to_string()))?
+            .try_into()?;
+
+        let _ = rules.remove(&rule_index);
+        Ok(())
+    }
+
+    /// Set NIC security configuration in the egress NIC_SECURITY map.
+    pub async fn set_nic_security_config(
+        &self,
+        if_index: u32,
+        config: NicSecurityConfig,
+    ) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut configs: HashMap<&mut MapData, u32, NicSecurityConfig> = bpf
+            .map_mut("NIC_SECURITY")
+            .ok_or_else(|| EbpfError::MapNotFound("NIC_SECURITY".to_string()))?
+            .try_into()?;
+
+        configs.insert(if_index, config, 0)?;
+        Ok(())
+    }
+
+    /// Remove NIC security configuration from the egress NIC_SECURITY map.
+    pub async fn remove_nic_security_config(&self, if_index: u32) -> Result<()> {
+        let mut guard = self.egress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut configs: HashMap<&mut MapData, u32, NicSecurityConfig> = bpf
+            .map_mut("NIC_SECURITY")
+            .ok_or_else(|| EbpfError::MapNotFound("NIC_SECURITY".to_string()))?
+            .try_into()?;
+
+        let _ = configs.remove(&if_index);
+        Ok(())
+    }
+
+    /// Set a security rule in the ingress SECURITY_RULES map.
+    pub async fn set_ingress_security_rule(
+        &self,
+        rule_index: u32,
+        rule: SecurityRule,
+    ) -> Result<()> {
+        let mut guard = self.ingress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut rules: HashMap<&mut MapData, u32, SecurityRule> = bpf
+            .map_mut("SECURITY_RULES")
+            .ok_or_else(|| EbpfError::MapNotFound("SECURITY_RULES".to_string()))?
+            .try_into()?;
+
+        rules.insert(rule_index, rule, 0)?;
+        Ok(())
+    }
+
+    /// Set NIC security configuration in the ingress NIC_SECURITY map.
+    pub async fn set_ingress_nic_security_config(
+        &self,
+        if_index: u32,
+        config: NicSecurityConfig,
+    ) -> Result<()> {
+        let mut guard = self.ingress_bpf.write().await;
+        let bpf = match guard.as_mut() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let mut configs: HashMap<&mut MapData, u32, NicSecurityConfig> = bpf
+            .map_mut("NIC_SECURITY")
+            .ok_or_else(|| EbpfError::MapNotFound("NIC_SECURITY".to_string()))?
+            .try_into()?;
+
+        configs.insert(if_index, config, 0)?;
         Ok(())
     }
 }

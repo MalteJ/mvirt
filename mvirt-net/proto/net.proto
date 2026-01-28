@@ -21,6 +21,16 @@ service NetService {
 
   // Attach NIC to TAP device (called when VM starts)
   rpc AttachNic(AttachNicRequest) returns (AttachNicResponse);
+
+  // Security Group operations
+  rpc CreateSecurityGroup(CreateSecurityGroupRequest) returns (SecurityGroup);
+  rpc GetSecurityGroup(GetSecurityGroupRequest) returns (SecurityGroup);
+  rpc ListSecurityGroups(ListSecurityGroupsRequest) returns (ListSecurityGroupsResponse);
+  rpc DeleteSecurityGroup(DeleteSecurityGroupRequest) returns (DeleteSecurityGroupResponse);
+  rpc AddSecurityGroupRule(AddSecurityGroupRuleRequest) returns (SecurityGroupRule);
+  rpc RemoveSecurityGroupRule(RemoveSecurityGroupRuleRequest) returns (RemoveSecurityGroupRuleResponse);
+  rpc AttachSecurityGroup(AttachSecurityGroupRequest) returns (AttachSecurityGroupResponse);
+  rpc DetachSecurityGroup(DetachSecurityGroupRequest) returns (DetachSecurityGroupResponse);
 }
 
 // === System Messages ===
@@ -199,4 +209,110 @@ message AttachNicRequest {
 message AttachNicResponse {
   bool attached = 1;                 // true if TAP found and attached
   string message = 2;                // Status message
+}
+
+// === Security Group Messages ===
+
+message SecurityGroup {
+  string id = 1;                           // UUID
+  string name = 2;                         // Unique name
+  string description = 3;                  // Optional description
+  repeated SecurityGroupRule rules = 4;   // Rules in this group
+  uint32 nic_count = 5;                   // Number of NICs using this group
+  string created_at = 6;                   // ISO 8601
+  string updated_at = 7;
+}
+
+message SecurityGroupRule {
+  string id = 1;                           // UUID
+  string security_group_id = 2;            // FK -> SecurityGroup
+  RuleDirection direction = 3;             // ingress or egress
+  RuleProtocol protocol = 4;               // Protocol to match
+  uint32 port_start = 5;                   // Start of port range (0 = any)
+  uint32 port_end = 6;                     // End of port range (0 = any)
+  string cidr = 7;                         // CIDR to match (empty = any)
+  string description = 8;                  // Optional description
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+enum RuleDirection {
+  RULE_DIRECTION_UNSPECIFIED = 0;
+  RULE_DIRECTION_INGRESS = 1;              // Traffic to VM
+  RULE_DIRECTION_EGRESS = 2;               // Traffic from VM
+}
+
+enum RuleProtocol {
+  RULE_PROTOCOL_UNSPECIFIED = 0;
+  RULE_PROTOCOL_ALL = 1;                   // All protocols
+  RULE_PROTOCOL_TCP = 2;
+  RULE_PROTOCOL_UDP = 3;
+  RULE_PROTOCOL_ICMP = 4;                  // ICMPv4
+  RULE_PROTOCOL_ICMPV6 = 5;                // ICMPv6
+}
+
+// === Security Group Request/Response Messages ===
+
+message CreateSecurityGroupRequest {
+  string name = 1;                         // Required: unique name
+  string description = 2;                  // Optional
+}
+
+message GetSecurityGroupRequest {
+  oneof identifier {
+    string id = 1;
+    string name = 2;
+  }
+}
+
+message ListSecurityGroupsRequest {}
+
+message ListSecurityGroupsResponse {
+  repeated SecurityGroup security_groups = 1;
+}
+
+message DeleteSecurityGroupRequest {
+  string id = 1;
+  bool force = 2;                          // Delete even if attached to NICs
+}
+
+message DeleteSecurityGroupResponse {
+  bool deleted = 1;
+  uint32 nics_detached = 2;                // Number of NICs detached (if force=true)
+}
+
+message AddSecurityGroupRuleRequest {
+  string security_group_id = 1;            // Required: UUID or name
+  RuleDirection direction = 2;             // Required
+  RuleProtocol protocol = 3;               // Required
+  uint32 port_start = 4;                   // Optional: 0 = any
+  uint32 port_end = 5;                     // Optional: 0 = any (or same as port_start)
+  string cidr = 6;                         // Optional: empty = any
+  string description = 7;                  // Optional
+}
+
+message RemoveSecurityGroupRuleRequest {
+  string rule_id = 1;                      // Required: rule UUID
+}
+
+message RemoveSecurityGroupRuleResponse {
+  bool deleted = 1;
+}
+
+message AttachSecurityGroupRequest {
+  string nic_id = 1;                       // Required: NIC UUID or name
+  string security_group_id = 2;            // Required: SecurityGroup UUID or name
+}
+
+message AttachSecurityGroupResponse {
+  bool attached = 1;                       // false if already attached
+}
+
+message DetachSecurityGroupRequest {
+  string nic_id = 1;                       // Required: NIC UUID or name
+  string security_group_id = 2;            // Required: SecurityGroup UUID or name
+}
+
+message DetachSecurityGroupResponse {
+  bool detached = 1;                       // false if was not attached
 }

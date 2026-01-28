@@ -1,7 +1,7 @@
 //! Input validation for gRPC requests.
 
-use super::storage::{Storage, parse_mac_address};
-use ipnet::{Ipv4Net, Ipv6Net};
+use super::storage::{RuleDirection, RuleProtocol, Storage, parse_mac_address};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
@@ -61,6 +61,40 @@ pub enum ValidationError {
 
     #[error("Network identifier required")]
     NetworkIdRequired,
+
+    // Security Group validation errors
+    #[error("Security group name is required")]
+    SecurityGroupNameRequired,
+
+    #[error("Security group identifier required")]
+    SecurityGroupIdRequired,
+
+    #[error("Security group has {0} attached NICs, use force=true to delete")]
+    SecurityGroupHasNics(u32),
+
+    #[error("Invalid rule direction")]
+    InvalidRuleDirection,
+
+    #[error("Invalid rule protocol")]
+    InvalidRuleProtocol,
+
+    #[error("Invalid port range: start ({0}) > end ({1})")]
+    InvalidPortRange(u32, u32),
+
+    #[error("Port out of range: {0} (must be 0-65535)")]
+    PortOutOfRange(u32),
+
+    #[error("Ports not allowed for protocol {0}")]
+    PortsNotAllowedForProtocol(String),
+
+    #[error("Invalid CIDR: {0}")]
+    InvalidCidr(String),
+
+    #[error("Rule ID is required")]
+    RuleIdRequired,
+
+    #[error("NIC identifier required")]
+    NicIdRequired,
 }
 
 pub type Result<T> = std::result::Result<T, ValidationError>;
@@ -306,4 +340,123 @@ pub fn parse_routed_prefixes(
     }
 
     Ok((parsed_v4, parsed_v6))
+}
+
+// ========== Security Group Validation ==========
+
+/// Validate security group creation request.
+pub fn validate_create_security_group(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(ValidationError::SecurityGroupNameRequired);
+    }
+    Ok(())
+}
+
+/// Parsed CIDR information for eBPF rules
+#[derive(Debug, Clone)]
+pub struct ParsedCidr {
+    /// Network address bytes (IPv4 in first 4 bytes, IPv6 uses all 16)
+    pub addr: [u8; 16],
+    /// Prefix length
+    pub prefix_len: u8,
+    /// IP version: 4 or 6
+    pub ip_version: u8,
+}
+
+/// Validated security group rule fields.
+pub type ValidatedRule = (
+    RuleDirection,
+    RuleProtocol,
+    Option<u16>,
+    Option<u16>,
+    Option<ParsedCidr>,
+);
+
+/// Validate security group rule creation request.
+pub fn validate_security_group_rule(
+    direction: i32,
+    protocol: i32,
+    port_start: u32,
+    port_end: u32,
+    cidr: &str,
+) -> Result<ValidatedRule> {
+    // Validate direction
+    let dir = RuleDirection::from(direction);
+    if matches!(dir, RuleDirection::Unspecified) {
+        return Err(ValidationError::InvalidRuleDirection);
+    }
+
+    // Validate protocol
+    let proto = RuleProtocol::from(protocol);
+    if matches!(proto, RuleProtocol::Unspecified) {
+        return Err(ValidationError::InvalidRuleProtocol);
+    }
+
+    // Validate ports
+    let (parsed_port_start, parsed_port_end) = if port_start > 0 || port_end > 0 {
+        // Ports are only valid for TCP/UDP
+        if !matches!(
+            proto,
+            RuleProtocol::Tcp | RuleProtocol::Udp | RuleProtocol::All
+        ) {
+            return Err(ValidationError::PortsNotAllowedForProtocol(
+                proto.as_str().to_string(),
+            ));
+        }
+
+        // Validate port range
+        if port_start > 65535 {
+            return Err(ValidationError::PortOutOfRange(port_start));
+        }
+        if port_end > 65535 {
+            return Err(ValidationError::PortOutOfRange(port_end));
+        }
+
+        let start = if port_start > 0 { port_start as u16 } else { 1 };
+        let end = if port_end > 0 { port_end as u16 } else { start };
+
+        if start > end {
+            return Err(ValidationError::InvalidPortRange(start as u32, end as u32));
+        }
+
+        (Some(start), Some(end))
+    } else {
+        (None, None)
+    };
+
+    // Validate CIDR
+    let parsed_cidr = if !cidr.is_empty() {
+        Some(parse_cidr(cidr)?)
+    } else {
+        None
+    };
+
+    Ok((dir, proto, parsed_port_start, parsed_port_end, parsed_cidr))
+}
+
+/// Parse a CIDR string into address bytes and prefix length.
+pub fn parse_cidr(cidr: &str) -> Result<ParsedCidr> {
+    let net: IpNet = cidr
+        .parse()
+        .map_err(|_| ValidationError::InvalidCidr(cidr.to_string()))?;
+
+    match net {
+        IpNet::V4(v4) => {
+            let mut addr = [0u8; 16];
+            addr[..4].copy_from_slice(&v4.network().octets());
+            Ok(ParsedCidr {
+                addr,
+                prefix_len: v4.prefix_len(),
+                ip_version: 4,
+            })
+        }
+        IpNet::V6(v6) => {
+            let addr = v6.network().octets();
+            Ok(ParsedCidr {
+                addr,
+                prefix_len: v6.prefix_len(),
+                ip_version: 6,
+            })
+        }
+    }
 }

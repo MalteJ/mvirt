@@ -2,10 +2,14 @@
 
 use super::proto::net_service_server::NetService;
 use super::proto::*;
-use super::storage::{NetworkData, NicData, NicState, Storage, generate_mac_address};
+use super::storage::{
+    NetworkData, NicData, NicState, SecurityGroupData, SecurityGroupRuleData, Storage,
+    generate_mac_address,
+};
 use super::validation::{
     ValidationError, allocate_ipv4_address, allocate_ipv6_address, parse_routed_prefixes,
-    validate_create_network, validate_create_nic,
+    validate_create_network, validate_create_nic, validate_create_security_group,
+    validate_security_group_rule,
 };
 use crate::audit::EbpfAuditLogger;
 use crate::ebpf_loader::{ACTION_REDIRECT, EbpfManager, RouteEntry};
@@ -42,6 +46,18 @@ fn storage_err_to_status(e: super::storage::StorageError) -> Status {
         }
         super::storage::StorageError::IpAddressInUse(addr) => {
             Status::already_exists(format!("IP address already in use: {}", addr))
+        }
+        super::storage::StorageError::SecurityGroupNotFound(id) => {
+            Status::not_found(format!("Security group not found: {}", id))
+        }
+        super::storage::StorageError::SecurityGroupNameExists(name) => {
+            Status::already_exists(format!("Security group name already exists: {}", name))
+        }
+        super::storage::StorageError::SecurityGroupRuleNotFound(id) => {
+            Status::not_found(format!("Security group rule not found: {}", id))
+        }
+        super::storage::StorageError::SecurityGroupHasNics(id) => {
+            Status::failed_precondition(format!("Security group {} has attached NICs", id))
         }
         _ => Status::internal(e.to_string()),
     }
@@ -91,6 +107,39 @@ fn nic_data_to_proto(data: &NicData) -> Nic {
             .collect(),
         socket_path: format!("tap:{}", data.tap_name),
         state: data.state as i32,
+        created_at: data.created_at.to_rfc3339(),
+        updated_at: data.updated_at.to_rfc3339(),
+    }
+}
+
+/// Convert SecurityGroupData to proto SecurityGroup.
+fn security_group_data_to_proto(
+    data: &SecurityGroupData,
+    rules: Vec<SecurityGroupRule>,
+    nic_count: u32,
+) -> SecurityGroup {
+    SecurityGroup {
+        id: data.id.to_string(),
+        name: data.name.clone(),
+        description: data.description.clone().unwrap_or_default(),
+        rules,
+        nic_count,
+        created_at: data.created_at.to_rfc3339(),
+        updated_at: data.updated_at.to_rfc3339(),
+    }
+}
+
+/// Convert SecurityGroupRuleData to proto SecurityGroupRule.
+fn security_group_rule_data_to_proto(data: &SecurityGroupRuleData) -> SecurityGroupRule {
+    SecurityGroupRule {
+        id: data.id.to_string(),
+        security_group_id: data.security_group_id.to_string(),
+        direction: data.direction as i32,
+        protocol: data.protocol as i32,
+        port_start: data.port_start.unwrap_or(0) as u32,
+        port_end: data.port_end.unwrap_or(0) as u32,
+        cidr: data.cidr.clone().unwrap_or_default(),
+        description: data.description.clone().unwrap_or_default(),
         created_at: data.created_at.to_rfc3339(),
         updated_at: data.updated_at.to_rfc3339(),
     }
@@ -276,6 +325,51 @@ impl EbpfNetServiceImpl {
         );
 
         Ok(())
+    }
+
+    /// Resolve NIC by ID or name.
+    async fn resolve_nic(&self, id: &str, name: &str) -> Result<NicData, Status> {
+        if !id.is_empty() {
+            let uuid = Uuid::parse_str(id)
+                .map_err(|_| Status::invalid_argument(format!("Invalid NIC ID: {}", id)))?;
+            self.storage
+                .get_nic_by_id(&uuid)
+                .map_err(storage_err_to_status)?
+                .ok_or_else(|| Status::not_found(format!("NIC not found: {}", id)))
+        } else if !name.is_empty() {
+            self.storage
+                .get_nic_by_name(name)
+                .map_err(storage_err_to_status)?
+                .ok_or_else(|| Status::not_found(format!("NIC not found: {}", name)))
+        } else {
+            Err(Status::invalid_argument("NIC ID or name required"))
+        }
+    }
+
+    /// Resolve security group by ID or name.
+    async fn resolve_security_group(
+        &self,
+        id: &str,
+        name: &str,
+    ) -> Result<SecurityGroupData, Status> {
+        if !id.is_empty() {
+            let uuid = Uuid::parse_str(id).map_err(|_| {
+                Status::invalid_argument(format!("Invalid security group ID: {}", id))
+            })?;
+            self.storage
+                .get_security_group_by_id(&uuid)
+                .map_err(storage_err_to_status)?
+                .ok_or_else(|| Status::not_found(format!("Security group not found: {}", id)))
+        } else if !name.is_empty() {
+            self.storage
+                .get_security_group_by_name(name)
+                .map_err(storage_err_to_status)?
+                .ok_or_else(|| Status::not_found(format!("Security group not found: {}", name)))
+        } else {
+            Err(Status::invalid_argument(
+                "Security group ID or name required",
+            ))
+        }
     }
 
     /// Recover NICs from database on startup.
@@ -845,5 +939,334 @@ impl NetService for EbpfNetServiceImpl {
             attached: true,
             message: "NIC attached".to_string(),
         }))
+    }
+
+    // ========== Security Group Operations ==========
+
+    async fn create_security_group(
+        &self,
+        request: Request<CreateSecurityGroupRequest>,
+    ) -> Result<Response<SecurityGroup>, Status> {
+        let req = request.into_inner();
+
+        info!(name = %req.name, "CreateSecurityGroup");
+
+        // Validate
+        validate_create_security_group(&req.name).map_err(validation_err_to_status)?;
+
+        let now = Utc::now();
+        let sg = SecurityGroupData {
+            id: Uuid::new_v4(),
+            name: req.name,
+            description: if req.description.is_empty() {
+                None
+            } else {
+                Some(req.description)
+            },
+            created_at: now,
+            updated_at: now,
+        };
+
+        // Store
+        self.storage
+            .create_security_group(&sg)
+            .map_err(storage_err_to_status)?;
+
+        info!(id = %sg.id, name = %sg.name, "Security group created");
+        self.audit
+            .security_group_created(&sg.id.to_string(), &sg.name);
+
+        Ok(Response::new(security_group_data_to_proto(&sg, vec![], 0)))
+    }
+
+    async fn get_security_group(
+        &self,
+        request: Request<GetSecurityGroupRequest>,
+    ) -> Result<Response<SecurityGroup>, Status> {
+        let req = request.into_inner();
+
+        let (id, name) = match req.identifier {
+            Some(get_security_group_request::Identifier::Id(id)) => (id, String::new()),
+            Some(get_security_group_request::Identifier::Name(name)) => (String::new(), name),
+            None => {
+                return Err(Status::invalid_argument(
+                    "Security group ID or name required",
+                ));
+            }
+        };
+
+        let sg = self.resolve_security_group(&id, &name).await?;
+
+        // Get rules
+        let rules = self
+            .storage
+            .list_rules_for_security_group(&sg.id)
+            .map_err(storage_err_to_status)?;
+        let proto_rules: Vec<SecurityGroupRule> = rules
+            .iter()
+            .map(security_group_rule_data_to_proto)
+            .collect();
+
+        // Get NIC count
+        let nic_count = self
+            .storage
+            .count_nics_in_security_group(&sg.id)
+            .map_err(storage_err_to_status)?;
+
+        Ok(Response::new(security_group_data_to_proto(
+            &sg,
+            proto_rules,
+            nic_count,
+        )))
+    }
+
+    async fn list_security_groups(
+        &self,
+        _request: Request<ListSecurityGroupsRequest>,
+    ) -> Result<Response<ListSecurityGroupsResponse>, Status> {
+        let groups = self
+            .storage
+            .list_security_groups()
+            .map_err(storage_err_to_status)?;
+
+        let mut protos = Vec::with_capacity(groups.len());
+        for sg in groups {
+            let rules = self
+                .storage
+                .list_rules_for_security_group(&sg.id)
+                .unwrap_or_default();
+            let proto_rules: Vec<SecurityGroupRule> = rules
+                .iter()
+                .map(security_group_rule_data_to_proto)
+                .collect();
+            let nic_count = self
+                .storage
+                .count_nics_in_security_group(&sg.id)
+                .unwrap_or(0);
+            protos.push(security_group_data_to_proto(&sg, proto_rules, nic_count));
+        }
+
+        Ok(Response::new(ListSecurityGroupsResponse {
+            security_groups: protos,
+        }))
+    }
+
+    async fn delete_security_group(
+        &self,
+        request: Request<DeleteSecurityGroupRequest>,
+    ) -> Result<Response<DeleteSecurityGroupResponse>, Status> {
+        let req = request.into_inner();
+
+        let uuid = Uuid::parse_str(&req.id).map_err(|_| {
+            Status::invalid_argument(format!("Invalid security group ID: {}", req.id))
+        })?;
+
+        // Check for attached NICs
+        let nic_count = self
+            .storage
+            .count_nics_in_security_group(&uuid)
+            .map_err(storage_err_to_status)?;
+
+        if nic_count > 0 && !req.force {
+            return Err(Status::failed_precondition(format!(
+                "Security group has {} attached NICs, use force=true to delete",
+                nic_count
+            )));
+        }
+
+        // Get security group for audit
+        let sg = self
+            .storage
+            .get_security_group_by_id(&uuid)
+            .map_err(storage_err_to_status)?;
+
+        // Detach from all NICs if force
+        let nics_detached = if req.force && nic_count > 0 {
+            self.storage
+                .detach_security_group_from_all_nics(&uuid)
+                .map_err(storage_err_to_status)?
+        } else {
+            0
+        };
+
+        // Delete security group (CASCADE deletes rules)
+        let deleted = self
+            .storage
+            .delete_security_group(&uuid)
+            .map_err(storage_err_to_status)?;
+
+        if let Some(s) = sg {
+            self.audit
+                .security_group_deleted(&s.id.to_string(), &s.name);
+        }
+
+        Ok(Response::new(DeleteSecurityGroupResponse {
+            deleted,
+            nics_detached,
+        }))
+    }
+
+    async fn add_security_group_rule(
+        &self,
+        request: Request<AddSecurityGroupRuleRequest>,
+    ) -> Result<Response<SecurityGroupRule>, Status> {
+        let req = request.into_inner();
+
+        info!(security_group_id = %req.security_group_id, "AddSecurityGroupRule");
+
+        // Resolve security group
+        let sg = self
+            .resolve_security_group(&req.security_group_id, "")
+            .await?;
+
+        // Validate rule
+        let (direction, protocol, port_start, port_end, _parsed_cidr) =
+            validate_security_group_rule(
+                req.direction,
+                req.protocol,
+                req.port_start,
+                req.port_end,
+                &req.cidr,
+            )
+            .map_err(validation_err_to_status)?;
+
+        let now = Utc::now();
+        let rule = SecurityGroupRuleData {
+            id: Uuid::new_v4(),
+            security_group_id: sg.id,
+            direction,
+            protocol,
+            port_start,
+            port_end,
+            cidr: if req.cidr.is_empty() {
+                None
+            } else {
+                Some(req.cidr)
+            },
+            description: if req.description.is_empty() {
+                None
+            } else {
+                Some(req.description)
+            },
+            created_at: now,
+            updated_at: now,
+        };
+
+        // Store
+        self.storage
+            .create_security_group_rule(&rule)
+            .map_err(storage_err_to_status)?;
+
+        info!(
+            id = %rule.id,
+            security_group_id = %sg.id,
+            direction = %direction.as_str(),
+            protocol = %protocol.as_str(),
+            "Security group rule added"
+        );
+        self.audit
+            .security_group_rule_added(&rule.id.to_string(), &sg.id.to_string());
+
+        Ok(Response::new(security_group_rule_data_to_proto(&rule)))
+    }
+
+    async fn remove_security_group_rule(
+        &self,
+        request: Request<RemoveSecurityGroupRuleRequest>,
+    ) -> Result<Response<RemoveSecurityGroupRuleResponse>, Status> {
+        let req = request.into_inner();
+
+        let uuid = Uuid::parse_str(&req.rule_id)
+            .map_err(|_| Status::invalid_argument(format!("Invalid rule ID: {}", req.rule_id)))?;
+
+        // Get rule for audit
+        let rule = self
+            .storage
+            .get_security_group_rule_by_id(&uuid)
+            .map_err(storage_err_to_status)?;
+
+        let deleted = self
+            .storage
+            .delete_security_group_rule(&uuid)
+            .map_err(storage_err_to_status)?;
+
+        if let Some(r) = rule {
+            self.audit
+                .security_group_rule_removed(&r.id.to_string(), &r.security_group_id.to_string());
+        }
+
+        Ok(Response::new(RemoveSecurityGroupRuleResponse { deleted }))
+    }
+
+    async fn attach_security_group(
+        &self,
+        request: Request<AttachSecurityGroupRequest>,
+    ) -> Result<Response<AttachSecurityGroupResponse>, Status> {
+        let req = request.into_inner();
+
+        info!(
+            nic_id = %req.nic_id,
+            security_group_id = %req.security_group_id,
+            "AttachSecurityGroup"
+        );
+
+        // Resolve NIC
+        let nic = self.resolve_nic(&req.nic_id, "").await?;
+
+        // Resolve security group
+        let sg = self
+            .resolve_security_group(&req.security_group_id, "")
+            .await?;
+
+        // Attach
+        let attached = self
+            .storage
+            .attach_security_group(&nic.id, &sg.id)
+            .map_err(storage_err_to_status)?;
+
+        if attached {
+            info!(
+                nic_id = %nic.id,
+                security_group_id = %sg.id,
+                "Security group attached to NIC"
+            );
+            self.audit
+                .security_group_attached(&sg.id.to_string(), &nic.id.to_string());
+        }
+
+        Ok(Response::new(AttachSecurityGroupResponse { attached }))
+    }
+
+    async fn detach_security_group(
+        &self,
+        request: Request<DetachSecurityGroupRequest>,
+    ) -> Result<Response<DetachSecurityGroupResponse>, Status> {
+        let req = request.into_inner();
+
+        // Resolve NIC
+        let nic = self.resolve_nic(&req.nic_id, "").await?;
+
+        // Resolve security group
+        let sg = self
+            .resolve_security_group(&req.security_group_id, "")
+            .await?;
+
+        // Detach
+        let detached = self
+            .storage
+            .detach_security_group(&nic.id, &sg.id)
+            .map_err(storage_err_to_status)?;
+
+        if detached {
+            info!(
+                nic_id = %nic.id,
+                security_group_id = %sg.id,
+                "Security group detached from NIC"
+            );
+            self.audit
+                .security_group_detached(&sg.id.to_string(), &nic.id.to_string());
+        }
+
+        Ok(Response::new(DetachSecurityGroupResponse { detached }))
     }
 }

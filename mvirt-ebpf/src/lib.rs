@@ -14,6 +14,7 @@
 //! ```
 
 pub mod audit;
+pub mod conntrack;
 pub mod ebpf_loader;
 pub mod grpc;
 pub mod nat;
@@ -25,6 +26,7 @@ pub mod test_util;
 
 // Re-export commonly used types
 pub use audit::{EbpfAuditLogger, create_audit_logger};
+pub use conntrack::ConnTrackCleaner;
 pub use ebpf_loader::EbpfManager;
 pub use grpc::{EbpfNetServiceImpl, NetworkData, NicData, NicState, Storage};
 pub use proto_handler::{
