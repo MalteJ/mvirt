@@ -176,7 +176,7 @@ impl NodeServiceImpl {
                         meta: Some(ResourceMeta {
                             id: network.id.clone(),
                             name: network.name.clone(),
-                                project_id: network.project_id.clone(),
+                            project_id: network.project_id.clone(),
                             node_id: None,
                             labels: Default::default(),
                         }),

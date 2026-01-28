@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, Plus, X } from 'lucide-react'
 import { useCreatePod, useNetworks } from '@/hooks/queries'
-import { useProject } from '@/hooks/useProject'
+import { useProjectId } from '@/hooks/useProjectId'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -24,9 +24,9 @@ interface ContainerFormData {
 
 export function CreatePodPage() {
   const navigate = useNavigate()
+  const projectId = useProjectId()
   const createPod = useCreatePod()
-  const { data: networks } = useNetworks()
-  const { currentProject } = useProject()
+  const { data: networks } = useNetworks(projectId)
 
   const [name, setName] = useState('')
   const [networkId, setNetworkId] = useState('')
@@ -52,7 +52,6 @@ export function CreatePodPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!currentProject) return
 
     const containerSpecs: ContainerSpec[] = containers.map((c) => ({
       name: c.name,
@@ -62,8 +61,8 @@ export function CreatePodPage() {
 
     createPod.mutate(
       {
+        projectId,
         name,
-        projectId: currentProject.id,
         networkId,
         containers: containerSpecs,
       },
@@ -75,7 +74,7 @@ export function CreatePodPage() {
     )
   }
 
-  const isValid = name && networkId && currentProject && containers.every((c) => c.name && c.image)
+  const isValid = name && networkId && containers.every((c) => c.name && c.image)
 
   return (
     <div className="space-y-6">

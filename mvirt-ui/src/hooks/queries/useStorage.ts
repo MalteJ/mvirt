@@ -11,26 +11,23 @@ import {
   getImportJob,
   getPoolStats,
 } from '@/api/endpoints'
-import { useProject } from '@/hooks/useProject'
 import type { CreateVolumeRequest, ImportTemplateRequest } from '@/types'
 
 export const storageKeys = {
   all: ['storage'] as const,
   volumes: () => [...storageKeys.all, 'volumes'] as const,
-  volumeList: (projectId?: string) => [...storageKeys.volumes(), 'list', projectId] as const,
+  volumeList: (projectId: string) => [...storageKeys.volumes(), 'list', projectId] as const,
   volume: (id: string) => [...storageKeys.volumes(), id] as const,
-  templates: () => [...storageKeys.all, 'templates'] as const,
+  templates: (projectId: string) => [...storageKeys.all, 'templates', projectId] as const,
   importJobs: () => [...storageKeys.all, 'import-jobs'] as const,
   importJob: (id: string) => [...storageKeys.importJobs(), id] as const,
   pool: () => [...storageKeys.all, 'pool'] as const,
 }
 
-export function useVolumes() {
-  const { currentProject } = useProject()
+export function useVolumes(projectId: string) {
   return useQuery({
-    queryKey: storageKeys.volumeList(currentProject?.id),
-    queryFn: () => listVolumes(currentProject?.id),
-    enabled: !!currentProject,
+    queryKey: storageKeys.volumeList(projectId),
+    queryFn: () => listVolumes(projectId),
   })
 }
 
@@ -42,10 +39,10 @@ export function useVolume(id: string) {
   })
 }
 
-export function useCreateVolume() {
+export function useCreateVolume(projectId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (request: CreateVolumeRequest) => createVolume(request),
+    mutationFn: (request: CreateVolumeRequest) => createVolume(projectId, request),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: storageKeys.volumes() })
     },
@@ -85,17 +82,17 @@ export function useCreateSnapshot() {
   })
 }
 
-export function useTemplates() {
+export function useTemplates(projectId: string) {
   return useQuery({
-    queryKey: storageKeys.templates(),
-    queryFn: listTemplates,
+    queryKey: storageKeys.templates(projectId),
+    queryFn: () => listTemplates(projectId),
   })
 }
 
-export function useImportTemplate() {
+export function useImportTemplate(projectId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (request: ImportTemplateRequest) => importTemplate(request),
+    mutationFn: (request: ImportTemplateRequest) => importTemplate(projectId, request),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: storageKeys.importJobs() })
     },

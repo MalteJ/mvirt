@@ -118,13 +118,17 @@ async fn test_remove_node_not_found() {
 async fn test_create_network() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "createnetproj", "name": "create-net-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     let response = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "test-network",
                 "ipv4Enabled": true,
-                "ipv4Subnet": "10.0.0.0/24",
+                "ipv4Prefix": "10.0.0.0/24",
                 "dnsServers": ["8.8.8.8"]
             }),
         )
@@ -135,7 +139,7 @@ async fn test_create_network() {
     assert!(body["id"].is_string());
     assert_eq!(body["name"].as_str().unwrap(), "test-network");
     assert!(body["ipv4Enabled"].as_bool().unwrap());
-    assert_eq!(body["ipv4Subnet"].as_str().unwrap(), "10.0.0.0/24");
+    assert_eq!(body["ipv4Prefix"].as_str().unwrap(), "10.0.0.0/24");
     assert_eq!(body["nicCount"].as_u64().unwrap(), 0);
     assert!(body["createdAt"].is_string());
 
@@ -146,10 +150,14 @@ async fn test_create_network() {
 async fn test_create_network_duplicate_name() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "dupnetproj", "name": "dup-net-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Create first network
     let response1 = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "duplicate-name"
             }),
@@ -160,7 +168,7 @@ async fn test_create_network_duplicate_name() {
     // Try to create second with same name
     let response2 = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "duplicate-name"
             }),
@@ -178,10 +186,14 @@ async fn test_create_network_duplicate_name() {
 async fn test_get_network_by_id() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "getnetidproj", "name": "get-net-id-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Create network
     let create_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "by-id-test"
             }),
@@ -190,7 +202,7 @@ async fn test_get_network_by_id() {
     let created: Value = create_resp.json().await.unwrap();
     let network_id = created["id"].as_str().unwrap();
 
-    // Get by ID
+    // Get by ID (global route)
     let response = server.get(&format!("/networks/{}", network_id)).await;
     assert_eq!(response.status(), 200);
 
@@ -205,17 +217,21 @@ async fn test_get_network_by_id() {
 async fn test_get_network_by_name() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "getnetnameproj", "name": "get-net-name-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Create network
     server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "by-name-test"
             }),
         )
         .await;
 
-    // Get by name
+    // Get by name (global route)
     let response = server.get("/networks/by-name-test").await;
     assert_eq!(response.status(), 200);
 
@@ -242,10 +258,14 @@ async fn test_get_network_not_found() {
 async fn test_list_networks() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "listnetsproj", "name": "list-nets-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Create a couple of networks
     server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "network-1"
             }),
@@ -253,7 +273,7 @@ async fn test_list_networks() {
         .await;
     server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "network-2"
             }),
@@ -261,7 +281,7 @@ async fn test_list_networks() {
         .await;
 
     // List
-    let response = server.get("/networks").await;
+    let response = server.get(&format!("/projects/{}/networks", project_id)).await;
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();
@@ -279,10 +299,14 @@ async fn test_list_networks() {
 async fn test_delete_network() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "delnetproj", "name": "del-net-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Create network
     let create_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "delete-test"
             }),
@@ -291,7 +315,7 @@ async fn test_delete_network() {
     let created: Value = create_resp.json().await.unwrap();
     let network_id = created["id"].as_str().unwrap();
 
-    // Delete - UI API returns 204 No Content
+    // Delete (global route)
     let response = server.delete(&format!("/networks/{}", network_id)).await;
     assert_eq!(response.status(), 204);
 
@@ -309,10 +333,14 @@ async fn test_delete_network() {
 async fn test_delete_network_with_nics() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "delnetnicsproj", "name": "del-net-nics-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Create network
     let create_net_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "delete-with-nics"
             }),
@@ -324,14 +352,14 @@ async fn test_delete_network_with_nics() {
     // Create NIC in network
     server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": network_id
             }),
         )
         .await;
 
-    // UI API delete doesn't support force, may fail with conflict
+    // Delete (global route) - may fail with conflict
     let response = server.delete(&format!("/networks/{}", network_id)).await;
     // Either succeeds with 204 or fails with 409 conflict
     assert!(response.status() == 204 || response.status() == 409);
@@ -349,10 +377,14 @@ async fn test_delete_network_with_nics() {
 async fn test_create_nic() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "createnicproj", "name": "create-nic-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Create network first
     let net_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "nic-test-network"
             }),
@@ -364,7 +396,7 @@ async fn test_create_nic() {
     // Create NIC
     let response = server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": network_id,
                 "name": "test-nic"
@@ -393,9 +425,13 @@ async fn test_create_nic() {
 async fn test_create_nic_network_not_found() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "nicnetnotfoundproj", "name": "nic-net-notfound-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     let response = server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": "non-existent-network"
             }),
@@ -418,10 +454,14 @@ async fn test_create_nic_network_not_found() {
 async fn test_get_nic_by_id() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "getnicidproj", "name": "get-nic-id-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Setup
     let net_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "nic-get-test"
             }),
@@ -432,7 +472,7 @@ async fn test_get_nic_by_id() {
 
     let nic_resp = server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": network_id,
                 "name": "get-by-id-nic"
@@ -442,7 +482,7 @@ async fn test_get_nic_by_id() {
     let nic: Value = nic_resp.json().await.unwrap();
     let nic_id = nic["id"].as_str().unwrap();
 
-    // Get by ID
+    // Get by ID (global route)
     let response = server.get(&format!("/nics/{}", nic_id)).await;
     assert_eq!(response.status(), 200);
 
@@ -456,10 +496,14 @@ async fn test_get_nic_by_id() {
 async fn test_get_nic_by_name() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "getnicnameproj", "name": "get-nic-name-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Setup
     let net_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "nic-name-test"
             }),
@@ -470,7 +514,7 @@ async fn test_get_nic_by_name() {
 
     server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": network_id,
                 "name": "my-named-nic"
@@ -478,7 +522,7 @@ async fn test_get_nic_by_name() {
         )
         .await;
 
-    // Get by name
+    // Get by name (global route)
     let response = server.get("/nics/my-named-nic").await;
     assert_eq!(response.status(), 200);
 
@@ -492,10 +536,14 @@ async fn test_get_nic_by_name() {
 async fn test_list_nics() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "listnicsproj", "name": "list-nics-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Create network and NICs
     let net_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "list-nics-test"
             }),
@@ -506,7 +554,7 @@ async fn test_list_nics() {
 
     server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": network_id
             }),
@@ -514,7 +562,7 @@ async fn test_list_nics() {
         .await;
     server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": network_id
             }),
@@ -522,7 +570,7 @@ async fn test_list_nics() {
         .await;
 
     // List all - UI format wraps results in "nics" field
-    let response = server.get("/nics").await;
+    let response = server.get(&format!("/projects/{}/nics", project_id)).await;
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();
@@ -536,10 +584,14 @@ async fn test_list_nics() {
 async fn test_list_nics_filter_by_network() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "filternicsproj", "name": "filter-nics-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Create two networks
     let net1_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "filter-net-1"
             }),
@@ -550,7 +602,7 @@ async fn test_list_nics_filter_by_network() {
 
     let net2_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "filter-net-2"
             }),
@@ -562,7 +614,7 @@ async fn test_list_nics_filter_by_network() {
     // Create NICs in different networks
     server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": net1_id
             }),
@@ -570,7 +622,7 @@ async fn test_list_nics_filter_by_network() {
         .await;
     server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": net1_id
             }),
@@ -578,7 +630,7 @@ async fn test_list_nics_filter_by_network() {
         .await;
     server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": net2_id
             }),
@@ -588,7 +640,7 @@ async fn test_list_nics_filter_by_network() {
     // Filter by networkId (camelCase query param)
     let response = server
         .client
-        .get(format!("{}/nics?networkId={}", server.base_url(), net1_id))
+        .get(format!("{}/projects/{}/nics?networkId={}", server.base_url(), project_id, net1_id))
         .send()
         .await
         .unwrap();
@@ -610,10 +662,14 @@ async fn test_list_nics_filter_by_network() {
 async fn test_delete_nic() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "delnicproj", "name": "del-nic-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Setup
     let net_resp = server
         .post_json(
-            "/networks",
+            &format!("/projects/{}/networks", project_id),
             &json!({
                 "name": "delete-nic-test"
             }),
@@ -624,7 +680,7 @@ async fn test_delete_nic() {
 
     let nic_resp = server
         .post_json(
-            "/nics",
+            &format!("/projects/{}/nics", project_id),
             &json!({
                 "networkId": network_id
             }),
@@ -633,7 +689,7 @@ async fn test_delete_nic() {
     let nic: Value = nic_resp.json().await.unwrap();
     let nic_id = nic["id"].as_str().unwrap();
 
-    // Delete - UI API returns 204 No Content
+    // Delete (global route)
     let response = server.delete(&format!("/nics/{}", nic_id)).await;
     assert_eq!(response.status(), 204);
 
@@ -671,6 +727,7 @@ async fn test_create_project() {
         .post_json(
             "/projects",
             &json!({
+                "id": "testproject",
                 "name": "test-project",
                 "description": "A test project"
             }),
@@ -679,7 +736,7 @@ async fn test_create_project() {
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();
-    assert!(body["id"].is_string());
+    assert_eq!(body["id"].as_str().unwrap(), "testproject");
     assert_eq!(body["name"].as_str().unwrap(), "test-project");
     assert_eq!(body["description"].as_str().unwrap(), "A test project");
     assert!(body["createdAt"].is_string());
@@ -693,10 +750,10 @@ async fn test_list_projects() {
 
     // Create projects
     server
-        .post_json("/projects", &json!({"name": "project-1"}))
+        .post_json("/projects", &json!({"id": "project1", "name": "project-1"}))
         .await;
     server
-        .post_json("/projects", &json!({"name": "project-2"}))
+        .post_json("/projects", &json!({"id": "project2", "name": "project-2"}))
         .await;
 
     let response = server.get("/projects").await;
@@ -714,7 +771,7 @@ async fn test_get_project() {
     let server = common::TestServer::spawn().await;
 
     let create_resp = server
-        .post_json("/projects", &json!({"name": "get-test"}))
+        .post_json("/projects", &json!({"id": "gettest", "name": "get-test"}))
         .await;
     let created: Value = create_resp.json().await.unwrap();
     let project_id = created["id"].as_str().unwrap();
@@ -734,7 +791,7 @@ async fn test_delete_project() {
     let server = common::TestServer::spawn().await;
 
     let create_resp = server
-        .post_json("/projects", &json!({"name": "delete-test"}))
+        .post_json("/projects", &json!({"id": "deletetest", "name": "delete-test"}))
         .await;
     let created: Value = create_resp.json().await.unwrap();
     let project_id = created["id"].as_str().unwrap();
@@ -759,7 +816,7 @@ async fn test_create_volume() {
 
     // Create project first
     let proj_resp = server
-        .post_json("/projects", &json!({"name": "vol-test-proj"}))
+        .post_json("/projects", &json!({"id": "voltestproj", "name": "vol-test-proj"}))
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
     let project_id = proj["id"].as_str().unwrap();
@@ -767,9 +824,8 @@ async fn test_create_volume() {
     // Create volume
     let response = server
         .post_json(
-            "/storage/volumes",
+            &format!("/projects/{}/volumes", project_id),
             &json!({
-                "projectId": project_id,
                 "nodeId": "node-1",
                 "name": "test-volume",
                 "sizeBytes": 10737418240_u64
@@ -793,7 +849,7 @@ async fn test_list_volumes() {
     let server = common::TestServer::spawn().await;
 
     let proj_resp = server
-        .post_json("/projects", &json!({"name": "list-vol-proj"}))
+        .post_json("/projects", &json!({"id": "listvolproj", "name": "list-vol-proj"}))
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
     let project_id = proj["id"].as_str().unwrap();
@@ -801,9 +857,8 @@ async fn test_list_volumes() {
     // Create volumes
     server
         .post_json(
-            "/storage/volumes",
+            &format!("/projects/{}/volumes", project_id),
             &json!({
-                "projectId": project_id,
                 "nodeId": "node-1",
                 "name": "volume-1",
                 "sizeBytes": 1000000000_u64
@@ -812,9 +867,8 @@ async fn test_list_volumes() {
         .await;
     server
         .post_json(
-            "/storage/volumes",
+            &format!("/projects/{}/volumes", project_id),
             &json!({
-                "projectId": project_id,
                 "nodeId": "node-1",
                 "name": "volume-2",
                 "sizeBytes": 2000000000_u64
@@ -822,7 +876,7 @@ async fn test_list_volumes() {
         )
         .await;
 
-    let response = server.get("/storage/volumes").await;
+    let response = server.get(&format!("/projects/{}/volumes", project_id)).await;
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();
@@ -837,16 +891,15 @@ async fn test_resize_volume() {
     let server = common::TestServer::spawn().await;
 
     let proj_resp = server
-        .post_json("/projects", &json!({"name": "resize-proj"}))
+        .post_json("/projects", &json!({"id": "resizeproj", "name": "resize-proj"}))
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
     let project_id = proj["id"].as_str().unwrap();
 
     let vol_resp = server
         .post_json(
-            "/storage/volumes",
+            &format!("/projects/{}/volumes", project_id),
             &json!({
-                "projectId": project_id,
                 "nodeId": "node-1",
                 "name": "resize-vol",
                 "sizeBytes": 1000000000_u64
@@ -856,10 +909,10 @@ async fn test_resize_volume() {
     let vol: Value = vol_resp.json().await.unwrap();
     let vol_id = vol["id"].as_str().unwrap();
 
-    // Resize
+    // Resize (global route)
     let response = server
         .post_json(
-            &format!("/storage/volumes/{}/resize", vol_id),
+            &format!("/volumes/{}/resize", vol_id),
             &json!({"sizeBytes": 2000000000_u64}),
         )
         .await;
@@ -876,16 +929,15 @@ async fn test_create_snapshot() {
     let server = common::TestServer::spawn().await;
 
     let proj_resp = server
-        .post_json("/projects", &json!({"name": "snap-proj"}))
+        .post_json("/projects", &json!({"id": "snapproj", "name": "snap-proj"}))
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
     let project_id = proj["id"].as_str().unwrap();
 
     let vol_resp = server
         .post_json(
-            "/storage/volumes",
+            &format!("/projects/{}/volumes", project_id),
             &json!({
-                "projectId": project_id,
                 "nodeId": "node-1",
                 "name": "snap-vol",
                 "sizeBytes": 1000000000_u64
@@ -895,10 +947,10 @@ async fn test_create_snapshot() {
     let vol: Value = vol_resp.json().await.unwrap();
     let vol_id = vol["id"].as_str().unwrap();
 
-    // Create snapshot
+    // Create snapshot (global route)
     let response = server
         .post_json(
-            &format!("/storage/volumes/{}/snapshots", vol_id),
+            &format!("/volumes/{}/snapshots", vol_id),
             &json!({"name": "my-snapshot"}),
         )
         .await;
@@ -920,16 +972,15 @@ async fn test_delete_volume() {
     let server = common::TestServer::spawn().await;
 
     let proj_resp = server
-        .post_json("/projects", &json!({"name": "del-vol-proj"}))
+        .post_json("/projects", &json!({"id": "delvolproj", "name": "del-vol-proj"}))
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
     let project_id = proj["id"].as_str().unwrap();
 
     let vol_resp = server
         .post_json(
-            "/storage/volumes",
+            &format!("/projects/{}/volumes", project_id),
             &json!({
-                "projectId": project_id,
                 "nodeId": "node-1",
                 "name": "delete-vol",
                 "sizeBytes": 1000000000_u64
@@ -939,11 +990,12 @@ async fn test_delete_volume() {
     let vol: Value = vol_resp.json().await.unwrap();
     let vol_id = vol["id"].as_str().unwrap();
 
-    let response = server.delete(&format!("/storage/volumes/{}", vol_id)).await;
+    // Delete (global route)
+    let response = server.delete(&format!("/volumes/{}", vol_id)).await;
     assert_eq!(response.status(), 204);
 
     // Verify it's gone
-    let get_resp = server.get(&format!("/storage/volumes/{}", vol_id)).await;
+    let get_resp = server.get(&format!("/volumes/{}", vol_id)).await;
     assert_eq!(get_resp.status(), 404);
 
     server.shutdown().await;
@@ -957,8 +1009,12 @@ async fn test_delete_volume() {
 async fn test_list_templates() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "listtplproj", "name": "list-tpl-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     // Templates are created via import jobs, so this just tests the list endpoint
-    let response = server.get("/storage/templates").await;
+    let response = server.get(&format!("/projects/{}/templates", project_id)).await;
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();
@@ -971,9 +1027,13 @@ async fn test_list_templates() {
 async fn test_import_template() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "importtplproj", "name": "import-tpl-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     let response = server
         .post_json(
-            "/storage/templates/import",
+            &format!("/projects/{}/templates/import", project_id),
             &json!({
                 "nodeId": "node-1",
                 "name": "ubuntu-22.04",
@@ -997,9 +1057,13 @@ async fn test_import_template() {
 async fn test_get_import_job() {
     let server = common::TestServer::spawn().await;
 
+    let proj_resp = server.post_json("/projects", &json!({"id": "importjobproj", "name": "import-job-proj"})).await;
+    let proj: Value = proj_resp.json().await.unwrap();
+    let project_id = proj["id"].as_str().unwrap();
+
     let import_resp = server
         .post_json(
-            "/storage/templates/import",
+            &format!("/projects/{}/templates/import", project_id),
             &json!({
                 "nodeId": "node-1",
                 "name": "debian-12",
@@ -1012,7 +1076,7 @@ async fn test_get_import_job() {
     let job_id = import["id"].as_str().unwrap();
 
     let response = server
-        .get(&format!("/storage/import-jobs/{}", job_id))
+        .get(&format!("/import-jobs/{}", job_id))
         .await;
     assert_eq!(response.status(), 200);
 
@@ -1027,7 +1091,7 @@ async fn test_get_import_job() {
 async fn test_get_pool_stats() {
     let server = common::TestServer::spawn().await;
 
-    let response = server.get("/storage/pool").await;
+    let response = server.get("/pool").await;
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();

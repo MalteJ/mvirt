@@ -48,7 +48,6 @@ export interface PoolStats {
 
 export interface CreateVolumeRequest {
   name: string
-  projectId: string
   sizeBytes: number
   templateId?: string
 }

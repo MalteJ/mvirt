@@ -26,14 +26,12 @@ export interface Nic {
 
 export interface CreateNetworkRequest {
   name: string
-  projectId: string
   ipv4Subnet?: string
   ipv6Prefix?: string
 }
 
 export interface CreateNicRequest {
   name: string
-  projectId: string
   networkId: string
   macAddress?: string
 }

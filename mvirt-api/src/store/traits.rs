@@ -8,7 +8,8 @@ use tokio::sync::broadcast;
 
 use crate::command::{
     ImportJobData, ImportJobState, NetworkData, NicData, NodeData, NodeResources, NodeStatus,
-    ProjectData, TemplateData, VmData, VmDesiredState, VmSpec, VmStatus, VolumeData,
+    ProjectData, RuleDirection, SecurityGroupData, TemplateData, VmData, VmDesiredState, VmSpec,
+    VmStatus, VolumeData,
 };
 use std::collections::HashMap;
 
@@ -155,6 +156,7 @@ pub struct CreateSnapshotRequest {
 /// Request to import a template.
 #[derive(Debug, Clone)]
 pub struct ImportTemplateRequest {
+    pub project_id: String,
     pub node_id: String,
     pub name: String,
     pub url: String,
@@ -227,6 +229,9 @@ pub trait NetworkStore: Send + Sync {
     /// List all networks.
     async fn list_networks(&self) -> Result<Vec<NetworkData>>;
 
+    /// List networks by project.
+    async fn list_networks_by_project(&self, project_id: &str) -> Result<Vec<NetworkData>>;
+
     /// Get a network by ID.
     async fn get_network(&self, id: &str) -> Result<Option<NetworkData>>;
 
@@ -249,6 +254,9 @@ pub trait NicStore: Send + Sync {
     /// List all NICs, optionally filtered by network.
     async fn list_nics(&self, network_id: Option<&str>) -> Result<Vec<NicData>>;
 
+    /// List NICs by project.
+    async fn list_nics_by_project(&self, project_id: &str) -> Result<Vec<NicData>>;
+
     /// Get a NIC by ID.
     async fn get_nic(&self, id: &str) -> Result<Option<NicData>>;
 
@@ -263,6 +271,12 @@ pub trait NicStore: Send + Sync {
 
     /// Delete a NIC.
     async fn delete_nic(&self, id: &str) -> Result<()>;
+
+    /// Attach a NIC to a VM.
+    async fn attach_nic(&self, id: &str, vm_id: &str) -> Result<NicData>;
+
+    /// Detach a NIC from a VM.
+    async fn detach_nic(&self, id: &str) -> Result<NicData>;
 }
 
 /// Store trait for VM operations.
@@ -270,6 +284,9 @@ pub trait NicStore: Send + Sync {
 pub trait VmStore: Send + Sync {
     /// List all VMs.
     async fn list_vms(&self) -> Result<Vec<VmData>>;
+
+    /// List VMs by project.
+    async fn list_vms_by_project(&self, project_id: &str) -> Result<Vec<VmData>>;
 
     /// List VMs on a specific node.
     async fn list_vms_by_node(&self, node_id: &str) -> Result<Vec<VmData>>;
@@ -370,6 +387,9 @@ pub trait TemplateStore: Send + Sync {
     /// List all templates, optionally filtered by node.
     async fn list_templates(&self, node_id: Option<&str>) -> Result<Vec<TemplateData>>;
 
+    /// List templates by project.
+    async fn list_templates_by_project(&self, project_id: &str) -> Result<Vec<TemplateData>>;
+
     /// Get a template by ID.
     async fn get_template(&self, id: &str) -> Result<Option<TemplateData>>;
 
@@ -387,6 +407,65 @@ pub trait TemplateStore: Send + Sync {
         state: ImportJobState,
         error: Option<String>,
     ) -> Result<ImportJobData>;
+}
+
+// =============================================================================
+// Security Group Request DTOs
+// =============================================================================
+
+/// Request to create a new security group.
+#[derive(Debug, Clone)]
+pub struct CreateSecurityGroupRequest {
+    pub project_id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// Request to create a security group rule.
+#[derive(Debug, Clone)]
+pub struct CreateSecurityGroupRuleRequest {
+    pub direction: RuleDirection,
+    pub protocol: Option<String>,
+    pub port_range_start: Option<u16>,
+    pub port_range_end: Option<u16>,
+    pub cidr: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Store trait for security group operations.
+#[async_trait]
+pub trait SecurityGroupStore: Send + Sync {
+    /// List all security groups, optionally filtered by project.
+    async fn list_security_groups(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<SecurityGroupData>>;
+
+    /// Get a security group by ID.
+    async fn get_security_group(&self, id: &str) -> Result<Option<SecurityGroupData>>;
+
+    /// Create a new security group.
+    async fn create_security_group(
+        &self,
+        req: CreateSecurityGroupRequest,
+    ) -> Result<SecurityGroupData>;
+
+    /// Delete a security group.
+    async fn delete_security_group(&self, id: &str) -> Result<()>;
+
+    /// Create a rule in a security group.
+    async fn create_security_group_rule(
+        &self,
+        security_group_id: &str,
+        req: CreateSecurityGroupRuleRequest,
+    ) -> Result<SecurityGroupData>;
+
+    /// Delete a rule from a security group.
+    async fn delete_security_group_rule(
+        &self,
+        security_group_id: &str,
+        rule_id: &str,
+    ) -> Result<SecurityGroupData>;
 }
 
 // =============================================================================
@@ -413,6 +492,7 @@ pub trait DataStore:
     + ProjectStore
     + VolumeStore
     + TemplateStore
+    + SecurityGroupStore
     + ClusterStore
     + Send
     + Sync

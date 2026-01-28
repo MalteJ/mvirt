@@ -8,9 +8,10 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Sse, sse::Event as SseEvent},
 };
-use futures::stream::{self, Stream};
+use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, sync::Arc, time::Duration};
+use utoipa::ToSchema;
 
 use super::handlers::{ApiError, AppState};
 use super::ui_types::*;
@@ -27,10 +28,11 @@ use crate::store::{
 };
 
 // =============================================================================
-// Project Handlers
+// Project Handlers (global, not project-scoped)
 // =============================================================================
 
 /// List all projects
+#[utoipa::path(get, path = "/v1/projects", responses((status = 200, body = ProjectListResponse)), tag = "projects")]
 pub async fn list_projects(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ProjectListResponse>, ApiError> {
@@ -41,6 +43,7 @@ pub async fn list_projects(
 }
 
 /// Get a project by ID
+#[utoipa::path(get, path = "/v1/projects/{id}", params(("id" = String, Path)), responses((status = 200, body = UiProject), (status = 404, body = ApiError)), tag = "projects")]
 pub async fn get_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -61,6 +64,7 @@ pub async fn get_project(
 }
 
 /// Create a new project
+#[utoipa::path(post, path = "/v1/projects", request_body = UiCreateProjectRequest, responses((status = 200, body = UiProject), (status = 400, body = ApiError), (status = 409, body = ApiError)), tag = "projects")]
 pub async fn create_project(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UiCreateProjectRequest>,
@@ -103,6 +107,7 @@ pub async fn create_project(
 }
 
 /// Delete a project
+#[utoipa::path(delete, path = "/v1/projects/{id}", params(("id" = String, Path)), responses((status = 204)), tag = "projects")]
 pub async fn delete_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -116,24 +121,23 @@ pub async fn delete_project(
 // VM Handlers
 // =============================================================================
 
-/// List all VMs
+/// List VMs in a project
+#[utoipa::path(get, path = "/v1/projects/{project_id}/vms", params(("project_id" = String, Path), ("node_id" = Option<String>, Query)), responses((status = 200, body = VmListResponse)), tag = "vms")]
 pub async fn list_vms(
     State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
     Query(query): Query<ListVmsQuery>,
 ) -> Result<Json<VmListResponse>, ApiError> {
-    let vms = match &query.node_id {
-        Some(node_id) => state.store.list_vms_by_node(node_id).await?,
-        None => state.store.list_vms().await?,
-    };
+    let vms = state.store.list_vms_by_project(&project_id).await?;
 
-    // Filter by project if specified
+    // Further filter by node if specified
     let vms: Vec<UiVm> = vms
         .into_iter()
         .filter(|vm| {
             query
-                .project_id
+                .node_id
                 .as_ref()
-                .is_none_or(|pid| &vm.spec.project_id == pid)
+                .is_none_or(|nid| vm.status.node_id.as_deref() == Some(nid.as_str()))
         })
         .map(UiVm::from)
         .collect();
@@ -142,6 +146,7 @@ pub async fn list_vms(
 }
 
 /// Get a VM by ID
+#[utoipa::path(get, path = "/v1/vms/{id}", params(("id" = String, Path)), responses((status = 200, body = UiVm), (status = 404, body = ApiError)), tag = "vms")]
 pub async fn get_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -162,14 +167,15 @@ pub async fn get_vm(
 }
 
 /// Create a new VM
+#[utoipa::path(post, path = "/v1/projects/{project_id}/vms", params(("project_id" = String, Path)), request_body = UiCreateVmRequest, responses((status = 200, body = UiVm), (status = 503, body = ApiError)), tag = "vms")]
 pub async fn create_vm(
     State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
     Json(req): Json<UiCreateVmRequest>,
 ) -> Result<Json<UiVm>, ApiError> {
-    // Convert UI request to internal spec
     let spec = VmSpec {
         name: req.name.clone(),
-        project_id: req.project_id,
+        project_id,
         node_selector: req.node_selector,
         cpu_cores: req.config.vcpus,
         memory_mb: req.config.memory_mb,
@@ -181,13 +187,13 @@ pub async fn create_vm(
 
     let store_req = StoreCreateVmRequest { spec };
 
-    // Create and schedule the VM
     let data = state.store.create_and_schedule_vm(store_req).await?;
     state.audit.vm_created(&data.id, &data.spec.name);
     Ok(Json(UiVm::from(data)))
 }
 
 /// Delete a VM
+#[utoipa::path(delete, path = "/v1/vms/{id}", params(("id" = String, Path)), responses((status = 204), (status = 404, body = ApiError)), tag = "vms")]
 pub async fn delete_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -198,11 +204,11 @@ pub async fn delete_vm(
 }
 
 /// Start a VM
+#[utoipa::path(post, path = "/v1/vms/{id}/start", params(("id" = String, Path)), responses((status = 200, body = UiVm), (status = 404, body = ApiError)), tag = "vms")]
 pub async fn start_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<UiVm>, ApiError> {
-    // Set desired_state to Running
     let store_req = StoreUpdateVmSpecRequest {
         desired_state: VmDesiredState::Running,
     };
@@ -220,7 +226,7 @@ pub async fn start_vm(
                 StoreUpdateVmStatusRequest {
                     status: VmStatus {
                         phase: VmPhase::Running,
-                        node_id: None, // Preserve existing
+                        node_id: None,
                         ip_address: None,
                         message: None,
                     },
@@ -233,18 +239,17 @@ pub async fn start_vm(
 }
 
 /// Stop a VM
+#[utoipa::path(post, path = "/v1/vms/{id}/stop", params(("id" = String, Path)), responses((status = 200, body = UiVm), (status = 404, body = ApiError)), tag = "vms")]
 pub async fn stop_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<UiVm>, ApiError> {
-    // Set desired_state to Stopped
     let store_req = StoreUpdateVmSpecRequest {
         desired_state: VmDesiredState::Stopped,
     };
     let vm = state.store.update_vm_spec(&id, store_req).await?;
     state.audit.vm_stopped(&vm.id);
 
-    // Simulate transition (2s delay like mock-server)
     let store = state.store.clone();
     let id_clone = id.clone();
     tokio::spawn(async move {
@@ -255,7 +260,7 @@ pub async fn stop_vm(
                 StoreUpdateVmStatusRequest {
                     status: VmStatus {
                         phase: VmPhase::Stopped,
-                        node_id: None, // Preserve existing
+                        node_id: None,
                         ip_address: None,
                         message: None,
                     },
@@ -268,17 +273,16 @@ pub async fn stop_vm(
 }
 
 /// Kill a VM (immediate stop)
+#[utoipa::path(post, path = "/v1/vms/{id}/kill", params(("id" = String, Path)), responses((status = 200, body = UiVm), (status = 404, body = ApiError)), tag = "vms")]
 pub async fn kill_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<UiVm>, ApiError> {
-    // Set desired_state to Stopped
     let store_req = StoreUpdateVmSpecRequest {
         desired_state: VmDesiredState::Stopped,
     };
     state.store.update_vm_spec(&id, store_req).await?;
 
-    // Immediate phase change to Stopped
     let status_req = StoreUpdateVmStatusRequest {
         status: VmStatus {
             phase: VmPhase::Stopped,
@@ -296,14 +300,13 @@ pub async fn kill_vm(
 /// SSE stream for VM events
 pub async fn vm_events(
     State(state): State<Arc<AppState>>,
+    Path(_project_id): Path<String>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let mut rx = state.store.subscribe();
 
     let stream = async_stream::stream! {
         while let Ok(event) = rx.recv().await {
             if event.resource_type() == "vm" {
-                // For simplicity, just send the event type
-                // In production, you'd include the full VM data
                 let data = serde_json::json!({
                     "type": match &event {
                         crate::store::Event::VmCreated(_) => "created",
@@ -330,18 +333,20 @@ pub async fn vm_events(
 // Network Handlers
 // =============================================================================
 
-/// List all networks
+/// List networks in a project
+#[utoipa::path(get, path = "/v1/projects/{project_id}/networks", params(("project_id" = String, Path)), responses((status = 200, body = NetworkListResponse)), tag = "networks")]
 pub async fn list_networks(
     State(state): State<Arc<AppState>>,
-    Query(_query): Query<ListNetworksQuery>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<NetworkListResponse>, ApiError> {
-    let networks = state.store.list_networks().await?;
+    let networks = state.store.list_networks_by_project(&project_id).await?;
     Ok(Json(NetworkListResponse {
         networks: networks.into_iter().map(UiNetwork::from).collect(),
     }))
 }
 
 /// Get a network by ID
+#[utoipa::path(get, path = "/v1/networks/{id}", params(("id" = String, Path)), responses((status = 200, body = UiNetwork), (status = 404, body = ApiError)), tag = "networks")]
 pub async fn get_network(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -362,12 +367,14 @@ pub async fn get_network(
 }
 
 /// Create a new network
+#[utoipa::path(post, path = "/v1/projects/{project_id}/networks", params(("project_id" = String, Path)), request_body = UiCreateNetworkRequest, responses((status = 200, body = UiNetwork), (status = 409, body = ApiError)), tag = "networks")]
 pub async fn create_network(
     State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
     Json(req): Json<UiCreateNetworkRequest>,
 ) -> Result<Json<UiNetwork>, ApiError> {
     let store_req = StoreCreateNetworkRequest {
-        project_id: req.project_id,
+        project_id,
         name: req.name.clone(),
         ipv4_enabled: req.ipv4_enabled,
         ipv4_prefix: req.ipv4_prefix,
@@ -384,6 +391,7 @@ pub async fn create_network(
 }
 
 /// Delete a network
+#[utoipa::path(delete, path = "/v1/networks/{id}", params(("id" = String, Path)), responses((status = 204), (status = 404, body = ApiError)), tag = "networks")]
 pub async fn delete_network(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -397,18 +405,30 @@ pub async fn delete_network(
 // NIC Handlers
 // =============================================================================
 
-/// List all NICs
+/// List NICs in a project
+#[utoipa::path(get, path = "/v1/projects/{project_id}/nics", params(("project_id" = String, Path), ("network_id" = Option<String>, Query)), responses((status = 200, body = NicListResponse)), tag = "nics")]
 pub async fn list_nics(
     State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
     Query(query): Query<ListNicsQuery>,
 ) -> Result<Json<NicListResponse>, ApiError> {
-    let nics = state.store.list_nics(query.network_id.as_deref()).await?;
-    Ok(Json(NicListResponse {
-        nics: nics.into_iter().map(UiNic::from).collect(),
-    }))
+    let nics = state.store.list_nics_by_project(&project_id).await?;
+    // Further filter by network if specified
+    let nics: Vec<UiNic> = nics
+        .into_iter()
+        .filter(|nic| {
+            query
+                .network_id
+                .as_ref()
+                .is_none_or(|nid| &nic.network_id == nid)
+        })
+        .map(UiNic::from)
+        .collect();
+    Ok(Json(NicListResponse { nics }))
 }
 
 /// Get a NIC by ID
+#[utoipa::path(get, path = "/v1/nics/{id}", params(("id" = String, Path)), responses((status = 200, body = UiNic), (status = 404, body = ApiError)), tag = "nics")]
 pub async fn get_nic(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -429,12 +449,14 @@ pub async fn get_nic(
 }
 
 /// Create a new NIC
+#[utoipa::path(post, path = "/v1/projects/{project_id}/nics", params(("project_id" = String, Path)), request_body = UiCreateNicRequest, responses((status = 200, body = UiNic), (status = 404, body = ApiError)), tag = "nics")]
 pub async fn create_nic(
     State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
     Json(req): Json<UiCreateNicRequest>,
 ) -> Result<Json<UiNic>, ApiError> {
     let store_req = StoreCreateNicRequest {
-        project_id: req.project_id,
+        project_id,
         network_id: req.network_id,
         name: req.name,
         mac_address: req.mac_address,
@@ -453,6 +475,7 @@ pub async fn create_nic(
 }
 
 /// Delete a NIC
+#[utoipa::path(delete, path = "/v1/nics/{id}", params(("id" = String, Path)), responses((status = 204), (status = 404, body = ApiError)), tag = "nics")]
 pub async fn delete_nic(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -462,42 +485,41 @@ pub async fn delete_nic(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Attach a NIC to a VM (stub)
+/// Attach a NIC to a VM
+#[utoipa::path(post, path = "/v1/nics/{id}/attach", params(("id" = String, Path)), request_body = UiAttachNicRequest, responses((status = 200, body = UiNic), (status = 404, body = ApiError), (status = 409, body = ApiError)), tag = "nics")]
 pub async fn attach_nic(
-    State(_state): State<Arc<AppState>>,
-    Path(_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UiAttachNicRequest>,
 ) -> Result<Json<UiNic>, ApiError> {
-    // TODO: Implement NIC attach
-    Err(ApiError {
-        error: "Not implemented".to_string(),
-        code: 501,
-    })
+    let nic = state.store.attach_nic(&id, &req.vm_id).await?;
+    Ok(Json(UiNic::from(nic)))
 }
 
-/// Detach a NIC from a VM (stub)
+/// Detach a NIC from a VM
+#[utoipa::path(post, path = "/v1/nics/{id}/detach", params(("id" = String, Path)), responses((status = 200, body = UiNic), (status = 404, body = ApiError)), tag = "nics")]
 pub async fn detach_nic(
-    State(_state): State<Arc<AppState>>,
-    Path(_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
 ) -> Result<Json<UiNic>, ApiError> {
-    // TODO: Implement NIC detach
-    Err(ApiError {
-        error: "Not implemented".to_string(),
-        code: 501,
-    })
+    let nic = state.store.detach_nic(&id).await?;
+    Ok(Json(UiNic::from(nic)))
 }
 
 // =============================================================================
 // Storage Handlers
 // =============================================================================
 
-/// List all volumes
+/// List volumes in a project
+#[utoipa::path(get, path = "/v1/projects/{project_id}/volumes", params(("project_id" = String, Path), ("node_id" = Option<String>, Query)), responses((status = 200, body = VolumeListResponse)), tag = "storage")]
 pub async fn list_volumes(
     State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
     Query(query): Query<ListVolumesQuery>,
 ) -> Result<Json<VolumeListResponse>, ApiError> {
     let volumes = state
         .store
-        .list_volumes(query.project_id.as_deref(), query.node_id.as_deref())
+        .list_volumes(Some(&project_id), query.node_id.as_deref())
         .await?;
     Ok(Json(VolumeListResponse {
         volumes: volumes.into_iter().map(UiVolume::from).collect(),
@@ -505,6 +527,7 @@ pub async fn list_volumes(
 }
 
 /// Get a volume by ID
+#[utoipa::path(get, path = "/v1/volumes/{id}", params(("id" = String, Path)), responses((status = 200, body = UiVolume), (status = 404, body = ApiError)), tag = "storage")]
 pub async fn get_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -519,12 +542,14 @@ pub async fn get_volume(
 }
 
 /// Create a new volume
+#[utoipa::path(post, path = "/v1/projects/{project_id}/volumes", params(("project_id" = String, Path)), request_body = UiCreateVolumeRequest, responses((status = 200, body = UiVolume), (status = 503, body = ApiError)), tag = "storage")]
 pub async fn create_volume(
     State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
     Json(req): Json<UiCreateVolumeRequest>,
 ) -> Result<Json<UiVolume>, ApiError> {
     let store_req = StoreCreateVolumeRequest {
-        project_id: req.project_id,
+        project_id,
         node_id: req.node_id,
         name: req.name,
         size_bytes: req.size_bytes,
@@ -537,6 +562,7 @@ pub async fn create_volume(
 }
 
 /// Delete a volume
+#[utoipa::path(delete, path = "/v1/volumes/{id}", params(("id" = String, Path)), responses((status = 204), (status = 404, body = ApiError)), tag = "storage")]
 pub async fn delete_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -547,6 +573,7 @@ pub async fn delete_volume(
 }
 
 /// Resize a volume
+#[utoipa::path(post, path = "/v1/volumes/{id}/resize", params(("id" = String, Path)), request_body = UiResizeVolumeRequest, responses((status = 200, body = UiVolume), (status = 404, body = ApiError)), tag = "storage")]
 pub async fn resize_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -562,6 +589,7 @@ pub async fn resize_volume(
 }
 
 /// Create a snapshot on a volume
+#[utoipa::path(post, path = "/v1/volumes/{id}/snapshots", params(("id" = String, Path)), request_body = UiCreateSnapshotRequest, responses((status = 200, body = UiVolume), (status = 404, body = ApiError)), tag = "storage")]
 pub async fn create_snapshot(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -574,22 +602,27 @@ pub async fn create_snapshot(
     Ok(Json(UiVolume::from(data)))
 }
 
-/// List all templates
+/// List templates in a project
+#[utoipa::path(get, path = "/v1/projects/{project_id}/templates", params(("project_id" = String, Path)), responses((status = 200, body = TemplateListResponse)), tag = "storage")]
 pub async fn list_templates(
     State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<TemplateListResponse>, ApiError> {
-    let templates = state.store.list_templates(None).await?;
+    let templates = state.store.list_templates_by_project(&project_id).await?;
     Ok(Json(TemplateListResponse {
         templates: templates.into_iter().map(UiTemplate::from).collect(),
     }))
 }
 
 /// Import a template
+#[utoipa::path(post, path = "/v1/projects/{project_id}/templates/import", params(("project_id" = String, Path)), request_body = UiImportTemplateRequest, responses((status = 200, body = UiImportJob), (status = 503, body = ApiError)), tag = "storage")]
 pub async fn import_template(
     State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
     Json(req): Json<UiImportTemplateRequest>,
 ) -> Result<Json<UiImportJob>, ApiError> {
     let store_req = StoreImportTemplateRequest {
+        project_id,
         node_id: req.node_id,
         name: req.name,
         url: req.url,
@@ -601,7 +634,8 @@ pub async fn import_template(
     Ok(Json(UiImportJob::from(data)))
 }
 
-/// Get an import job by ID
+/// Get an import job by ID (global)
+#[utoipa::path(get, path = "/v1/import-jobs/{id}", params(("id" = String, Path)), responses((status = 200, body = UiImportJob), (status = 404, body = ApiError)), tag = "storage")]
 pub async fn get_import_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -615,25 +649,44 @@ pub async fn get_import_job(
     }
 }
 
-/// Get storage pool statistics (mock for now)
+/// Get storage pool statistics (global)
+#[utoipa::path(get, path = "/v1/pool", responses((status = 200, body = UiPoolStats)), tag = "storage")]
 pub async fn get_pool_stats(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<UiPoolStats>, ApiError> {
-    // Mock stats for now
+    let nodes = state.store.list_nodes().await?;
+    let mut total_bytes: u64 = 0;
+    let mut available_bytes: u64 = 0;
+    for node in &nodes {
+        total_bytes += node.resources.storage_gb * 1_073_741_824;
+        available_bytes += node.resources.available_storage_gb * 1_073_741_824;
+    }
+    let used_bytes = total_bytes.saturating_sub(available_bytes);
+    let compression_ratio = if used_bytes > 0 {
+        let volumes = state.store.list_volumes(None, None).await?;
+        let total_ratio: f64 = volumes.iter().map(|v| v.compression_ratio).sum::<f64>();
+        if volumes.is_empty() {
+            1.0
+        } else {
+            total_ratio / volumes.len() as f64
+        }
+    } else {
+        1.0
+    };
     Ok(Json(UiPoolStats {
-        total_bytes: 1_000_000_000_000, // 1TB
-        used_bytes: 250_000_000_000,    // 250GB
-        available_bytes: 750_000_000_000,
-        compression_ratio: 1.5,
+        total_bytes,
+        used_bytes,
+        available_bytes,
+        compression_ratio,
     }))
 }
 
 // =============================================================================
-// Logs Handlers (stub)
+// Logs Handlers (global)
 // =============================================================================
 
 /// Query parameters for logs
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryLogsParams {
     #[serde(default)]
@@ -643,7 +696,7 @@ pub struct QueryLogsParams {
 }
 
 /// Log entry for UI
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiLogEntry {
     pub id: String,
@@ -654,26 +707,106 @@ pub struct UiLogEntry {
 }
 
 /// Response wrapper for logs
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LogsResponse {
     pub logs: Vec<UiLogEntry>,
 }
 
-/// Query logs (stub)
+/// Query logs via mvirt-log
+#[utoipa::path(get, path = "/v1/logs", params(("object_id" = Option<String>, Query), ("limit" = Option<u32>, Query)), responses((status = 200, body = LogsResponse), (status = 503, body = ApiError)), tag = "logs")]
 pub async fn query_logs(
-    State(_state): State<Arc<AppState>>,
-    Query(_params): Query<QueryLogsParams>,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<QueryLogsParams>,
 ) -> Result<Json<LogsResponse>, ApiError> {
-    // Stub - return empty logs
-    Ok(Json(LogsResponse { logs: vec![] }))
+    use mvirt_log::{LogServiceClient, QueryRequest};
+
+    let mut client = LogServiceClient::connect(state.log_endpoint.clone())
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to connect to log service: {}", e),
+            code: 503,
+        })?;
+
+    let req = QueryRequest {
+        object_id: params.object_id,
+        start_time_ns: None,
+        end_time_ns: None,
+        limit: params.limit.unwrap_or(100),
+        follow: false,
+    };
+
+    let mut stream = client
+        .query(req)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Log query failed: {}", e),
+            code: 500,
+        })?
+        .into_inner();
+
+    let mut logs = Vec::new();
+    while let Some(entry) = stream.message().await.map_err(|e| ApiError {
+        error: format!("Log stream error: {}", e),
+        code: 500,
+    })? {
+        logs.push(UiLogEntry {
+            id: entry.id,
+            timestamp: chrono::DateTime::from_timestamp_nanos(entry.timestamp_ns).to_rfc3339(),
+            message: entry.message,
+            level: format!(
+                "{:?}",
+                mvirt_log::LogLevel::try_from(entry.level).unwrap_or(mvirt_log::LogLevel::Info)
+            ),
+            component: entry.component,
+        });
+    }
+
+    Ok(Json(LogsResponse { logs }))
 }
 
-/// SSE stream for log events (stub)
+/// SSE stream for log events via mvirt-log
 pub async fn log_events(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let stream = stream::empty();
+    use mvirt_log::{LogServiceClient, QueryRequest};
+
+    let endpoint = state.log_endpoint.clone();
+    let stream = async_stream::try_stream! {
+        let mut client = LogServiceClient::connect(endpoint).await
+            .map_err(|_| std::io::Error::other("connection failed"))?;
+
+        let req = QueryRequest {
+            object_id: None,
+            start_time_ns: None,
+            end_time_ns: None,
+            limit: 0,
+            follow: true,
+        };
+
+        let mut log_stream = client.query(req).await
+            .map_err(|_| std::io::Error::other("query failed"))?
+            .into_inner();
+
+        while let Some(entry) = log_stream.message().await
+            .map_err(|_| std::io::Error::other("stream error"))? {
+            let log_entry = UiLogEntry {
+                id: entry.id,
+                timestamp: chrono::DateTime::from_timestamp_nanos(entry.timestamp_ns).to_rfc3339(),
+                message: entry.message,
+                level: format!("{:?}", mvirt_log::LogLevel::try_from(entry.level).unwrap_or(mvirt_log::LogLevel::Info)),
+                component: entry.component,
+            };
+            yield SseEvent::default()
+                .json_data(&log_entry)
+                .unwrap_or_else(|_| SseEvent::default().data("error"));
+        }
+    };
+
+    let stream = stream
+        .filter_map(|result: Result<SseEvent, std::io::Error>| std::future::ready(result.ok()))
+        .map(Ok);
+
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(30))
@@ -690,7 +823,6 @@ pub async fn console_ws(
     State(_state): State<Arc<AppState>>,
     Path(_id): Path<String>,
 ) -> impl IntoResponse {
-    // Stub - return not implemented
     (
         StatusCode::NOT_IMPLEMENTED,
         "Console WebSocket not implemented",
@@ -698,135 +830,114 @@ pub async fn console_ws(
 }
 
 // =============================================================================
-// Security Group Handlers (in-memory store)
+// Security Group Handlers
 // =============================================================================
 
-use std::sync::{LazyLock, Mutex};
-
-static SECURITY_GROUPS: LazyLock<Mutex<Vec<UiSecurityGroup>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
-
-/// List all security groups
+/// List security groups in a project
+#[utoipa::path(get, path = "/v1/projects/{project_id}/security-groups", params(("project_id" = String, Path)), responses((status = 200, body = SecurityGroupListResponse)), tag = "security-groups")]
 pub async fn list_security_groups(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<SecurityGroupListResponse>, ApiError> {
-    let groups = SECURITY_GROUPS.lock().unwrap();
+    let groups = state
+        .store
+        .list_security_groups(Some(&project_id))
+        .await?;
     Ok(Json(SecurityGroupListResponse {
-        security_groups: groups.clone(),
+        security_groups: groups.into_iter().map(UiSecurityGroup::from).collect(),
     }))
 }
 
 /// Get a security group by ID
+#[utoipa::path(get, path = "/v1/security-groups/{id}", params(("id" = String, Path)), responses((status = 200, body = UiSecurityGroup), (status = 404, body = ApiError)), tag = "security-groups")]
 pub async fn get_security_group(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<UiSecurityGroup>, ApiError> {
-    let groups = SECURITY_GROUPS.lock().unwrap();
-    match groups.iter().find(|g| g.id == id) {
-        Some(group) => Ok(Json(group.clone())),
-        None => Err(ApiError {
-            error: "Security group not found".to_string(),
-            code: 404,
-        }),
-    }
+    let sg = state.store.get_security_group(&id).await?.ok_or(ApiError {
+        error: "Security group not found".to_string(),
+        code: 404,
+    })?;
+    Ok(Json(UiSecurityGroup::from(sg)))
 }
 
 /// Create a new security group
+#[utoipa::path(post, path = "/v1/projects/{project_id}/security-groups", params(("project_id" = String, Path)), request_body = UiCreateSecurityGroupRequest, responses((status = 200, body = UiSecurityGroup), (status = 409, body = ApiError)), tag = "security-groups")]
 pub async fn create_security_group(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
     Json(req): Json<UiCreateSecurityGroupRequest>,
 ) -> Result<Json<UiSecurityGroup>, ApiError> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let group = UiSecurityGroup {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: req.name.clone(),
-        description: req.description,
-        rules: Vec::new(),
-        nic_count: 0,
-        created_at: now.clone(),
-        updated_at: now,
-    };
+    use crate::store::CreateSecurityGroupRequest;
 
-    {
-        let mut groups = SECURITY_GROUPS.lock().unwrap();
-        groups.push(group.clone());
-    }
+    let sg = state
+        .store
+        .create_security_group(CreateSecurityGroupRequest {
+            project_id,
+            name: req.name,
+            description: req.description,
+        })
+        .await?;
 
-    Ok(Json(group))
+    state.audit.security_group_created(&sg.id, &sg.name);
+
+    Ok(Json(UiSecurityGroup::from(sg)))
 }
 
 /// Delete a security group
+#[utoipa::path(delete, path = "/v1/security-groups/{id}", params(("id" = String, Path)), responses((status = 204), (status = 404, body = ApiError), (status = 409, body = ApiError)), tag = "security-groups")]
 pub async fn delete_security_group(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let mut groups = SECURITY_GROUPS.lock().unwrap();
-    let initial_len = groups.len();
-    groups.retain(|g| g.id != id);
+    state.store.delete_security_group(&id).await?;
 
-    if groups.len() == initial_len {
-        return Err(ApiError {
-            error: "Security group not found".to_string(),
-            code: 404,
-        });
-    }
+    state.audit.security_group_deleted(&id);
 
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Create a rule in a security group
+#[utoipa::path(post, path = "/v1/security-groups/{id}/rules", params(("id" = String, Path)), request_body = UiCreateSecurityGroupRuleRequest, responses((status = 200, body = UiSecurityGroup), (status = 404, body = ApiError)), tag = "security-groups")]
 pub async fn create_security_group_rule(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(sg_id): Path<String>,
     Json(req): Json<UiCreateSecurityGroupRuleRequest>,
-) -> Result<Json<UiSecurityGroupRule>, ApiError> {
-    let mut groups = SECURITY_GROUPS.lock().unwrap();
-    let group = groups.iter_mut().find(|g| g.id == sg_id).ok_or(ApiError {
-        error: "Security group not found".to_string(),
-        code: 404,
-    })?;
+) -> Result<Json<UiSecurityGroup>, ApiError> {
+    use crate::store::CreateSecurityGroupRuleRequest;
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let rule = UiSecurityGroupRule {
-        id: uuid::Uuid::new_v4().to_string(),
-        security_group_id: sg_id.clone(),
-        direction: req.direction,
-        protocol: req.protocol,
-        port_start: req.port_start,
-        port_end: req.port_end,
-        cidr: req.cidr,
-        description: req.description,
-        created_at: now.clone(),
-    };
+    let sg = state
+        .store
+        .create_security_group_rule(
+            &sg_id,
+            CreateSecurityGroupRuleRequest {
+                direction: req.direction.to_command_direction(),
+                protocol: req.protocol.to_protocol_string(),
+                port_range_start: req.port_start,
+                port_range_end: req.port_end,
+                cidr: req.cidr,
+                description: req.description,
+            },
+        )
+        .await?;
 
-    group.rules.push(rule.clone());
-    group.updated_at = now;
+    state.audit.security_group_rule_created(&sg.id);
 
-    Ok(Json(rule))
+    Ok(Json(UiSecurityGroup::from(sg)))
 }
 
 /// Delete a rule from a security group
+#[utoipa::path(delete, path = "/v1/security-groups/{sg_id}/rules/{rule_id}", params(("sg_id" = String, Path), ("rule_id" = String, Path)), responses((status = 204), (status = 404, body = ApiError)), tag = "security-groups")]
 pub async fn delete_security_group_rule(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path((sg_id, rule_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let mut groups = SECURITY_GROUPS.lock().unwrap();
-    let group = groups.iter_mut().find(|g| g.id == sg_id).ok_or(ApiError {
-        error: "Security group not found".to_string(),
-        code: 404,
-    })?;
+    state
+        .store
+        .delete_security_group_rule(&sg_id, &rule_id)
+        .await?;
 
-    let initial_len = group.rules.len();
-    group.rules.retain(|r| r.id != rule_id);
-
-    if group.rules.len() == initial_len {
-        return Err(ApiError {
-            error: "Rule not found".to_string(),
-            code: 404,
-        });
-    }
-
-    group.updated_at = chrono::Utc::now().to_rfc3339();
+    state.audit.security_group_rule_deleted(&sg_id, &rule_id);
 
     Ok(StatusCode::NO_CONTENT)
 }

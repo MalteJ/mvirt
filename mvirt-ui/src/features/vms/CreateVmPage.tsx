@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { useCreateVm } from '@/hooks/queries'
 import { useTemplates } from '@/hooks/queries/useStorage'
-import { useProject } from '@/hooks/useProject'
+import { useProjectId } from '@/hooks/useProjectId'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -18,9 +18,9 @@ import {
 
 export function CreateVmPage() {
   const navigate = useNavigate()
-  const createVm = useCreateVm()
-  const { data: templates } = useTemplates()
-  const { currentProject } = useProject()
+  const projectId = useProjectId()
+  const createVm = useCreateVm(projectId)
+  const { data: templates } = useTemplates(projectId)
 
   const [name, setName] = useState('')
   const [vcpus, setVcpus] = useState('2')
@@ -29,11 +29,9 @@ export function CreateVmPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!currentProject) return
     createVm.mutate(
       {
         name,
-        projectId: currentProject.id,
         config: {
           vcpus: parseInt(vcpus),
           memoryMb: parseInt(memoryMb),
@@ -130,7 +128,7 @@ export function CreateVmPage() {
             </div>
 
             <div className="flex gap-2 pt-4">
-              <Button type="submit" disabled={createVm.isPending || !name || !currentProject}>
+              <Button type="submit" disabled={createVm.isPending || !name}>
                 {createVm.isPending ? 'Creating...' : 'Create VM'}
               </Button>
               <Button type="button" variant="outline" onClick={() => navigate('/vms')}>

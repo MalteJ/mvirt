@@ -68,6 +68,7 @@ impl TestServer {
             store,
             audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
+            log_endpoint: String::new(),
         });
 
         // Create router
@@ -106,7 +107,7 @@ impl TestServer {
 
     /// Get base URL for the REST API.
     pub fn base_url(&self) -> String {
-        format!("http://{}/api/v1", self.addr)
+        format!("http://{}/v1", self.addr)
     }
 
     /// Perform a GET request.

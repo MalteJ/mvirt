@@ -262,12 +262,13 @@ async fn test_log_replication() {
     let network_id = uuid::Uuid::new_v4().to_string();
     let response = leader
         .write(Command::CreateNetwork {
+            project_id: "test-project".to_string(),
             request_id: "req-1".to_string(),
             id: network_id.clone(),
             timestamp: Utc::now().to_rfc3339(),
             name: "test-network".to_string(),
             ipv4_enabled: true,
-            ipv4_subnet: Some("10.0.0.0/24".to_string()),
+            ipv4_prefix: Some("10.0.0.0/24".to_string()),
             ipv6_enabled: false,
             ipv6_prefix: None,
             dns_servers: vec![],
@@ -356,12 +357,13 @@ async fn test_read_from_follower() {
     let network_id = uuid::Uuid::new_v4().to_string();
     let response = leader
         .write(Command::CreateNetwork {
+            project_id: "test-project".to_string(),
             request_id: "req-follower-read".to_string(),
             id: network_id.clone(),
             timestamp: Utc::now().to_rfc3339(),
             name: "follower-read-test".to_string(),
             ipv4_enabled: true,
-            ipv4_subnet: Some("10.1.0.0/24".to_string()),
+            ipv4_prefix: Some("10.1.0.0/24".to_string()),
             ipv6_enabled: false,
             ipv6_prefix: None,
             dns_servers: vec!["8.8.8.8".to_string()],
@@ -396,7 +398,7 @@ async fn test_read_from_follower() {
         .expect("Network not found on follower");
 
     assert_eq!(network.name, "follower-read-test");
-    assert_eq!(network.ipv4_subnet, Some("10.1.0.0/24".to_string()));
+    assert_eq!(network.ipv4_prefix, Some("10.1.0.0/24".to_string()));
     assert!(network.is_public);
     assert_eq!(network.dns_servers, vec!["8.8.8.8".to_string()]);
 
@@ -425,12 +427,13 @@ async fn test_majority_write_during_minority_failure() {
     let before_id = uuid::Uuid::new_v4().to_string();
     let response = leader
         .write(Command::CreateNetwork {
+            project_id: "test-project".to_string(),
             request_id: "req-before-failure".to_string(),
             id: before_id.clone(),
             timestamp: Utc::now().to_rfc3339(),
             name: "before-failure".to_string(),
             ipv4_enabled: true,
-            ipv4_subnet: None,
+            ipv4_prefix: None,
             ipv6_enabled: false,
             ipv6_prefix: None,
             dns_servers: vec![],
@@ -514,12 +517,13 @@ async fn test_majority_write_during_minority_failure() {
     let during_id = uuid::Uuid::new_v4().to_string();
     let response = leader
         .write(Command::CreateNetwork {
+            project_id: "test-project".to_string(),
             request_id: "req-during-failure".to_string(),
             id: during_id.clone(),
             timestamp: Utc::now().to_rfc3339(),
             name: "during-failure".to_string(),
             ipv4_enabled: true,
-            ipv4_subnet: Some("192.168.0.0/24".to_string()),
+            ipv4_prefix: Some("192.168.0.0/24".to_string()),
             ipv6_enabled: false,
             ipv6_prefix: None,
             dns_servers: vec![],
@@ -592,12 +596,13 @@ async fn test_write_or_forward() {
     let network_id = uuid::Uuid::new_v4().to_string();
     let response = follower
         .write_or_forward(Command::CreateNetwork {
+            project_id: "test-project".to_string(),
             request_id: "req-forwarded".to_string(),
             id: network_id.clone(),
             timestamp: Utc::now().to_rfc3339(),
             name: "forwarded-write".to_string(),
             ipv4_enabled: true,
-            ipv4_subnet: Some("172.16.0.0/16".to_string()),
+            ipv4_prefix: Some("172.16.0.0/16".to_string()),
             ipv6_enabled: false,
             ipv6_prefix: None,
             dns_servers: vec![],

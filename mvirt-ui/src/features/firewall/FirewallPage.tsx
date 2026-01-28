@@ -41,8 +41,8 @@ import { SecurityGroup, RuleDirection } from '@/types'
 export function FirewallPage() {
   const projectId = useProjectId()
   const navigate = useNavigate()
-  const { data: securityGroups, isLoading, error } = useSecurityGroups()
-  const createSecurityGroup = useCreateSecurityGroup()
+  const { data: securityGroups, isLoading, error } = useSecurityGroups(projectId)
+  const createSecurityGroup = useCreateSecurityGroup(projectId)
   const deleteSecurityGroup = useDeleteSecurityGroup()
 
   // Create Security Group dialog

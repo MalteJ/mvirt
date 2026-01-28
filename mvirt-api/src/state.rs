@@ -8,8 +8,8 @@ use std::num::NonZeroUsize;
 
 use crate::command::{
     Command, ImportJobData, ImportJobState, NetworkData, NicData, NicStateData, NodeData,
-    NodeStatus, ProjectData, Response, SnapshotData, TemplateData, VmData, VmPhase, VmStatus,
-    VolumeData,
+    NodeStatus, ProjectData, Response, SecurityGroupData, SecurityGroupRuleData, SnapshotData,
+    TemplateData, VmData, VmPhase, VmStatus, VolumeData,
 };
 use crate::store::Event;
 
@@ -24,6 +24,7 @@ pub struct ApiState {
     pub volumes: HashMap<String, VolumeData>,
     pub templates: HashMap<String, TemplateData>,
     pub import_jobs: HashMap<String, ImportJobData>,
+    pub security_groups: HashMap<String, SecurityGroupData>,
     /// Idempotency cache for request deduplication
     #[serde(skip)]
     applied_requests: Option<LruCache<String, Response>>,
@@ -40,6 +41,7 @@ impl Default for ApiState {
             volumes: HashMap::new(),
             templates: HashMap::new(),
             import_jobs: HashMap::new(),
+            security_groups: HashMap::new(),
             applied_requests: Some(LruCache::new(NonZeroUsize::new(1000).unwrap())),
         }
     }
@@ -92,6 +94,14 @@ impl ApiState {
         self.networks.values().collect()
     }
 
+    /// List networks by project
+    pub fn list_networks_by_project(&self, project_id: &str) -> Vec<&NetworkData> {
+        self.networks
+            .values()
+            .filter(|n| n.project_id == project_id)
+            .collect()
+    }
+
     /// Get a NIC by ID
     pub fn get_nic(&self, id: &str) -> Option<&NicData> {
         self.nics.get(id)
@@ -112,6 +122,14 @@ impl ApiState {
                 .collect(),
             None => self.nics.values().collect(),
         }
+    }
+
+    /// List NICs by project
+    pub fn list_nics_by_project(&self, project_id: &str) -> Vec<&NicData> {
+        self.nics
+            .values()
+            .filter(|n| n.project_id == project_id)
+            .collect()
     }
 
     // =========================================================================
@@ -232,6 +250,14 @@ impl ApiState {
         }
     }
 
+    /// List templates by project
+    pub fn list_templates_by_project(&self, project_id: &str) -> Vec<&TemplateData> {
+        self.templates
+            .values()
+            .filter(|t| t.project_id == project_id)
+            .collect()
+    }
+
     // =========================================================================
     // Import job queries
     // =========================================================================
@@ -247,6 +273,25 @@ impl ApiState {
             Some(s) => self.import_jobs.values().filter(|j| j.state == s).collect(),
             None => self.import_jobs.values().collect(),
         }
+    }
+
+    // =========================================================================
+    // Security Group queries
+    // =========================================================================
+
+    pub fn get_security_group(&self, id: &str) -> Option<&SecurityGroupData> {
+        self.security_groups.get(id)
+    }
+
+    pub fn list_security_groups(&self) -> Vec<&SecurityGroupData> {
+        self.security_groups.values().collect()
+    }
+
+    pub fn list_security_groups_by_project(&self, project_id: &str) -> Vec<&SecurityGroupData> {
+        self.security_groups
+            .values()
+            .filter(|sg| sg.project_id == project_id)
+            .collect()
     }
 
     /// Ensure the idempotency cache is initialized (after deserialization)
@@ -533,6 +578,19 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
+                // Check security group exists (if referenced)
+                if let Some(ref sg_id) = security_group_id
+                    && !self.security_groups.contains_key(sg_id)
+                {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Security group '{}' not found", sg_id),
+                        },
+                        vec![],
+                    );
+                }
+
                 // Check for duplicate ID (idempotency)
                 if self.nics.contains_key(&id) {
                     return (Response::Nic(self.nics.get(&id).unwrap().clone()), vec![]);
@@ -553,6 +611,7 @@ impl StateMachine<Command, Response> for ApiState {
                     routed_ipv4_prefixes,
                     routed_ipv6_prefixes,
                     security_group_id,
+                    vm_id: None,
                     socket_path: format!("/run/mvirt-net/nic-{}.sock", id),
                     state: NicStateData::Created,
                     created_at: timestamp.clone(),
@@ -564,6 +623,13 @@ impl StateMachine<Command, Response> for ApiState {
                 // Update network NIC count
                 if let Some(network) = self.networks.get_mut(&network_id) {
                     network.nic_count += 1;
+                }
+
+                // Update security group NIC count
+                if let Some(ref sg_id) = nic.security_group_id
+                    && let Some(sg) = self.security_groups.get_mut(sg_id)
+                {
+                    sg.nic_count += 1;
                 }
 
                 (Response::Nic(nic.clone()), vec![Event::NicCreated(nic)])
@@ -606,10 +672,88 @@ impl StateMachine<Command, Response> for ApiState {
                     if let Some(network) = self.networks.get_mut(&nic.network_id) {
                         network.nic_count = network.nic_count.saturating_sub(1);
                     }
+                    // Update security group NIC count
+                    if let Some(ref sg_id) = nic.security_group_id
+                        && let Some(sg) = self.security_groups.get_mut(sg_id)
+                    {
+                        sg.nic_count = sg.nic_count.saturating_sub(1);
+                    }
                     let network_id = nic.network_id.clone();
                     (
                         Response::Deleted { id: id.clone() },
                         vec![Event::NicDeleted { id, network_id }],
+                    )
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("NIC '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
+
+            Command::AttachNic {
+                id,
+                timestamp,
+                vm_id,
+                ..
+            } => match self.nics.get(&id).cloned() {
+                Some(old_nic) => {
+                    if old_nic.vm_id.is_some() {
+                        return (
+                            Response::Error {
+                                code: 409,
+                                message: format!("NIC '{}' is already attached to a VM", id),
+                            },
+                            vec![],
+                        );
+                    }
+                    // Verify VM exists
+                    if !self.vms.contains_key(&vm_id) {
+                        return (
+                            Response::Error {
+                                code: 404,
+                                message: format!("VM '{}' not found", vm_id),
+                            },
+                            vec![],
+                        );
+                    }
+                    let nic = self.nics.get_mut(&id).unwrap();
+                    nic.vm_id = Some(vm_id);
+                    nic.updated_at = timestamp;
+                    let new_nic = nic.clone();
+                    (
+                        Response::Nic(new_nic.clone()),
+                        vec![Event::NicUpdated {
+                            id,
+                            old: old_nic,
+                            new: new_nic,
+                        }],
+                    )
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("NIC '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
+
+            Command::DetachNic { id, timestamp, .. } => match self.nics.get(&id).cloned() {
+                Some(old_nic) => {
+                    let nic = self.nics.get_mut(&id).unwrap();
+                    nic.vm_id = None;
+                    nic.updated_at = timestamp;
+                    let new_nic = nic.clone();
+                    (
+                        Response::Nic(new_nic.clone()),
+                        vec![Event::NicUpdated {
+                            id,
+                            old: old_nic,
+                            new: new_nic,
+                        }],
                     )
                 }
                 None => (
@@ -996,6 +1140,7 @@ impl StateMachine<Command, Response> for ApiState {
             Command::CreateTemplate {
                 id,
                 timestamp,
+                project_id,
                 node_id,
                 name,
                 size_bytes,
@@ -1022,6 +1167,7 @@ impl StateMachine<Command, Response> for ApiState {
 
                 let template = TemplateData {
                     id: id.clone(),
+                    project_id,
                     node_id,
                     name,
                     size_bytes,
@@ -1039,6 +1185,7 @@ impl StateMachine<Command, Response> for ApiState {
             Command::CreateImportJob {
                 id,
                 timestamp,
+                project_id,
                 node_id,
                 template_name,
                 url,
@@ -1055,6 +1202,7 @@ impl StateMachine<Command, Response> for ApiState {
 
                 let job = ImportJobData {
                     id: id.clone(),
+                    project_id,
                     node_id,
                     template_name,
                     url,
@@ -1089,6 +1237,167 @@ impl StateMachine<Command, Response> for ApiState {
                     Response::Error {
                         code: 404,
                         message: format!("Import job '{}' not found", id),
+                    },
+                    vec![],
+                ),
+            },
+
+            // =================================================================
+            // Security Group Commands
+            // =================================================================
+            Command::CreateSecurityGroup {
+                id,
+                timestamp,
+                project_id,
+                name,
+                description,
+                ..
+            } => {
+                // Idempotent: return existing if same ID
+                if let Some(existing) = self.security_groups.get(&id) {
+                    return (Response::SecurityGroup(existing.clone()), vec![]);
+                }
+
+                // Duplicate name check within project
+                if self
+                    .security_groups
+                    .values()
+                    .any(|sg| sg.project_id == project_id && sg.name == name)
+                {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Security group '{}' already exists in project", name),
+                        },
+                        vec![],
+                    );
+                }
+
+                // FK: project must exist
+                if !self.projects.contains_key(&project_id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Project '{}' not found", project_id),
+                        },
+                        vec![],
+                    );
+                }
+
+                let sg = SecurityGroupData {
+                    id: id.clone(),
+                    project_id,
+                    name,
+                    description,
+                    rules: vec![],
+                    nic_count: 0,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                };
+
+                let sg_id = id.clone();
+                self.security_groups.insert(id, sg.clone());
+                (
+                    Response::SecurityGroup(sg),
+                    vec![Event::SecurityGroupCreated { id: sg_id }],
+                )
+            }
+
+            Command::DeleteSecurityGroup { id, .. } => {
+                // Check if any NICs reference this security group
+                let nic_refs = self
+                    .nics
+                    .values()
+                    .any(|n| n.security_group_id.as_deref() == Some(&id));
+                if nic_refs {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Security group '{}' is still referenced by NICs", id),
+                        },
+                        vec![],
+                    );
+                }
+
+                match self.security_groups.remove(&id) {
+                    Some(_) => (
+                        Response::Deleted { id: id.clone() },
+                        vec![Event::SecurityGroupDeleted { id }],
+                    ),
+                    None => (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Security group '{}' not found", id),
+                        },
+                        vec![],
+                    ),
+                }
+            }
+
+            Command::CreateSecurityGroupRule {
+                id,
+                timestamp,
+                security_group_id,
+                direction,
+                protocol,
+                port_range_start,
+                port_range_end,
+                cidr,
+                description,
+                ..
+            } => match self.security_groups.get_mut(&security_group_id) {
+                Some(sg) => {
+                    // Idempotent: return if rule ID already exists
+                    if sg.rules.iter().any(|r| r.id == id) {
+                        return (Response::SecurityGroup(sg.clone()), vec![]);
+                    }
+
+                    let rule = SecurityGroupRuleData {
+                        id,
+                        direction,
+                        protocol,
+                        port_range_start,
+                        port_range_end,
+                        cidr,
+                        description,
+                        created_at: timestamp.clone(),
+                    };
+                    sg.rules.push(rule);
+                    sg.updated_at = timestamp;
+                    (Response::SecurityGroup(sg.clone()), vec![])
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("Security group '{}' not found", security_group_id),
+                    },
+                    vec![],
+                ),
+            },
+
+            Command::DeleteSecurityGroupRule {
+                security_group_id,
+                rule_id,
+                ..
+            } => match self.security_groups.get_mut(&security_group_id) {
+                Some(sg) => {
+                    let before = sg.rules.len();
+                    sg.rules.retain(|r| r.id != rule_id);
+                    if sg.rules.len() == before {
+                        return (
+                            Response::Error {
+                                code: 404,
+                                message: format!("Rule '{}' not found", rule_id),
+                            },
+                            vec![],
+                        );
+                    }
+                    (Response::SecurityGroup(sg.clone()), vec![])
+                }
+                None => (
+                    Response::Error {
+                        code: 404,
+                        message: format!("Security group '{}' not found", security_group_id),
                     },
                     vec![],
                 ),
@@ -1953,6 +2262,7 @@ mod tests {
             request_id: request_id.to_string(),
             id: id.to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
+            project_id: "test-project".to_string(),
             node_id: node_id.to_string(),
             name: name.to_string(),
             size_bytes: 1_000_000_000,
@@ -2106,6 +2416,7 @@ mod tests {
             request_id: "req-1".to_string(),
             id: "job-1".to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
+            project_id: "test-project".to_string(),
             node_id: "node-1".to_string(),
             template_name: "ubuntu-22.04".to_string(),
             url: "https://example.com/ubuntu.qcow2".to_string(),
@@ -2137,6 +2448,7 @@ mod tests {
                 request_id: "req-1".to_string(),
                 id: "job-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
+                project_id: "test-project".to_string(),
                 node_id: "node-1".to_string(),
                 template_name: "ubuntu".to_string(),
                 url: "https://example.com/ubuntu.qcow2".to_string(),
@@ -2174,6 +2486,7 @@ mod tests {
                 request_id: "req-1".to_string(),
                 id: "job-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
+                project_id: "test-project".to_string(),
                 node_id: "node-1".to_string(),
                 template_name: "ubuntu".to_string(),
                 url: "https://example.com/ubuntu.qcow2".to_string(),
@@ -2211,6 +2524,7 @@ mod tests {
                 request_id: "req-1".to_string(),
                 id: "job-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
+                project_id: "test-project".to_string(),
                 node_id: "node-1".to_string(),
                 template_name: "ubuntu".to_string(),
                 url: "https://example.com/ubuntu.qcow2".to_string(),

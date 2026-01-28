@@ -229,6 +229,39 @@ impl ApiAuditLogger {
     }
 
     // Template events
+    // Security group events
+    pub fn security_group_created(&self, sg_id: &str, sg_name: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Security group created: {} ({})", sg_name, sg_id),
+            vec![sg_id.to_string()],
+        );
+    }
+
+    pub fn security_group_deleted(&self, sg_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Security group deleted: {}", sg_id),
+            vec![sg_id.to_string()],
+        );
+    }
+
+    pub fn security_group_rule_created(&self, sg_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Security group rule created on: {}", sg_id),
+            vec![sg_id.to_string()],
+        );
+    }
+
+    pub fn security_group_rule_deleted(&self, sg_id: &str, rule_id: &str) {
+        self.log_async(
+            LogLevel::Audit,
+            format!("Security group rule {} deleted from: {}", rule_id, sg_id),
+            vec![sg_id.to_string()],
+        );
+    }
+
     pub fn template_import_started(&self, job_id: &str) {
         self.log_async(
             LogLevel::Audit,

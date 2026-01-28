@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ColumnDef } from '@tanstack/react-table'
 import { MoreHorizontal, Plus, Trash2, Link, Unlink } from 'lucide-react'
 import { useNetworks, useNics, useDeleteNetwork, useDeleteNic, useCreateNetwork, useCreateNic } from '@/hooks/queries'
-import { useProject } from '@/hooks/useProject'
+import { useProjectId } from '@/hooks/useProjectId'
 import { DataTable } from '@/components/data-display/DataTable'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -35,13 +35,13 @@ import { truncateId } from '@/lib/utils'
 import { Network, Nic, NicState } from '@/types'
 
 export function NetworkPage() {
-  const { data: networks, isLoading: loadingNetworks } = useNetworks()
-  const { data: nics, isLoading: loadingNics } = useNics()
-  const { currentProject } = useProject()
+  const projectId = useProjectId()
+  const { data: networks, isLoading: loadingNetworks } = useNetworks(projectId)
+  const { data: nics, isLoading: loadingNics } = useNics(projectId)
   const deleteNetwork = useDeleteNetwork()
   const deleteNic = useDeleteNic()
-  const createNetwork = useCreateNetwork()
-  const createNic = useCreateNic()
+  const createNetwork = useCreateNetwork(projectId)
+  const createNic = useCreateNic(projectId)
   const [activeTab, setActiveTab] = useState('networks')
 
   // Create Network Dialog state
@@ -57,11 +57,10 @@ export function NetworkPage() {
   const [nicMacAddress, setNicMacAddress] = useState('')
 
   const handleCreateNetwork = () => {
-    if (!networkName.trim() || !currentProject) return
+    if (!networkName.trim()) return
     createNetwork.mutate(
       {
         name: networkName.trim(),
-        projectId: currentProject.id,
         ipv4Subnet: ipv4Subnet.trim() || undefined,
         ipv6Prefix: ipv6Prefix.trim() || undefined,
       },
@@ -77,11 +76,10 @@ export function NetworkPage() {
   }
 
   const handleCreateNic = () => {
-    if (!nicName.trim() || !nicNetworkId || !currentProject) return
+    if (!nicName.trim() || !nicNetworkId) return
     createNic.mutate(
       {
         name: nicName.trim(),
-        projectId: currentProject.id,
         networkId: nicNetworkId,
         macAddress: nicMacAddress.trim() || undefined,
       },

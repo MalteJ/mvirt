@@ -8,24 +8,30 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use super::handlers::{self, AppState};
 use super::ui_handlers;
+use super::ui_types;
 
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "mvirt API Server",
         version = "0.1.0",
-        description = "REST API for the mvirt API Server. Provides distributed state management for Nodes, Networks, NICs, and VMs via Raft consensus.",
+        description = "REST API for the mvirt API Server. Provides distributed state management for Nodes, Networks, NICs, VMs, Volumes, Templates, Security Groups, and Projects via Raft consensus.",
         license(name = "MIT")
     ),
     tags(
         (name = "system", description = "System information"),
         (name = "cluster", description = "Cluster management"),
         (name = "nodes", description = "Hypervisor node registration and status"),
+        (name = "projects", description = "Project management"),
         (name = "networks", description = "Network CRUD operations"),
         (name = "nics", description = "NIC CRUD operations"),
-        (name = "vms", description = "VM CRUD operations")
+        (name = "vms", description = "VM CRUD and lifecycle operations"),
+        (name = "storage", description = "Volumes, templates, and storage pool"),
+        (name = "security-groups", description = "Security group and firewall rule management"),
+        (name = "logs", description = "Audit log queries")
     ),
     paths(
+        // System & Cluster (internal)
         handlers::get_version,
         handlers::get_cluster_info,
         handlers::get_membership,
@@ -36,24 +42,54 @@ use super::ui_handlers;
         handlers::list_hypervisor_nodes,
         handlers::update_hypervisor_node_status,
         handlers::deregister_hypervisor_node,
-        handlers::create_network,
-        handlers::get_network,
-        handlers::list_networks,
-        handlers::update_network,
-        handlers::delete_network,
-        handlers::create_nic,
-        handlers::get_nic,
-        handlers::list_nics,
-        handlers::update_nic,
-        handlers::delete_nic,
-        handlers::create_vm,
-        handlers::get_vm,
-        handlers::list_vms,
-        handlers::update_vm_spec,
-        handlers::update_vm_status,
-        handlers::delete_vm,
+        // Projects
+        ui_handlers::list_projects,
+        ui_handlers::get_project,
+        ui_handlers::create_project,
+        ui_handlers::delete_project,
+        // VMs (UI)
+        ui_handlers::list_vms,
+        ui_handlers::get_vm,
+        ui_handlers::create_vm,
+        ui_handlers::delete_vm,
+        ui_handlers::start_vm,
+        ui_handlers::stop_vm,
+        ui_handlers::kill_vm,
+        // Networks (UI)
+        ui_handlers::list_networks,
+        ui_handlers::get_network,
+        ui_handlers::create_network,
+        ui_handlers::delete_network,
+        // NICs (UI)
+        ui_handlers::list_nics,
+        ui_handlers::get_nic,
+        ui_handlers::create_nic,
+        ui_handlers::delete_nic,
+        ui_handlers::attach_nic,
+        ui_handlers::detach_nic,
+        // Storage
+        ui_handlers::list_volumes,
+        ui_handlers::get_volume,
+        ui_handlers::create_volume,
+        ui_handlers::delete_volume,
+        ui_handlers::resize_volume,
+        ui_handlers::create_snapshot,
+        ui_handlers::list_templates,
+        ui_handlers::import_template,
+        ui_handlers::get_import_job,
+        ui_handlers::get_pool_stats,
+        // Security Groups
+        ui_handlers::list_security_groups,
+        ui_handlers::get_security_group,
+        ui_handlers::create_security_group,
+        ui_handlers::delete_security_group,
+        ui_handlers::create_security_group_rule,
+        ui_handlers::delete_security_group_rule,
+        // Logs
+        ui_handlers::query_logs,
     ),
     components(schemas(
+        // Internal API schemas
         handlers::VersionInfo,
         handlers::ClusterInfo,
         handlers::NodeInfo,
@@ -70,24 +106,50 @@ use super::ui_handlers;
         handlers::UpdateNodeStatusRequest,
         handlers::DeregisterNodeResponse,
         handlers::ApiError,
-        handlers::CreateNetworkRequest,
-        handlers::Network,
-        handlers::UpdateNetworkRequest,
-        handlers::DeleteNetworkQuery,
-        handlers::DeleteNetworkResponse,
-        handlers::CreateNicRequest,
-        handlers::Nic,
-        handlers::ListNicsQuery,
-        handlers::UpdateNicRequest,
-        handlers::DeleteNicResponse,
-        handlers::CreateVmRequest,
-        handlers::UpdateVmSpecRequest,
-        handlers::UpdateVmStatusRequestBody,
-        handlers::VmSpecResponse,
-        handlers::VmStatusResponse,
-        handlers::Vm,
-        handlers::ListVmsQuery,
-        handlers::DeleteVmResponse,
+        // UI schemas - Projects
+        ui_types::UiProject,
+        ui_types::UiCreateProjectRequest,
+        ui_types::ProjectListResponse,
+        // UI schemas - VMs
+        ui_types::UiVm,
+        ui_types::UiVmState,
+        ui_types::UiVmConfig,
+        ui_types::UiCreateVmRequest,
+        ui_types::UiCreateVmConfig,
+        ui_types::VmListResponse,
+        // UI schemas - Networks
+        ui_types::UiNetwork,
+        ui_types::UiCreateNetworkRequest,
+        ui_types::NetworkListResponse,
+        // UI schemas - NICs
+        ui_types::UiNic,
+        ui_types::UiCreateNicRequest,
+        ui_types::UiAttachNicRequest,
+        ui_types::NicListResponse,
+        // UI schemas - Storage
+        ui_types::UiVolume,
+        ui_types::UiSnapshot,
+        ui_types::UiCreateVolumeRequest,
+        ui_types::UiResizeVolumeRequest,
+        ui_types::UiCreateSnapshotRequest,
+        ui_types::VolumeListResponse,
+        ui_types::UiTemplate,
+        ui_types::UiImportTemplateRequest,
+        ui_types::TemplateListResponse,
+        ui_types::UiImportJob,
+        ui_types::UiImportJobState,
+        ui_types::UiPoolStats,
+        // UI schemas - Security Groups
+        ui_types::UiSecurityGroup,
+        ui_types::UiSecurityGroupRule,
+        ui_types::UiRuleDirection,
+        ui_types::UiRuleProtocol,
+        ui_types::UiCreateSecurityGroupRequest,
+        ui_types::UiCreateSecurityGroupRuleRequest,
+        ui_types::SecurityGroupListResponse,
+        // UI schemas - Logs
+        ui_handlers::UiLogEntry,
+        ui_handlers::LogsResponse,
     ))
 )]
 pub struct ApiDoc;
@@ -112,64 +174,54 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/nodes/{id}", delete(handlers::deregister_hypervisor_node));
 
-    // UI-compatible API routes
-    let ui_routes = Router::new()
+    // Global UI routes (not project-scoped)
+    let global_routes = Router::new()
         // Projects
         .route("/projects", get(ui_handlers::list_projects))
         .route("/projects", post(ui_handlers::create_project))
         .route("/projects/{id}", get(ui_handlers::get_project))
         .route("/projects/{id}", delete(ui_handlers::delete_project))
-        // VMs (UI-compatible)
-        .route("/vms", get(ui_handlers::list_vms))
-        .route("/vms", post(ui_handlers::create_vm))
+        // Global storage
+        .route("/import-jobs/{id}", get(ui_handlers::get_import_job))
+        .route("/pool", get(ui_handlers::get_pool_stats))
+        // Logs
+        .route("/logs", get(ui_handlers::query_logs))
+        .route("/logs/stream", get(ui_handlers::log_events))
+        // Notifications (stub)
+        .route("/notifications", get(ui_handlers::list_notifications))
+        .route(
+            "/notifications/{id}/read",
+            post(ui_handlers::mark_notification_read),
+        )
+        .route(
+            "/notifications/read-all",
+            post(ui_handlers::mark_all_notifications_read),
+        )
+        // Resource by ID (globally unique IDs)
+        // VMs
         .route("/vms/{id}", get(ui_handlers::get_vm))
         .route("/vms/{id}", delete(ui_handlers::delete_vm))
         .route("/vms/{id}/start", post(ui_handlers::start_vm))
         .route("/vms/{id}/stop", post(ui_handlers::stop_vm))
         .route("/vms/{id}/kill", post(ui_handlers::kill_vm))
         .route("/vms/{id}/console", get(ui_handlers::console_ws))
-        .route("/events/vms", get(ui_handlers::vm_events))
-        // Networks (UI-compatible)
-        .route("/networks", get(ui_handlers::list_networks))
-        .route("/networks", post(ui_handlers::create_network))
+        // Networks
         .route("/networks/{id}", get(ui_handlers::get_network))
         .route("/networks/{id}", delete(ui_handlers::delete_network))
-        // NICs (UI-compatible)
-        .route("/nics", get(ui_handlers::list_nics))
-        .route("/nics", post(ui_handlers::create_nic))
+        // NICs
         .route("/nics/{id}", get(ui_handlers::get_nic))
         .route("/nics/{id}", delete(ui_handlers::delete_nic))
         .route("/nics/{id}/attach", post(ui_handlers::attach_nic))
         .route("/nics/{id}/detach", post(ui_handlers::detach_nic))
-        // Storage
-        .route("/storage/volumes", get(ui_handlers::list_volumes))
-        .route("/storage/volumes", post(ui_handlers::create_volume))
-        .route("/storage/volumes/{id}", get(ui_handlers::get_volume))
-        .route("/storage/volumes/{id}", delete(ui_handlers::delete_volume))
+        // Volumes
+        .route("/volumes/{id}", get(ui_handlers::get_volume))
+        .route("/volumes/{id}", delete(ui_handlers::delete_volume))
+        .route("/volumes/{id}/resize", post(ui_handlers::resize_volume))
         .route(
-            "/storage/volumes/{id}/resize",
-            post(ui_handlers::resize_volume),
-        )
-        .route(
-            "/storage/volumes/{id}/snapshots",
+            "/volumes/{id}/snapshots",
             post(ui_handlers::create_snapshot),
         )
-        .route("/storage/templates", get(ui_handlers::list_templates))
-        .route(
-            "/storage/templates/import",
-            post(ui_handlers::import_template),
-        )
-        .route(
-            "/storage/import-jobs/{id}",
-            get(ui_handlers::get_import_job),
-        )
-        .route("/storage/pool", get(ui_handlers::get_pool_stats))
-        // Logs
-        .route("/logs", get(ui_handlers::query_logs))
-        .route("/logs/stream", get(ui_handlers::log_events))
         // Security Groups
-        .route("/security-groups", get(ui_handlers::list_security_groups))
-        .route("/security-groups", post(ui_handlers::create_security_group))
         .route(
             "/security-groups/{id}",
             get(ui_handlers::get_security_group),
@@ -185,21 +237,37 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/security-groups/{sg_id}/rules/{rule_id}",
             delete(ui_handlers::delete_security_group_rule),
-        )
-        // Notifications (stub)
-        .route("/notifications", get(ui_handlers::list_notifications))
+        );
+
+    // Project-scoped routes: /v1/projects/{project_id}/...
+    // Only LIST and CREATE operations (require project context)
+    let project_routes = Router::new()
+        // VMs
+        .route("/vms", get(ui_handlers::list_vms))
+        .route("/vms", post(ui_handlers::create_vm))
+        .route("/events/vms", get(ui_handlers::vm_events))
+        // Networks
+        .route("/networks", get(ui_handlers::list_networks))
+        .route("/networks", post(ui_handlers::create_network))
+        // NICs
+        .route("/nics", get(ui_handlers::list_nics))
+        .route("/nics", post(ui_handlers::create_nic))
+        // Volumes & Templates
+        .route("/volumes", get(ui_handlers::list_volumes))
+        .route("/volumes", post(ui_handlers::create_volume))
+        .route("/templates", get(ui_handlers::list_templates))
+        .route("/templates/import", post(ui_handlers::import_template))
+        // Security Groups
+        .route("/security-groups", get(ui_handlers::list_security_groups))
         .route(
-            "/notifications/{id}/read",
-            post(ui_handlers::mark_notification_read),
-        )
-        .route(
-            "/notifications/read-all",
-            post(ui_handlers::mark_all_notifications_read),
+            "/security-groups",
+            post(ui_handlers::create_security_group),
         );
 
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-        .nest("/api/v1", internal_routes)
-        .nest("/api/v1", ui_routes)
+        .nest("/v1", internal_routes)
+        .nest("/v1", global_routes)
+        .nest("/v1/projects/{project_id}", project_routes)
         .with_state(state)
 }

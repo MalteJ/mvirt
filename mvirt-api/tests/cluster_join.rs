@@ -32,7 +32,7 @@ struct TestNode {
 
 impl TestNode {
     fn base_url(&self) -> String {
-        format!("http://{}/api/v1", self.rest_addr)
+        format!("http://{}/v1", self.rest_addr)
     }
 
     async fn get(&self, path: &str) -> reqwest::Response {
@@ -96,6 +96,7 @@ impl TestCluster {
             store,
             audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
+            log_endpoint: String::new(),
         });
 
         let router = create_router(app_state);
@@ -161,6 +162,7 @@ impl TestCluster {
             store,
             audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
+            log_endpoint: String::new(),
         });
 
         let router = create_router(app_state);
@@ -256,10 +258,10 @@ async fn test_e2e_joined_node_receives_data() {
     // Create a network on node1
     let create_resp = node1
         .post_json(
-            "/networks",
+            "/projects/test-project/networks",
             &json!({
                 "name": "pre-join-network",
-                "ipv4Subnet": "10.0.0.0/24"
+                "ipv4Prefix": "10.0.0.0/24"
             }),
         )
         .await;
@@ -291,7 +293,7 @@ async fn test_e2e_joined_node_receives_data() {
 
     let body: Value = get_resp.json().await.unwrap();
     assert_eq!(body["name"].as_str().unwrap(), "pre-join-network");
-    assert_eq!(body["ipv4Subnet"].as_str().unwrap(), "10.0.0.0/24");
+    assert_eq!(body["ipv4Prefix"].as_str().unwrap(), "10.0.0.0/24");
 
     TestCluster::shutdown_all(vec![node1, node2]).await;
 }
@@ -328,7 +330,7 @@ async fn test_e2e_write_via_joined_node() {
     for i in 0..5 {
         let create_resp = node2
             .post_json(
-                "/networks",
+                "/projects/test-project/networks",
                 &json!({
                     "name": format!("created-via-node2-{}", i)
                 }),
@@ -411,7 +413,7 @@ async fn test_e2e_three_node_cluster_join() {
     for i in 0..5 {
         let create_resp = node3
             .post_json(
-                "/networks",
+                "/projects/test-project/networks",
                 &json!({
                     "name": format!("three-node-test-{}", i)
                 }),
@@ -484,7 +486,7 @@ async fn test_e2e_cluster_survives_leader_death() {
     // Create some data before killing leader
     let pre_create = node1
         .post_json(
-            "/networks",
+            "/projects/test-project/networks",
             &json!({
                 "name": "before-death"
             }),
@@ -516,7 +518,7 @@ async fn test_e2e_cluster_survives_leader_death() {
     let survivor = &surviving_nodes[0];
     let post_create = survivor
         .post_json(
-            "/networks",
+            "/projects/test-project/networks",
             &json!({
                 "name": "after-death"
             }),
@@ -529,7 +531,7 @@ async fn test_e2e_cluster_survives_leader_death() {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let retry = survivor
                 .post_json(
-                    "/networks",
+                    "/projects/test-project/networks",
                     &json!({
                         "name": format!("after-death-retry-{}", i)
                     }),

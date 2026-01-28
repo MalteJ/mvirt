@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom'
 import { ColumnDef } from '@tanstack/react-table'
 import { MoreHorizontal, Play, Square, Trash2, Plus } from 'lucide-react'
 import { useVms, useStartVm, useStopVm, useDeleteVm } from '@/hooks/queries'
+import { useProjectId } from '@/hooks/useProjectId'
 import { DataTable } from '@/components/data-display/DataTable'
 import { StateIndicator } from '@/components/data-display/StateIndicator'
 import { Button } from '@/components/ui/button'
@@ -17,7 +18,8 @@ import { Vm, VmState } from '@/types'
 
 export function VmsPage() {
   const navigate = useNavigate()
-  const { data: vms, isLoading } = useVms()
+  const projectId = useProjectId()
+  const { data: vms, isLoading } = useVms(projectId)
   const startVm = useStartVm()
   const stopVm = useStopVm()
   const deleteVm = useDeleteVm()

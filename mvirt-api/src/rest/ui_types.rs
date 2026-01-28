@@ -3,6 +3,7 @@
 //! These types match the mock-server's JSON structure for compatibility with mvirt-ui.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::command::{
     ImportJobData, ImportJobState, NetworkData, NicData, ProjectData, SnapshotData, TemplateData,
@@ -14,7 +15,7 @@ use crate::command::{
 // =============================================================================
 
 /// UI-compatible VM state enum
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub enum UiVmState {
     #[serde(rename = "STOPPED")]
     Stopped,
@@ -39,7 +40,7 @@ impl UiVmState {
 }
 
 /// UI-compatible VM configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiVmConfig {
     pub vcpus: u32,
@@ -50,7 +51,7 @@ pub struct UiVmConfig {
 }
 
 /// UI-compatible VM representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiVm {
     pub id: String,
@@ -97,18 +98,17 @@ impl From<VmData> for UiVm {
 }
 
 /// Request to create a VM (UI-compatible)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateVmRequest {
     pub name: String,
-    pub project_id: String,
     pub config: UiCreateVmConfig,
     #[serde(default)]
     pub node_selector: Option<String>,
 }
 
 /// VM configuration for creation (UI-compatible)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateVmConfig {
     pub vcpus: u32,
@@ -119,7 +119,7 @@ pub struct UiCreateVmConfig {
 }
 
 /// Response wrapper for VM list
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VmListResponse {
     pub vms: Vec<UiVm>,
@@ -130,7 +130,7 @@ pub struct VmListResponse {
 // =============================================================================
 
 /// UI-compatible network representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiNetwork {
     pub id: String,
@@ -167,11 +167,10 @@ impl From<NetworkData> for UiNetwork {
 }
 
 /// Request to create a network (UI-compatible)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateNetworkRequest {
     pub name: String,
-    pub project_id: String,
     #[serde(default = "default_true")]
     pub ipv4_enabled: bool,
     #[serde(default)]
@@ -193,7 +192,7 @@ fn default_true() -> bool {
 }
 
 /// Response wrapper for network list
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkListResponse {
     pub networks: Vec<UiNetwork>,
@@ -204,7 +203,7 @@ pub struct NetworkListResponse {
 // =============================================================================
 
 /// UI-compatible NIC representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiNic {
     pub id: String,
@@ -231,7 +230,7 @@ impl From<NicData> for UiNic {
             mac_address: data.mac_address,
             ipv4_address: data.ipv4_address,
             ipv6_address: data.ipv6_address,
-            vm_id: None, // Would need to look up from VMs
+            vm_id: data.vm_id,
             state: format!("{:?}", data.state),
             created_at: data.created_at,
         }
@@ -239,10 +238,9 @@ impl From<NicData> for UiNic {
 }
 
 /// Request to create a NIC (UI-compatible)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateNicRequest {
-    pub project_id: String,
     pub network_id: String,
     #[serde(default)]
     pub name: Option<String>,
@@ -256,8 +254,15 @@ pub struct UiCreateNicRequest {
     pub security_group_id: Option<String>,
 }
 
+/// Request to attach a NIC to a VM
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiAttachNicRequest {
+    pub vm_id: String,
+}
+
 /// Response wrapper for NIC list
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NicListResponse {
     pub nics: Vec<UiNic>,
@@ -268,7 +273,7 @@ pub struct NicListResponse {
 // =============================================================================
 
 /// UI-compatible project representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiProject {
     pub id: String,
@@ -290,7 +295,7 @@ impl From<ProjectData> for UiProject {
 }
 
 /// Request to create a project (UI-compatible)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateProjectRequest {
     /// User-provided project ID (must be unique, lowercase alphanumeric)
@@ -301,7 +306,7 @@ pub struct UiCreateProjectRequest {
 }
 
 /// Response wrapper for project list
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectListResponse {
     pub projects: Vec<UiProject>,
@@ -312,7 +317,7 @@ pub struct ProjectListResponse {
 // =============================================================================
 
 /// UI-compatible snapshot representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiSnapshot {
     pub id: String,
@@ -333,7 +338,7 @@ impl From<&SnapshotData> for UiSnapshot {
 }
 
 /// UI-compatible volume representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiVolume {
     pub id: String,
@@ -367,10 +372,9 @@ impl From<VolumeData> for UiVolume {
 }
 
 /// Request to create a volume (UI-compatible)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateVolumeRequest {
-    pub project_id: String,
     pub node_id: String,
     pub name: String,
     pub size_bytes: u64,
@@ -379,21 +383,21 @@ pub struct UiCreateVolumeRequest {
 }
 
 /// Request to resize a volume (UI-compatible)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiResizeVolumeRequest {
     pub size_bytes: u64,
 }
 
 /// Request to create a snapshot (UI-compatible)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateSnapshotRequest {
     pub name: String,
 }
 
 /// Response wrapper for volume list
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeListResponse {
     pub volumes: Vec<UiVolume>,
@@ -404,7 +408,7 @@ pub struct VolumeListResponse {
 // =============================================================================
 
 /// UI-compatible template representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiTemplate {
     pub id: String,
@@ -429,7 +433,7 @@ impl From<TemplateData> for UiTemplate {
 }
 
 /// Request to import a template (UI-compatible)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiImportTemplateRequest {
     pub node_id: String,
@@ -440,7 +444,7 @@ pub struct UiImportTemplateRequest {
 }
 
 /// Response wrapper for template list
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateListResponse {
     pub templates: Vec<UiTemplate>,
@@ -451,7 +455,7 @@ pub struct TemplateListResponse {
 // =============================================================================
 
 /// UI-compatible import job state
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub enum UiImportJobState {
     #[serde(rename = "PENDING")]
     Pending,
@@ -475,7 +479,7 @@ impl From<ImportJobState> for UiImportJobState {
 }
 
 /// UI-compatible import job representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiImportJob {
     pub id: String,
@@ -511,7 +515,7 @@ impl From<ImportJobData> for UiImportJob {
 // =============================================================================
 
 /// UI-compatible storage pool statistics
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiPoolStats {
     pub total_bytes: u64,
@@ -542,18 +546,13 @@ pub struct VmEvent {
 #[serde(rename_all = "camelCase")]
 pub struct ListVmsQuery {
     #[serde(default)]
-    pub project_id: Option<String>,
-    #[serde(default)]
     pub node_id: Option<String>,
 }
 
 /// Query parameters for listing networks
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListNetworksQuery {
-    #[serde(default)]
-    pub project_id: Option<String>,
-}
+pub struct ListNetworksQuery {}
 
 /// Query parameters for listing NICs
 #[derive(Debug, Clone, Deserialize)]
@@ -568,8 +567,6 @@ pub struct ListNicsQuery {
 #[serde(rename_all = "camelCase")]
 pub struct ListVolumesQuery {
     #[serde(default)]
-    pub project_id: Option<String>,
-    #[serde(default)]
     pub node_id: Option<String>,
 }
 
@@ -578,7 +575,7 @@ pub struct ListVolumesQuery {
 // =============================================================================
 
 /// Rule direction
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub enum UiRuleDirection {
     #[serde(rename = "INGRESS")]
     Ingress,
@@ -587,7 +584,7 @@ pub enum UiRuleDirection {
 }
 
 /// Rule protocol
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub enum UiRuleProtocol {
     #[serde(rename = "ALL")]
     All,
@@ -602,7 +599,7 @@ pub enum UiRuleProtocol {
 }
 
 /// UI-compatible security group rule
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiSecurityGroupRule {
     pub id: String,
@@ -621,7 +618,7 @@ pub struct UiSecurityGroupRule {
 }
 
 /// UI-compatible security group
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiSecurityGroup {
     pub id: String,
@@ -634,8 +631,71 @@ pub struct UiSecurityGroup {
     pub updated_at: String,
 }
 
+impl From<crate::command::SecurityGroupData> for UiSecurityGroup {
+    fn from(sg: crate::command::SecurityGroupData) -> Self {
+        let sg_id = sg.id.clone();
+        Self {
+            id: sg.id,
+            name: sg.name,
+            description: sg.description,
+            rules: sg
+                .rules
+                .into_iter()
+                .map(|r| UiSecurityGroupRule {
+                    id: r.id,
+                    security_group_id: sg_id.clone(),
+                    direction: match r.direction {
+                        crate::command::RuleDirection::Inbound => UiRuleDirection::Ingress,
+                        crate::command::RuleDirection::Outbound => UiRuleDirection::Egress,
+                    },
+                    protocol: r
+                        .protocol
+                        .as_deref()
+                        .map(|p| match p {
+                            "TCP" => UiRuleProtocol::Tcp,
+                            "UDP" => UiRuleProtocol::Udp,
+                            "ICMP" => UiRuleProtocol::Icmp,
+                            "ICMPV6" => UiRuleProtocol::Icmpv6,
+                            _ => UiRuleProtocol::All,
+                        })
+                        .unwrap_or(UiRuleProtocol::All),
+                    port_start: r.port_range_start,
+                    port_end: r.port_range_end,
+                    cidr: r.cidr,
+                    description: r.description,
+                    created_at: r.created_at,
+                })
+                .collect(),
+            nic_count: sg.nic_count,
+            created_at: sg.created_at,
+            updated_at: sg.updated_at,
+        }
+    }
+}
+
+impl UiRuleDirection {
+    pub fn to_command_direction(self) -> crate::command::RuleDirection {
+        match self {
+            UiRuleDirection::Ingress => crate::command::RuleDirection::Inbound,
+            UiRuleDirection::Egress => crate::command::RuleDirection::Outbound,
+        }
+    }
+}
+
+impl UiRuleProtocol {
+    pub fn to_protocol_string(self) -> Option<String> {
+        match self {
+            UiRuleProtocol::All => None,
+            UiRuleProtocol::Tcp => Some("TCP".into()),
+            UiRuleProtocol::Udp => Some("UDP".into()),
+            UiRuleProtocol::Icmp => Some("ICMP".into()),
+            UiRuleProtocol::Icmpv6 => Some("ICMPV6".into()),
+        }
+    }
+}
+
 /// Request to create a security group
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateSecurityGroupRequest {
     pub name: String,
@@ -644,7 +704,7 @@ pub struct UiCreateSecurityGroupRequest {
 }
 
 /// Request to create a security group rule
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateSecurityGroupRuleRequest {
     pub direction: UiRuleDirection,
@@ -660,7 +720,7 @@ pub struct UiCreateSecurityGroupRuleRequest {
 }
 
 /// Response wrapper for security group list
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityGroupListResponse {
     pub security_groups: Vec<UiSecurityGroup>,

@@ -1,5 +1,6 @@
 import { Server, HardDrive, Network, Activity } from 'lucide-react'
 import { useVms, useVolumes, useNetworks, useSystemInfo, useLogs } from '@/hooks/queries'
+import { useProjectId } from '@/hooks/useProjectId'
 import { StatCard } from '@/components/data-display/StatCard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -15,9 +16,10 @@ const levelVariants: Record<LogLevel, 'default' | 'secondary' | 'destructive' | 
 }
 
 export function DashboardPage() {
-  const { data: vms } = useVms()
-  const { data: volumes } = useVolumes()
-  const { data: networks } = useNetworks()
+  const projectId = useProjectId()
+  const { data: vms } = useVms(projectId)
+  const { data: volumes } = useVolumes(projectId)
+  const { data: networks } = useNetworks(projectId)
   const { data: systemInfo } = useSystemInfo()
   const { data: recentLogs } = useLogs({ limit: 10 })
 

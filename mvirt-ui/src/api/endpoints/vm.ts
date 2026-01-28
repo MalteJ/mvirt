@@ -1,9 +1,8 @@
 import { get, post, del } from '../client'
 import type { Vm, CreateVmRequest, VmListResponse } from '@/types'
 
-export async function listVms(projectId?: string): Promise<Vm[]> {
-  const params = projectId ? `?projectId=${projectId}` : ''
-  const response = await get<VmListResponse>(`/vms${params}`)
+export async function listVms(projectId: string): Promise<Vm[]> {
+  const response = await get<VmListResponse>(`/projects/${projectId}/vms`)
   return response.vms
 }
 
@@ -11,8 +10,8 @@ export async function getVm(id: string): Promise<Vm> {
   return get<Vm>(`/vms/${id}`)
 }
 
-export async function createVm(request: CreateVmRequest): Promise<Vm> {
-  return post<Vm>('/vms', request)
+export async function createVm(projectId: string, request: CreateVmRequest): Promise<Vm> {
+  return post<Vm>(`/projects/${projectId}/vms`, request)
 }
 
 export async function deleteVm(id: string): Promise<void> {

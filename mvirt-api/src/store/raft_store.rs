@@ -18,11 +18,12 @@ use super::error::{Result, StoreError};
 use super::event::Event;
 use super::traits::{
     ClusterInfo, ClusterStore, CreateNetworkRequest, CreateNicRequest, CreateProjectRequest,
-    CreateSnapshotRequest, CreateVmRequest, CreateVolumeRequest, DataStore, DeleteNetworkResult,
-    ImportTemplateRequest, Membership, MembershipNode, NetworkStore, NicStore, NodeStore,
-    ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, TemplateStore, UpdateNetworkRequest,
-    UpdateNicRequest, UpdateNodeStatusRequest, UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore,
-    VolumeStore,
+    CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest, CreateSnapshotRequest,
+    CreateVmRequest, CreateVolumeRequest, DataStore, DeleteNetworkResult, ImportTemplateRequest,
+    Membership, MembershipNode, NetworkStore, NicStore, NodeStore, ProjectStore,
+    RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore, TemplateStore,
+    UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateVmSpecRequest,
+    UpdateVmStatusRequest, VmStore, VolumeStore,
 };
 
 /// RaftStore wraps a RaftNode and implements the DataStore trait.
@@ -148,6 +149,16 @@ impl NetworkStore for RaftStore {
         Ok(state.list_networks().into_iter().cloned().collect())
     }
 
+    async fn list_networks_by_project(&self, project_id: &str) -> Result<Vec<NetworkData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state
+            .list_networks_by_project(project_id)
+            .into_iter()
+            .cloned()
+            .collect())
+    }
+
     async fn get_network(&self, id: &str) -> Result<Option<NetworkData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
@@ -229,6 +240,16 @@ impl NicStore for RaftStore {
         Ok(state.list_nics(network_id).into_iter().cloned().collect())
     }
 
+    async fn list_nics_by_project(&self, project_id: &str) -> Result<Vec<NicData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state
+            .list_nics_by_project(project_id)
+            .into_iter()
+            .cloned()
+            .collect())
+    }
+
     async fn get_nic(&self, id: &str) -> Result<Option<NicData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
@@ -296,6 +317,36 @@ impl NicStore for RaftStore {
             _ => Err(StoreError::Internal("unexpected response".into())),
         }
     }
+
+    async fn attach_nic(&self, id: &str, vm_id: &str) -> Result<NicData> {
+        let cmd = Command::AttachNic {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            vm_id: vm_id.to_string(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Nic(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn detach_nic(&self, id: &str) -> Result<NicData> {
+        let cmd = Command::DetachNic {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Nic(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
 }
 
 #[async_trait]
@@ -304,6 +355,16 @@ impl VmStore for RaftStore {
         let node = self.node.read().await;
         let state = node.get_state().await;
         Ok(state.list_vms(None).into_iter().cloned().collect())
+    }
+
+    async fn list_vms_by_project(&self, project_id: &str) -> Result<Vec<VmData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state
+            .list_vms_by_project(project_id)
+            .into_iter()
+            .cloned()
+            .collect())
     }
 
     async fn list_vms_by_node(&self, node_id: &str) -> Result<Vec<VmData>> {
@@ -642,6 +703,16 @@ impl TemplateStore for RaftStore {
         Ok(state.list_templates(node_id).into_iter().cloned().collect())
     }
 
+    async fn list_templates_by_project(&self, project_id: &str) -> Result<Vec<TemplateData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state
+            .list_templates_by_project(project_id)
+            .into_iter()
+            .cloned()
+            .collect())
+    }
+
     async fn get_template(&self, id: &str) -> Result<Option<TemplateData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
@@ -653,6 +724,7 @@ impl TemplateStore for RaftStore {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
+            project_id: req.project_id,
             node_id: req.node_id,
             template_name: req.name,
             url: req.url,
@@ -692,6 +764,122 @@ impl TemplateStore for RaftStore {
             Response::ImportJob(data) => Ok(data),
             Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
             Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+}
+
+#[async_trait]
+impl SecurityGroupStore for RaftStore {
+    async fn list_security_groups(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<crate::command::SecurityGroupData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        match project_id {
+            Some(pid) => Ok(state
+                .list_security_groups_by_project(pid)
+                .into_iter()
+                .cloned()
+                .collect()),
+            None => Ok(state.list_security_groups().into_iter().cloned().collect()),
+        }
+    }
+
+    async fn get_security_group(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::command::SecurityGroupData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_security_group(id).cloned())
+    }
+
+    async fn create_security_group(
+        &self,
+        req: CreateSecurityGroupRequest,
+    ) -> Result<crate::command::SecurityGroupData> {
+        let cmd = Command::CreateSecurityGroup {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            project_id: req.project_id,
+            name: req.name,
+            description: req.description,
+        };
+        match self.write_command(cmd).await? {
+            Response::SecurityGroup(sg) => Ok(sg),
+            Response::Error { code, message } => match code {
+                404 => Err(StoreError::NotFound(message)),
+                409 => Err(StoreError::Conflict(message)),
+                _ => Err(StoreError::Internal(message)),
+            },
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn delete_security_group(&self, id: &str) -> Result<()> {
+        let cmd = Command::DeleteSecurityGroup {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code, message } => match code {
+                404 => Err(StoreError::NotFound(message)),
+                409 => Err(StoreError::Conflict(message)),
+                _ => Err(StoreError::Internal(message)),
+            },
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn create_security_group_rule(
+        &self,
+        security_group_id: &str,
+        req: CreateSecurityGroupRuleRequest,
+    ) -> Result<crate::command::SecurityGroupData> {
+        let cmd = Command::CreateSecurityGroupRule {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            security_group_id: security_group_id.to_string(),
+            direction: req.direction,
+            protocol: req.protocol,
+            port_range_start: req.port_range_start,
+            port_range_end: req.port_range_end,
+            cidr: req.cidr,
+            description: req.description,
+        };
+        match self.write_command(cmd).await? {
+            Response::SecurityGroup(sg) => Ok(sg),
+            Response::Error { code, message } => match code {
+                404 => Err(StoreError::NotFound(message)),
+                409 => Err(StoreError::Conflict(message)),
+                _ => Err(StoreError::Internal(message)),
+            },
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn delete_security_group_rule(
+        &self,
+        security_group_id: &str,
+        rule_id: &str,
+    ) -> Result<crate::command::SecurityGroupData> {
+        let cmd = Command::DeleteSecurityGroupRule {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            security_group_id: security_group_id.to_string(),
+            rule_id: rule_id.to_string(),
+        };
+        match self.write_command(cmd).await? {
+            Response::SecurityGroup(sg) => Ok(sg),
+            Response::Error { code, message } => match code {
+                404 => Err(StoreError::NotFound(message)),
+                409 => Err(StoreError::Conflict(message)),
+                _ => Err(StoreError::Internal(message)),
+            },
             _ => Err(StoreError::Internal("unexpected response".into())),
         }
     }

@@ -6,8 +6,8 @@ import type {
   CreateSecurityGroupRuleRequest,
 } from '@/types'
 
-export async function listSecurityGroups(): Promise<SecurityGroup[]> {
-  const response = await get<{ securityGroups: SecurityGroup[] }>('/security-groups')
+export async function listSecurityGroups(projectId: string): Promise<SecurityGroup[]> {
+  const response = await get<{ securityGroups: SecurityGroup[] }>(`/projects/${projectId}/security-groups`)
   return response.securityGroups
 }
 
@@ -15,8 +15,8 @@ export async function getSecurityGroup(id: string): Promise<SecurityGroup> {
   return get<SecurityGroup>(`/security-groups/${id}`)
 }
 
-export async function createSecurityGroup(request: CreateSecurityGroupRequest): Promise<SecurityGroup> {
-  return post<SecurityGroup>('/security-groups', request)
+export async function createSecurityGroup(projectId: string, request: CreateSecurityGroupRequest): Promise<SecurityGroup> {
+  return post<SecurityGroup>(`/projects/${projectId}/security-groups`, request)
 }
 
 export async function deleteSecurityGroup(id: string): Promise<void> {
@@ -29,12 +29,4 @@ export async function createSecurityGroupRule(request: CreateSecurityGroupRuleRe
 
 export async function deleteSecurityGroupRule(securityGroupId: string, ruleId: string): Promise<void> {
   await del<void>(`/security-groups/${securityGroupId}/rules/${ruleId}`)
-}
-
-export async function attachSecurityGroup(nicId: string, securityGroupId: string): Promise<void> {
-  await post<void>(`/nics/${nicId}/security-groups`, { securityGroupId })
-}
-
-export async function detachSecurityGroup(nicId: string, securityGroupId: string): Promise<void> {
-  await del<void>(`/nics/${nicId}/security-groups/${securityGroupId}`)
 }

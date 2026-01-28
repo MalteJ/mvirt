@@ -61,6 +61,12 @@ pub enum Event {
     },
     /// A VM was deleted.
     VmDeleted { id: String },
+
+    // Security Group events
+    /// A security group was created.
+    SecurityGroupCreated { id: String },
+    /// A security group was deleted.
+    SecurityGroupDeleted { id: String },
 }
 
 impl Event {
@@ -78,6 +84,9 @@ impl Event {
             | Event::VmUpdated { .. }
             | Event::VmStatusUpdated { .. }
             | Event::VmDeleted { .. } => "vm",
+            Event::SecurityGroupCreated { .. } | Event::SecurityGroupDeleted { .. } => {
+                "security_group"
+            }
         }
     }
 
@@ -97,6 +106,7 @@ impl Event {
             Event::VmUpdated { id, .. } => id,
             Event::VmStatusUpdated { id, .. } => id,
             Event::VmDeleted { id } => id,
+            Event::SecurityGroupCreated { id } | Event::SecurityGroupDeleted { id } => id,
         }
     }
 }

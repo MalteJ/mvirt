@@ -33,6 +33,7 @@ pub struct AppState {
     pub store: Arc<dyn DataStore>,
     pub audit: Arc<ApiAuditLogger>,
     pub node_id: NodeId,
+    pub log_endpoint: String,
 }
 
 /// API error response
@@ -97,7 +98,7 @@ pub struct VersionInfo {
 /// Get service version
 #[utoipa::path(
     get,
-    path = "/api/v1/version",
+    path = "/v1/version",
     responses(
         (status = 200, description = "Service version", body = VersionInfo)
     ),
@@ -134,7 +135,7 @@ pub struct NodeInfo {
 /// Get cluster information
 #[utoipa::path(
     get,
-    path = "/api/v1/cluster",
+    path = "/v1/cluster",
     responses(
         (status = 200, description = "Cluster information", body = ClusterInfo)
     ),
@@ -192,7 +193,7 @@ pub struct MembershipNode {
 /// Get cluster membership
 #[utoipa::path(
     get,
-    path = "/api/v1/cluster/membership",
+    path = "/v1/cluster/membership",
     responses(
         (status = 200, description = "Cluster membership", body = ClusterMembership)
     ),
@@ -240,7 +241,7 @@ pub struct CreateJoinTokenResponse {
 /// Create a join token for a new node
 #[utoipa::path(
     post,
-    path = "/api/v1/cluster/join-token",
+    path = "/v1/cluster/join-token",
     request_body = CreateJoinTokenRequest,
     responses(
         (status = 200, description = "Join token created", body = CreateJoinTokenResponse),
@@ -287,7 +288,7 @@ pub struct RemoveNodeResponse {
 /// Remove a node from the cluster
 #[utoipa::path(
     delete,
-    path = "/api/v1/cluster/nodes/{id}",
+    path = "/v1/cluster/nodes/{id}",
     params(
         ("id" = u64, Path, description = "Node ID to remove")
     ),
@@ -396,7 +397,7 @@ impl From<NodeData> for HypervisorNode {
 /// Register a new hypervisor node
 #[utoipa::path(
     post,
-    path = "/api/v1/nodes",
+    path = "/v1/nodes",
     request_body = RegisterHypervisorNodeRequest,
     responses(
         (status = 200, description = "Node registered", body = HypervisorNode),
@@ -424,7 +425,7 @@ pub async fn register_hypervisor_node(
 /// Get a hypervisor node by ID or name
 #[utoipa::path(
     get,
-    path = "/api/v1/nodes/{id}",
+    path = "/v1/nodes/{id}",
     params(
         ("id" = String, Path, description = "Node ID or name")
     ),
@@ -464,7 +465,7 @@ pub struct ListNodesQuery {
 /// List all hypervisor nodes
 #[utoipa::path(
     get,
-    path = "/api/v1/nodes",
+    path = "/v1/nodes",
     params(
         ("status" = Option<String>, Query, description = "Filter by status (online, offline, unknown)")
     ),
@@ -496,7 +497,7 @@ pub struct UpdateNodeStatusRequest {
 /// Update hypervisor node status (heartbeat)
 #[utoipa::path(
     patch,
-    path = "/api/v1/nodes/{id}/status",
+    path = "/v1/nodes/{id}/status",
     params(
         ("id" = String, Path, description = "Node ID")
     ),
@@ -537,7 +538,7 @@ pub struct DeregisterNodeResponse {
 /// Deregister a hypervisor node
 #[utoipa::path(
     delete,
-    path = "/api/v1/nodes/{id}",
+    path = "/v1/nodes/{id}",
     params(
         ("id" = String, Path, description = "Node ID")
     ),
@@ -638,7 +639,7 @@ impl From<&NetworkData> for Network {
 /// Create a new network
 #[utoipa::path(
     post,
-    path = "/api/v1/networks",
+    path = "/v1/networks",
     request_body = CreateNetworkRequest,
     responses(
         (status = 200, description = "Network created", body = Network),
@@ -671,7 +672,7 @@ pub async fn create_network(
 /// Get a network by ID or name
 #[utoipa::path(
     get,
-    path = "/api/v1/networks/{id}",
+    path = "/v1/networks/{id}",
     params(
         ("id" = String, Path, description = "Network ID or name")
     ),
@@ -704,7 +705,7 @@ pub async fn get_network(
 /// List all networks
 #[utoipa::path(
     get,
-    path = "/api/v1/networks",
+    path = "/v1/networks",
     responses(
         (status = 200, description = "List of networks", body = Vec<Network>)
     ),
@@ -729,7 +730,7 @@ pub struct UpdateNetworkRequest {
 /// Update a network
 #[utoipa::path(
     patch,
-    path = "/api/v1/networks/{id}",
+    path = "/v1/networks/{id}",
     params(
         ("id" = String, Path, description = "Network ID")
     ),
@@ -773,7 +774,7 @@ pub struct DeleteNetworkResponse {
 /// Delete a network
 #[utoipa::path(
     delete,
-    path = "/api/v1/networks/{id}",
+    path = "/v1/networks/{id}",
     params(
         ("id" = String, Path, description = "Network ID"),
         ("force" = Option<bool>, Query, description = "Force delete even if NICs exist")
@@ -879,7 +880,7 @@ impl From<&NicData> for Nic {
 /// Create a new NIC
 #[utoipa::path(
     post,
-    path = "/api/v1/nics",
+    path = "/v1/nics",
     request_body = CreateNicRequest,
     responses(
         (status = 200, description = "NIC created", body = Nic),
@@ -914,7 +915,7 @@ pub async fn create_nic(
 /// Get a NIC by ID or name
 #[utoipa::path(
     get,
-    path = "/api/v1/nics/{id}",
+    path = "/v1/nics/{id}",
     params(
         ("id" = String, Path, description = "NIC ID or name")
     ),
@@ -954,7 +955,7 @@ pub struct ListNicsQuery {
 /// List all NICs
 #[utoipa::path(
     get,
-    path = "/api/v1/nics",
+    path = "/v1/nics",
     params(
         ("network_id" = Option<String>, Query, description = "Filter by network ID")
     ),
@@ -983,7 +984,7 @@ pub struct UpdateNicRequest {
 /// Update a NIC
 #[utoipa::path(
     patch,
-    path = "/api/v1/nics/{id}",
+    path = "/v1/nics/{id}",
     params(
         ("id" = String, Path, description = "NIC ID")
     ),
@@ -1019,7 +1020,7 @@ pub struct DeleteNicResponse {
 /// Delete a NIC
 #[utoipa::path(
     delete,
-    path = "/api/v1/nics/{id}",
+    path = "/v1/nics/{id}",
     params(
         ("id" = String, Path, description = "NIC ID")
     ),
@@ -1159,7 +1160,7 @@ impl From<VmData> for Vm {
 /// Create a new VM
 #[utoipa::path(
     post,
-    path = "/api/v1/vms",
+    path = "/v1/vms",
     request_body = CreateVmRequest,
     responses(
         (status = 200, description = "VM created", body = Vm),
@@ -1201,7 +1202,7 @@ pub async fn create_vm(
 /// Get a VM by ID or name
 #[utoipa::path(
     get,
-    path = "/api/v1/vms/{id}",
+    path = "/v1/vms/{id}",
     params(
         ("id" = String, Path, description = "VM ID or name")
     ),
@@ -1243,7 +1244,7 @@ pub struct ListVmsQuery {
 /// List all VMs
 #[utoipa::path(
     get,
-    path = "/api/v1/vms",
+    path = "/v1/vms",
     params(
         ("node_id" = Option<String>, Query, description = "Filter by node ID"),
         ("phase" = Option<String>, Query, description = "Filter by phase")
@@ -1281,7 +1282,7 @@ pub async fn list_vms(
 /// Update a VM's spec (desired state)
 #[utoipa::path(
     patch,
-    path = "/api/v1/vms/{id}/spec",
+    path = "/v1/vms/{id}/spec",
     params(
         ("id" = String, Path, description = "VM ID")
     ),
@@ -1313,7 +1314,7 @@ pub async fn update_vm_spec(
 /// Update a VM's status (from node)
 #[utoipa::path(
     patch,
-    path = "/api/v1/vms/{id}/status",
+    path = "/v1/vms/{id}/status",
     params(
         ("id" = String, Path, description = "VM ID")
     ),
@@ -1364,7 +1365,7 @@ pub struct DeleteVmResponse {
 /// Delete a VM
 #[utoipa::path(
     delete,
-    path = "/api/v1/vms/{id}",
+    path = "/v1/vms/{id}",
     params(
         ("id" = String, Path, description = "VM ID")
     ),

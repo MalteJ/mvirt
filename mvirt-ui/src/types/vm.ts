@@ -39,7 +39,6 @@ export interface Vm {
 
 export interface CreateVmRequest {
   name: string
-  projectId: string
   config: VmConfig
 }
 

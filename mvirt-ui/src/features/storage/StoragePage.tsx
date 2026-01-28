@@ -31,18 +31,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { useProject } from '@/hooks/useProject'
+import { useProjectId } from '@/hooks/useProjectId'
 import { truncateId, formatBytes } from '@/lib/utils'
 import { Volume, Template, ImportJobState } from '@/types'
 
 export function StoragePage() {
-  const { data: volumes, isLoading: loadingVolumes } = useVolumes()
-  const { data: templates, isLoading: loadingTemplates } = useTemplates()
+  const projectId = useProjectId()
+  const { data: volumes, isLoading: loadingVolumes } = useVolumes(projectId)
+  const { data: templates, isLoading: loadingTemplates } = useTemplates(projectId)
   const { data: poolStats } = usePoolStats()
-  const { currentProject } = useProject()
   const deleteVolume = useDeleteVolume()
-  const createVolume = useCreateVolume()
-  const importTemplate = useImportTemplate()
+  const createVolume = useCreateVolume(projectId)
+  const importTemplate = useImportTemplate(projectId)
   const [activeTab, setActiveTab] = useState('volumes')
 
   // Import dialog state
@@ -95,14 +95,13 @@ export function StoragePage() {
   const [volumeTemplateId, setVolumeTemplateId] = useState('')
 
   const handleCreateVolume = () => {
-    if (!volumeName.trim() || !currentProject) return
+    if (!volumeName.trim()) return
     const multiplier = volumeSizeUnit === 'TB' ? 1024 * 1024 * 1024 * 1024
       : volumeSizeUnit === 'GB' ? 1024 * 1024 * 1024
       : 1024 * 1024
     createVolume.mutate(
       {
         name: volumeName.trim(),
-        projectId: currentProject.id,
         sizeBytes: parseInt(volumeSize) * multiplier,
         templateId: volumeTemplateId || undefined,
       },

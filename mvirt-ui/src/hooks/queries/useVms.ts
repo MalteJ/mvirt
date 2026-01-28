@@ -1,23 +1,20 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { listVms, getVm, createVm, deleteVm, startVm, stopVm, killVm } from '@/api/endpoints'
-import { useProject } from '@/hooks/useProject'
 import type { CreateVmRequest } from '@/types'
 
 export const vmKeys = {
   all: ['vms'] as const,
   lists: () => [...vmKeys.all, 'list'] as const,
-  list: (projectId?: string) => [...vmKeys.lists(), projectId] as const,
+  list: (projectId: string) => [...vmKeys.lists(), projectId] as const,
   details: () => [...vmKeys.all, 'detail'] as const,
   detail: (id: string) => [...vmKeys.details(), id] as const,
 }
 
-export function useVms() {
-  const { currentProject } = useProject()
+export function useVms(projectId: string) {
   return useQuery({
-    queryKey: vmKeys.list(currentProject?.id),
-    queryFn: () => listVms(currentProject?.id),
+    queryKey: vmKeys.list(projectId),
+    queryFn: () => listVms(projectId),
     refetchInterval: 5000,
-    enabled: !!currentProject,
   })
 }
 
@@ -30,10 +27,10 @@ export function useVm(id: string) {
   })
 }
 
-export function useCreateVm() {
+export function useCreateVm(projectId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (request: CreateVmRequest) => createVm(request),
+    mutationFn: (request: CreateVmRequest) => createVm(projectId, request),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: vmKeys.lists() })
     },

@@ -90,6 +90,17 @@ pub enum Command {
         request_id: String,
         id: String,
     },
+    AttachNic {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        vm_id: String,
+    },
+    DetachNic {
+        request_id: String,
+        id: String,
+        timestamp: String,
+    },
 
     // VM operations
     CreateVm {
@@ -162,6 +173,7 @@ pub enum Command {
         request_id: String,
         id: String,
         timestamp: String,
+        project_id: String,
         node_id: String,
         name: String,
         size_bytes: u64,
@@ -172,6 +184,7 @@ pub enum Command {
         request_id: String,
         id: String,
         timestamp: String,
+        project_id: String,
         node_id: String,
         template_name: String,
         url: String,
@@ -184,6 +197,37 @@ pub enum Command {
         bytes_written: u64,
         state: ImportJobState,
         error: Option<String>,
+    },
+
+    // Security group operations
+    CreateSecurityGroup {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        project_id: String,
+        name: String,
+        description: Option<String>,
+    },
+    DeleteSecurityGroup {
+        request_id: String,
+        id: String,
+    },
+    CreateSecurityGroupRule {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        security_group_id: String,
+        direction: RuleDirection,
+        protocol: Option<String>,
+        port_range_start: Option<u16>,
+        port_range_end: Option<u16>,
+        cidr: Option<String>,
+        description: Option<String>,
+    },
+    DeleteSecurityGroupRule {
+        request_id: String,
+        security_group_id: String,
+        rule_id: String,
     },
 }
 
@@ -199,6 +243,8 @@ impl Command {
             Command::CreateNic { request_id, .. } => request_id,
             Command::UpdateNic { request_id, .. } => request_id,
             Command::DeleteNic { request_id, .. } => request_id,
+            Command::AttachNic { request_id, .. } => request_id,
+            Command::DetachNic { request_id, .. } => request_id,
             Command::CreateVm { request_id, .. } => request_id,
             Command::UpdateVmSpec { request_id, .. } => request_id,
             Command::UpdateVmStatus { request_id, .. } => request_id,
@@ -212,6 +258,10 @@ impl Command {
             Command::CreateTemplate { request_id, .. } => request_id,
             Command::CreateImportJob { request_id, .. } => request_id,
             Command::UpdateImportJob { request_id, .. } => request_id,
+            Command::CreateSecurityGroup { request_id, .. } => request_id,
+            Command::DeleteSecurityGroup { request_id, .. } => request_id,
+            Command::CreateSecurityGroupRule { request_id, .. } => request_id,
+            Command::DeleteSecurityGroupRule { request_id, .. } => request_id,
         }
     }
 }
@@ -292,6 +342,7 @@ pub struct NicData {
     pub routed_ipv4_prefixes: Vec<String>,
     pub routed_ipv6_prefixes: Vec<String>,
     pub security_group_id: Option<String>,
+    pub vm_id: Option<String>,
     pub socket_path: String,
     pub state: NicStateData,
     pub created_at: String,
@@ -327,9 +378,9 @@ pub struct VmSpec {
     pub node_selector: Option<String>, // Optional: require specific node
     pub cpu_cores: u32,
     pub memory_mb: u64,
-    pub volume_id: String,  // Boot volume reference
-    pub nic_id: String,     // NIC reference (network comes via NIC)
-    pub image: String,      // Boot image reference
+    pub volume_id: String, // Boot volume reference
+    pub nic_id: String,    // NIC reference (network comes via NIC)
+    pub image: String,     // Boot image reference
     pub desired_state: VmDesiredState,
 }
 
@@ -439,6 +490,7 @@ pub struct SnapshotData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateData {
     pub id: String,
+    pub project_id: String,
     pub node_id: String, // Node where the template is stored
     pub name: String,
     pub size_bytes: u64,
@@ -450,6 +502,7 @@ pub struct TemplateData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportJobData {
     pub id: String,
+    pub project_id: String,
     pub node_id: String,
     pub template_name: String,
     pub url: String,
@@ -472,6 +525,43 @@ pub enum ImportJobState {
 }
 
 // =============================================================================
+// Security Group Types
+// =============================================================================
+
+/// Security group data stored in the state machine
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityGroupData {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub rules: Vec<SecurityGroupRuleData>,
+    pub nic_count: u32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Security group rule
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityGroupRuleData {
+    pub id: String,
+    pub direction: RuleDirection,
+    pub protocol: Option<String>,
+    pub port_range_start: Option<u16>,
+    pub port_range_end: Option<u16>,
+    pub cidr: Option<String>,
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
+/// Direction of a firewall rule
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RuleDirection {
+    Inbound,
+    Outbound,
+}
+
+// =============================================================================
 // Response Types
 // =============================================================================
 
@@ -486,6 +576,7 @@ pub enum Response {
     Volume(VolumeData),
     Template(TemplateData),
     ImportJob(ImportJobData),
+    SecurityGroup(SecurityGroupData),
     Deleted { id: String },
     DeletedWithCount { id: String, nics_deleted: u32 },
     Error { code: u32, message: String },

@@ -53,8 +53,8 @@ export function SecurityGroupDetailPage() {
 
   // All hooks must be called before any early returns
   const { data: securityGroup, isLoading, error } = useSecurityGroup(id || '')
-  const createRule = useCreateSecurityGroupRule()
-  const deleteRule = useDeleteSecurityGroupRule()
+  const createRule = useCreateSecurityGroupRule(projectId)
+  const deleteRule = useDeleteSecurityGroupRule(projectId)
 
   const [ruleDialogOpen, setRuleDialogOpen] = useState(false)
   const [ruleDirection, setRuleDirection] = useState<RuleDirection>(RuleDirection.INGRESS)

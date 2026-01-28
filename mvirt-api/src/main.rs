@@ -191,6 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         store: store.clone(),
         audit: audit.clone(),
         node_id,
+        log_endpoint: args.log_endpoint.clone(),
     });
 
     // Create REST router
