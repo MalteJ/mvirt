@@ -1,87 +1,137 @@
 //! Client for mvirt-zfs daemon.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tonic::transport::Channel;
 use tracing::debug;
 
-/// Volume info from mvirt-zfs.
-#[derive(Debug, Clone)]
-pub struct VolumeInfo {
-    pub id: String,
-    pub name: String,
-    pub size_gb: u64,
-    pub path: String,
-}
+use crate::proto::zfs::{
+    zfs_service_client::ZfsServiceClient, CloneFromTemplateRequest, CreateVolumeRequest,
+    DeleteTemplateRequest, DeleteVolumeRequest, GetVolumeRequest, ImportTemplateRequest,
+    ListTemplatesRequest,
+};
+
+pub use crate::proto::zfs::{ImportJob, Template, Volume};
 
 /// Client for interacting with mvirt-zfs.
+#[derive(Clone)]
 pub struct ZfsClient {
-    endpoint: String,
+    client: ZfsServiceClient<Channel>,
 }
 
 impl ZfsClient {
-    pub fn new(endpoint: String) -> Self {
-        Self { endpoint }
+    pub async fn connect(endpoint: &str) -> Result<Self> {
+        let client = ZfsServiceClient::connect(endpoint.to_string())
+            .await
+            .context("Failed to connect to mvirt-zfs")?;
+        Ok(Self { client })
     }
 
-    /// Check if connected to mvirt-zfs.
-    pub async fn health_check(&self) -> Result<bool> {
-        debug!("Health check for mvirt-zfs at {}", self.endpoint);
-        // TODO: Implement actual health check
-        Ok(true)
-    }
-
-    /// Get volume by ID.
-    pub async fn get_volume(&self, id: &str) -> Result<Option<VolumeInfo>> {
-        debug!("Getting volume {} from mvirt-zfs", id);
-        // TODO: Implement via gRPC
-        Ok(None)
+    /// Get volume by name.
+    pub async fn get_volume(&mut self, name: &str) -> Result<Option<Volume>> {
+        debug!("Getting volume {} from mvirt-zfs", name);
+        match self
+            .client
+            .get_volume(GetVolumeRequest {
+                name: name.to_string(),
+            })
+            .await
+        {
+            Ok(resp) => Ok(Some(resp.into_inner())),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(e) => Err(e).context("Failed to get volume"),
+        }
     }
 
     /// Create a volume.
-    pub async fn create_volume(&self, name: &str, size_gb: u64) -> Result<VolumeInfo> {
-        debug!("Creating volume {} ({}GB) in mvirt-zfs", name, size_gb);
-        // TODO: Implement via gRPC
-        Ok(VolumeInfo {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.to_string(),
-            size_gb,
-            path: format!("/dev/zvol/mvirt/{}", name),
-        })
+    pub async fn create_volume(&mut self, name: &str, size_bytes: u64) -> Result<Volume> {
+        debug!("Creating volume {} ({}B) in mvirt-zfs", name, size_bytes);
+        let resp = self
+            .client
+            .create_volume(CreateVolumeRequest {
+                name: name.to_string(),
+                size_bytes,
+                volblocksize: None,
+            })
+            .await
+            .context("Failed to create volume")?;
+        Ok(resp.into_inner())
     }
 
-    /// Clone a volume from an image.
-    pub async fn clone_from_image(
-        &self,
-        name: &str,
-        image: &str,
-        size_gb: u64,
-    ) -> Result<VolumeInfo> {
+    /// Clone a volume from a template.
+    pub async fn clone_from_template(
+        &mut self,
+        template_name: &str,
+        new_volume_name: &str,
+        size_bytes: Option<u64>,
+    ) -> Result<Volume> {
         debug!(
-            "Cloning volume {} from image {} ({}GB) in mvirt-zfs",
-            name, image, size_gb
+            "Cloning volume {} from template {} in mvirt-zfs",
+            new_volume_name, template_name
         );
-        // TODO: Implement via gRPC
-        Ok(VolumeInfo {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.to_string(),
-            size_gb,
-            path: format!("/dev/zvol/mvirt/{}", name),
-        })
+        let resp = self
+            .client
+            .clone_from_template(CloneFromTemplateRequest {
+                template_name: template_name.to_string(),
+                new_volume_name: new_volume_name.to_string(),
+                size_bytes,
+            })
+            .await
+            .context("Failed to clone from template")?;
+        Ok(resp.into_inner())
     }
 
     /// Delete a volume.
-    pub async fn delete_volume(&self, id: &str) -> Result<()> {
-        debug!("Deleting volume {} in mvirt-zfs", id);
-        // TODO: Implement via gRPC
+    pub async fn delete_volume(&mut self, name: &str) -> Result<()> {
+        debug!("Deleting volume {} in mvirt-zfs", name);
+        self.client
+            .delete_volume(DeleteVolumeRequest {
+                name: name.to_string(),
+            })
+            .await
+            .context("Failed to delete volume")?;
         Ok(())
     }
 
-    /// Create a snapshot.
-    pub async fn create_snapshot(&self, volume_id: &str, name: &str) -> Result<String> {
-        debug!(
-            "Creating snapshot {} of volume {} in mvirt-zfs",
-            name, volume_id
-        );
-        // TODO: Implement via gRPC
-        Ok(format!("{}@{}", volume_id, name))
+    /// Import a template from URL or path.
+    pub async fn import_template(
+        &mut self,
+        name: &str,
+        source: &str,
+        size_bytes: Option<u64>,
+    ) -> Result<ImportJob> {
+        debug!("Importing template {} from {} in mvirt-zfs", name, source);
+        let resp = self
+            .client
+            .import_template(ImportTemplateRequest {
+                name: name.to_string(),
+                source: source.to_string(),
+                size_bytes,
+            })
+            .await
+            .context("Failed to import template")?;
+        Ok(resp.into_inner())
+    }
+
+    /// List all templates.
+    pub async fn list_templates(&mut self) -> Result<Vec<Template>> {
+        debug!("Listing templates from mvirt-zfs");
+        let resp = self
+            .client
+            .list_templates(ListTemplatesRequest {})
+            .await
+            .context("Failed to list templates")?;
+        Ok(resp.into_inner().templates)
+    }
+
+    /// Delete a template.
+    pub async fn delete_template(&mut self, name: &str) -> Result<()> {
+        debug!("Deleting template {} in mvirt-zfs", name);
+        self.client
+            .delete_template(DeleteTemplateRequest {
+                name: name.to_string(),
+            })
+            .await
+            .context("Failed to delete template")?;
+        Ok(())
     }
 }

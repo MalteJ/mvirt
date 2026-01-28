@@ -567,7 +567,7 @@ pub struct CreateNetworkRequest {
     /// Enable IPv4 (default: true)
     pub ipv4_enabled: Option<bool>,
     /// IPv4 subnet in CIDR notation (e.g., "10.0.0.0/24")
-    pub ipv4_subnet: Option<String>,
+    pub ipv4_prefix: Option<String>,
     /// Enable IPv6 (default: false)
     pub ipv6_enabled: Option<bool>,
     /// IPv6 prefix in CIDR notation (e.g., "fd00::/64")
@@ -586,7 +586,7 @@ pub struct Network {
     pub id: String,
     pub name: String,
     pub ipv4_enabled: bool,
-    pub ipv4_subnet: Option<String>,
+    pub ipv4_prefix: Option<String>,
     pub ipv6_enabled: bool,
     pub ipv6_prefix: Option<String>,
     pub dns_servers: Vec<String>,
@@ -603,7 +603,7 @@ impl From<NetworkData> for Network {
             id: data.id,
             name: data.name,
             ipv4_enabled: data.ipv4_enabled,
-            ipv4_subnet: data.ipv4_subnet,
+            ipv4_prefix: data.ipv4_prefix,
             ipv6_enabled: data.ipv6_enabled,
             ipv6_prefix: data.ipv6_prefix,
             dns_servers: data.dns_servers,
@@ -622,7 +622,7 @@ impl From<&NetworkData> for Network {
             id: data.id.clone(),
             name: data.name.clone(),
             ipv4_enabled: data.ipv4_enabled,
-            ipv4_subnet: data.ipv4_subnet.clone(),
+            ipv4_prefix: data.ipv4_prefix.clone(),
             ipv6_enabled: data.ipv6_enabled,
             ipv6_prefix: data.ipv6_prefix.clone(),
             dns_servers: data.dns_servers.clone(),
@@ -652,9 +652,10 @@ pub async fn create_network(
     Json(req): Json<CreateNetworkRequest>,
 ) -> Result<Json<Network>, ApiError> {
     let store_req = StoreCreateNetworkRequest {
+        project_id: String::new(), // Legacy handler — no project_id
         name: req.name.clone(),
         ipv4_enabled: req.ipv4_enabled.unwrap_or(true),
-        ipv4_subnet: req.ipv4_subnet,
+        ipv4_prefix: req.ipv4_prefix,
         ipv6_enabled: req.ipv6_enabled.unwrap_or(false),
         ipv6_prefix: req.ipv6_prefix,
         dns_servers: req.dns_servers.unwrap_or_default(),
@@ -892,6 +893,7 @@ pub async fn create_nic(
     Json(req): Json<CreateNicRequest>,
 ) -> Result<Json<Nic>, ApiError> {
     let store_req = StoreCreateNicRequest {
+        project_id: String::new(), // Legacy handler — no project_id
         network_id: req.network_id,
         name: req.name,
         mac_address: req.mac_address,
@@ -899,6 +901,7 @@ pub async fn create_nic(
         ipv6_address: req.ipv6_address,
         routed_ipv4_prefixes: req.routed_ipv4_prefixes.unwrap_or_default(),
         routed_ipv6_prefixes: req.routed_ipv6_prefixes.unwrap_or_default(),
+        security_group_id: None,
     };
 
     let data = state.store.create_nic(store_req).await?;
@@ -1043,18 +1046,18 @@ pub async fn delete_nic(
 pub struct CreateVmRequest {
     /// VM name
     pub name: String,
+    /// Project ID
+    pub project_id: String,
     /// Optional: require specific node (by ID or name)
     pub node_selector: Option<String>,
     /// CPU cores
     pub cpu_cores: u32,
     /// Memory in MB
     pub memory_mb: u64,
-    /// Disk size in GB
-    pub disk_gb: u64,
-    /// Network ID to attach to
-    pub network_id: String,
-    /// NIC ID (auto-created if not provided)
-    pub nic_id: Option<String>,
+    /// Volume ID (boot volume)
+    pub volume_id: String,
+    /// NIC ID
+    pub nic_id: String,
     /// Boot image reference
     pub image: String,
     /// Initial desired state (default: Running)
@@ -1085,12 +1088,12 @@ pub struct UpdateVmStatusRequestBody {
 #[derive(Serialize, ToSchema)]
 pub struct VmSpecResponse {
     pub name: String,
+    pub project_id: String,
     pub node_selector: Option<String>,
     pub cpu_cores: u32,
     pub memory_mb: u64,
-    pub disk_gb: u64,
-    pub network_id: String,
-    pub nic_id: Option<String>,
+    pub volume_id: String,
+    pub nic_id: String,
     pub image: String,
     pub desired_state: String,
 }
@@ -1099,11 +1102,11 @@ impl From<VmSpec> for VmSpecResponse {
     fn from(spec: VmSpec) -> Self {
         Self {
             name: spec.name,
+            project_id: spec.project_id,
             node_selector: spec.node_selector,
             cpu_cores: spec.cpu_cores,
             memory_mb: spec.memory_mb,
-            disk_gb: spec.disk_gb,
-            network_id: spec.network_id,
+            volume_id: spec.volume_id,
             nic_id: spec.nic_id,
             image: spec.image,
             desired_state: format!("{:?}", spec.desired_state),
@@ -1177,15 +1180,13 @@ pub async fn create_vm(
 
     let spec = VmSpec {
         name: req.name.clone(),
-        project_id: None,
+        project_id: req.project_id,
         node_selector: req.node_selector,
         cpu_cores: req.cpu_cores,
         memory_mb: req.memory_mb,
-        disk_gb: req.disk_gb,
-        network_id: req.network_id,
+        volume_id: req.volume_id,
         nic_id: req.nic_id,
         image: req.image,
-        disks: vec![],
         desired_state,
     };
 

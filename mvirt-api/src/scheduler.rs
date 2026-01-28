@@ -31,7 +31,6 @@ pub enum ScheduleError {
     InsufficientResources {
         required_cpu: u32,
         required_memory: u64,
-        required_storage: u64,
     },
 }
 
@@ -45,12 +44,11 @@ impl std::fmt::Display for ScheduleError {
             ScheduleError::InsufficientResources {
                 required_cpu,
                 required_memory,
-                required_storage,
             } => {
                 write!(
                     f,
-                    "No nodes have sufficient resources (need {} CPU, {}MB RAM, {}GB storage)",
-                    required_cpu, required_memory, required_storage
+                    "No nodes have sufficient resources (need {} CPU, {}MB RAM)",
+                    required_cpu, required_memory
                 )
             }
         }
@@ -114,7 +112,6 @@ impl Scheduler {
             return Err(ScheduleError::InsufficientResources {
                 required_cpu: spec.cpu_cores,
                 required_memory: spec.memory_mb,
-                required_storage: spec.disk_gb,
             });
         }
 
@@ -164,7 +161,6 @@ impl Scheduler {
     fn has_sufficient_resources(&self, node: &NodeData, spec: &VmSpec) -> bool {
         node.resources.available_cpu_cores >= spec.cpu_cores
             && node.resources.available_memory_mb >= spec.memory_mb
-            && node.resources.available_storage_gb >= spec.disk_gb
     }
 }
 
@@ -201,18 +197,16 @@ mod tests {
         }
     }
 
-    fn make_spec(cpu: u32, memory: u64, storage: u64) -> VmSpec {
+    fn make_spec(cpu: u32, memory: u64, _storage: u64) -> VmSpec {
         VmSpec {
             name: "test-vm".to_string(),
-            project_id: None,
+            project_id: "test-project".to_string(),
             node_selector: None,
             cpu_cores: cpu,
             memory_mb: memory,
-            disk_gb: storage,
-            network_id: "net-1".to_string(),
-            nic_id: None,
+            volume_id: "vol-1".to_string(),
+            nic_id: "nic-1".to_string(),
             image: "ubuntu:22.04".to_string(),
-            disks: vec![],
             desired_state: VmDesiredState::Running,
         }
     }

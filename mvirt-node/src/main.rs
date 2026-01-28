@@ -25,6 +25,7 @@ mod proto;
 mod reconciler;
 
 use agent::NodeAgent;
+use clients::{NetClient, VmmClient, ZfsClient};
 
 /// mvirt Node Agent
 #[derive(Parser, Debug)]
@@ -101,6 +102,13 @@ async fn main() -> Result<()> {
     // Create audit logger
     let audit = Arc::new(crate::agent::NodeAuditLogger::new(&args.log_endpoint));
 
+    // Connect to local service daemons
+    info!("Connecting to local services...");
+    let vmm_client = VmmClient::connect(&args.vmm_endpoint).await?;
+    let zfs_client = ZfsClient::connect(&args.zfs_endpoint).await?;
+    let net_client = NetClient::connect(&args.net_endpoint).await?;
+    info!("Connected to all local services");
+
     // Create the agent
     let agent = Arc::new(RwLock::new(NodeAgent::new(
         args.api_endpoint.clone(),
@@ -116,6 +124,9 @@ async fn main() -> Result<()> {
             available_storage_gb: args.storage_gb.unwrap_or(0),
         },
         audit,
+        vmm_client,
+        zfs_client,
+        net_client,
     )));
 
     // Run the agent loop with reconnection

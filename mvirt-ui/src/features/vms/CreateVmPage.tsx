@@ -114,12 +114,12 @@ export function CreateVmPage() {
 
             <div className="space-y-2">
               <Label htmlFor="template">Boot Image (optional)</Label>
-              <Select value={templateId} onValueChange={setTemplateId}>
+              <Select value={templateId || 'none'} onValueChange={(v) => setTemplateId(v === 'none' ? '' : v)}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select a template..." />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">None</SelectItem>
+                  <SelectItem value="none">None</SelectItem>
                   {templates?.map((template) => (
                     <SelectItem key={template.id} value={template.id}>
                       {template.name}

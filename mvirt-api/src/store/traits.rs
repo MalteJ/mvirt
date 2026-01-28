@@ -42,9 +42,10 @@ pub struct UpdateNodeStatusRequest {
 /// Request to create a new network.
 #[derive(Debug, Clone)]
 pub struct CreateNetworkRequest {
+    pub project_id: String,
     pub name: String,
     pub ipv4_enabled: bool,
-    pub ipv4_subnet: Option<String>,
+    pub ipv4_prefix: Option<String>,
     pub ipv6_enabled: bool,
     pub ipv6_prefix: Option<String>,
     pub dns_servers: Vec<String>,
@@ -68,6 +69,7 @@ pub struct DeleteNetworkResult {
 /// Request to create a new NIC.
 #[derive(Debug, Clone)]
 pub struct CreateNicRequest {
+    pub project_id: String,
     pub network_id: String,
     pub name: Option<String>,
     pub mac_address: Option<String>,
@@ -75,6 +77,7 @@ pub struct CreateNicRequest {
     pub ipv6_address: Option<String>,
     pub routed_ipv4_prefixes: Vec<String>,
     pub routed_ipv6_prefixes: Vec<String>,
+    pub security_group_id: Option<String>,
 }
 
 /// Request to update a NIC.
@@ -113,6 +116,8 @@ pub struct UpdateVmStatusRequest {
 /// Request to create a new project.
 #[derive(Debug, Clone)]
 pub struct CreateProjectRequest {
+    /// User-provided project ID (must be unique, lowercase alphanumeric)
+    pub id: String,
     pub name: String,
     pub description: Option<String>,
 }

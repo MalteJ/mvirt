@@ -20,3 +20,12 @@ export function formatBytes(bytes: number): string {
 export function formatTimestamp(ns: number): string {
   return new Date(ns / 1_000_000).toISOString()
 }
+
+export function formatDate(dateStr: string): string {
+  const date = new Date(dateStr)
+  return date.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}

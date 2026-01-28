@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::command::{
-    DiskConfig, ImportJobData, ImportJobState, NetworkData, NicData, ProjectData, SnapshotData,
-    TemplateData, VmData, VmDesiredState, VmPhase, VolumeData,
+    ImportJobData, ImportJobState, NetworkData, NicData, ProjectData, SnapshotData, TemplateData,
+    VmData, VmDesiredState, VmPhase, VolumeData,
 };
 
 // =============================================================================
@@ -38,44 +38,15 @@ impl UiVmState {
     }
 }
 
-/// UI-compatible disk configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UiDiskConfig {
-    pub volume_id: String,
-    pub readonly: bool,
-}
-
-impl From<&DiskConfig> for UiDiskConfig {
-    fn from(d: &DiskConfig) -> Self {
-        Self {
-            volume_id: d.volume_id.clone(),
-            readonly: d.readonly,
-        }
-    }
-}
-
-/// UI-compatible NIC configuration for VM
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UiNicConfig {
-    pub nic_id: String,
-}
-
 /// UI-compatible VM configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiVmConfig {
     pub vcpus: u32,
     pub memory_mb: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kernel_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub boot_disk: Option<String>,
-    pub disks: Vec<UiDiskConfig>,
-    pub nics: Vec<UiNicConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_data: Option<String>,
+    pub volume_id: String,
+    pub nic_id: String,
+    pub image: String,
 }
 
 /// UI-compatible VM representation
@@ -83,8 +54,7 @@ pub struct UiVmConfig {
 #[serde(rename_all = "camelCase")]
 pub struct UiVm {
     pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
+    pub project_id: String,
     pub name: String,
     pub state: UiVmState,
     pub config: UiVmConfig,
@@ -108,21 +78,15 @@ impl From<VmData> for UiVm {
 
         Self {
             id: data.id,
-            project_id: data.spec.project_id,
-            name: data.spec.name,
+            project_id: data.spec.project_id.clone(),
+            name: data.spec.name.clone(),
             state,
             config: UiVmConfig {
                 vcpus: data.spec.cpu_cores,
                 memory_mb: data.spec.memory_mb,
-                kernel_path: None,
-                boot_disk: Some(data.spec.image.clone()),
-                disks: data.spec.disks.iter().map(UiDiskConfig::from).collect(),
-                nics: data
-                    .spec
-                    .nic_id
-                    .map(|id| vec![UiNicConfig { nic_id: id }])
-                    .unwrap_or_default(),
-                user_data: None,
+                volume_id: data.spec.volume_id.clone(),
+                nic_id: data.spec.nic_id.clone(),
+                image: data.spec.image.clone(),
             },
             created_at: data.created_at,
             started_at,
@@ -137,8 +101,7 @@ impl From<VmData> for UiVm {
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateVmRequest {
     pub name: String,
-    #[serde(default)]
-    pub project_id: Option<String>,
+    pub project_id: String,
     pub config: UiCreateVmConfig,
     #[serde(default)]
     pub node_selector: Option<String>,
@@ -150,16 +113,9 @@ pub struct UiCreateVmRequest {
 pub struct UiCreateVmConfig {
     pub vcpus: u32,
     pub memory_mb: u64,
-    #[serde(default)]
-    pub kernel_path: Option<String>,
-    #[serde(default)]
-    pub boot_disk: Option<String>,
-    #[serde(default)]
-    pub disks: Vec<UiDiskConfig>,
-    #[serde(default)]
-    pub nics: Vec<UiNicConfig>,
-    #[serde(default)]
-    pub user_data: Option<String>,
+    pub volume_id: String,
+    pub nic_id: String,
+    pub image: String,
 }
 
 /// Response wrapper for VM list
@@ -178,12 +134,11 @@ pub struct VmListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct UiNetwork {
     pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
+    pub project_id: String,
     pub name: String,
     pub ipv4_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ipv4_subnet: Option<String>,
+    pub ipv4_prefix: Option<String>,
     pub ipv6_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ipv6_prefix: Option<String>,
@@ -197,10 +152,10 @@ impl From<NetworkData> for UiNetwork {
     fn from(data: NetworkData) -> Self {
         Self {
             id: data.id,
-            project_id: None, // Networks don't have project_id in internal model yet
+            project_id: data.project_id,
             name: data.name,
             ipv4_enabled: data.ipv4_enabled,
-            ipv4_subnet: data.ipv4_subnet,
+            ipv4_prefix: data.ipv4_prefix,
             ipv6_enabled: data.ipv6_enabled,
             ipv6_prefix: data.ipv6_prefix,
             dns_servers: data.dns_servers,
@@ -216,18 +171,19 @@ impl From<NetworkData> for UiNetwork {
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateNetworkRequest {
     pub name: String,
-    #[serde(default)]
-    pub project_id: Option<String>,
+    pub project_id: String,
     #[serde(default = "default_true")]
     pub ipv4_enabled: bool,
     #[serde(default)]
-    pub ipv4_subnet: Option<String>,
+    pub ipv4_prefix: Option<String>,
     #[serde(default)]
     pub ipv6_enabled: bool,
     #[serde(default)]
     pub ipv6_prefix: Option<String>,
     #[serde(default)]
     pub dns_servers: Vec<String>,
+    #[serde(default)]
+    pub ntp_servers: Vec<String>,
     #[serde(default)]
     pub is_public: bool,
 }
@@ -286,6 +242,7 @@ impl From<NicData> for UiNic {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateNicRequest {
+    pub project_id: String,
     pub network_id: String,
     #[serde(default)]
     pub name: Option<String>,
@@ -295,6 +252,8 @@ pub struct UiCreateNicRequest {
     pub ipv4_address: Option<String>,
     #[serde(default)]
     pub ipv6_address: Option<String>,
+    #[serde(default)]
+    pub security_group_id: Option<String>,
 }
 
 /// Response wrapper for NIC list
@@ -334,6 +293,8 @@ impl From<ProjectData> for UiProject {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateProjectRequest {
+    /// User-provided project ID (must be unique, lowercase alphanumeric)
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
@@ -610,4 +571,97 @@ pub struct ListVolumesQuery {
     pub project_id: Option<String>,
     #[serde(default)]
     pub node_id: Option<String>,
+}
+
+// =============================================================================
+// Security Group Types
+// =============================================================================
+
+/// Rule direction
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum UiRuleDirection {
+    #[serde(rename = "INGRESS")]
+    Ingress,
+    #[serde(rename = "EGRESS")]
+    Egress,
+}
+
+/// Rule protocol
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum UiRuleProtocol {
+    #[serde(rename = "ALL")]
+    All,
+    #[serde(rename = "TCP")]
+    Tcp,
+    #[serde(rename = "UDP")]
+    Udp,
+    #[serde(rename = "ICMP")]
+    Icmp,
+    #[serde(rename = "ICMPV6")]
+    Icmpv6,
+}
+
+/// UI-compatible security group rule
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiSecurityGroupRule {
+    pub id: String,
+    pub security_group_id: String,
+    pub direction: UiRuleDirection,
+    pub protocol: UiRuleProtocol,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_start: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_end: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cidr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
+/// UI-compatible security group
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiSecurityGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub rules: Vec<UiSecurityGroupRule>,
+    pub nic_count: u32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Request to create a security group
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreateSecurityGroupRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Request to create a security group rule
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreateSecurityGroupRuleRequest {
+    pub direction: UiRuleDirection,
+    pub protocol: UiRuleProtocol,
+    #[serde(default)]
+    pub port_start: Option<u16>,
+    #[serde(default)]
+    pub port_end: Option<u16>,
+    #[serde(default)]
+    pub cidr: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Response wrapper for security group list
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityGroupListResponse {
+    pub security_groups: Vec<UiSecurityGroup>,
 }

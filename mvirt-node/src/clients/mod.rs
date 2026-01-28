@@ -1,9 +1,9 @@
 //! Clients for local mvirt daemons.
 //!
 //! These clients connect to local services on the hypervisor:
-//! - mvirt-net: Network management (NICs, bridges)
 //! - mvirt-vmm: VM management (create, start, stop)
-//! - mvirt-zfs: Storage management (volumes, snapshots)
+//! - mvirt-zfs: Storage management (volumes, snapshots, templates)
+//! - mvirt-net: Network management (networks, NICs, security groups)
 
 pub mod net;
 pub mod vmm;

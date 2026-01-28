@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Bell, Moon, Sun, LogOut, User, Check, AlertTriangle, Info, AlertCircle, CheckCircle, ChevronDown, FolderKanban } from 'lucide-react'
+import { useNavigate, Link } from 'react-router-dom'
+import { Bell, Moon, Sun, LogOut, User, Check, AlertTriangle, Info, AlertCircle, CheckCircle, ChevronDown, FolderKanban, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -101,6 +101,13 @@ export function Header() {
               )}
             </DropdownMenuItem>
           ))}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem asChild>
+            <Link to="/projects" className="cursor-pointer">
+              <Settings className="mr-2 h-4 w-4" />
+              Manage Projects
+            </Link>
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 

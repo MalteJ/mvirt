@@ -60,7 +60,7 @@ message DeregisterResponse {
 }
 
 // =============================================================================
-// Resource Types
+// Common Types
 // =============================================================================
 
 message NodeResources {
@@ -72,122 +72,16 @@ message NodeResources {
     uint64 available_storage_gb = 6;
 }
 
-// =============================================================================
-// Spec Streaming (API → Node)
-// =============================================================================
-
-message WatchSpecsRequest {
-    string node_id = 1;
-    uint64 since_revision = 2;    // Resume from this revision (0 = from start)
+// Einheitliche Metadaten für alle Specs
+message ResourceMeta {
+    string id = 1;                    // UUID
+    string name = 2;                  // Human-readable name
+    string project_id = 3;            // Multi-tenancy (für Logging/Debugging auf Node)
+    optional string node_id = 4;      // Nur gesetzt wenn node-spezifisch
+    map<string, string> labels = 5;   // Für Filtering/Scheduling
 }
 
-// SpecEvent contains a change to be applied by the node
-message SpecEvent {
-    uint64 revision = 1;          // Monotonically increasing revision
-    SpecEventType type = 2;
-    oneof spec {
-        NetworkSpec network = 3;
-        VmSpec vm = 4;
-        NicSpec nic = 5;
-    }
-}
-
-enum SpecEventType {
-    SPEC_EVENT_TYPE_UNSPECIFIED = 0;
-    SPEC_EVENT_TYPE_CREATE = 1;
-    SPEC_EVENT_TYPE_UPDATE = 2;
-    SPEC_EVENT_TYPE_DELETE = 3;
-}
-
-// NetworkSpec - desired state for a network on this node
-message NetworkSpec {
-    string id = 1;
-    string name = 2;
-    bool ipv4_enabled = 3;
-    string ipv4_subnet = 4;
-    bool ipv6_enabled = 5;
-    string ipv6_prefix = 6;
-    repeated string dns_servers = 7;
-    repeated string ntp_servers = 8;
-    bool is_public = 9;
-}
-
-// VmSpec - desired state for a VM
-message VmSpec {
-    string id = 1;
-    string name = 2;
-    string node_id = 3;           // Assigned to this node
-    uint32 cpu_cores = 4;
-    uint64 memory_mb = 5;
-    uint64 disk_gb = 6;
-    string network_id = 7;
-    string nic_id = 8;
-    string image = 9;             // Boot image reference
-    VmDesiredState desired_state = 10;
-}
-
-enum VmDesiredState {
-    VM_DESIRED_STATE_UNSPECIFIED = 0;
-    VM_DESIRED_STATE_RUNNING = 1;
-    VM_DESIRED_STATE_STOPPED = 2;
-}
-
-// NicSpec - desired state for a NIC
-message NicSpec {
-    string id = 1;
-    string name = 2;
-    string network_id = 3;
-    string mac_address = 4;
-    string ipv4_address = 5;
-    string ipv6_address = 6;
-    repeated string routed_ipv4_prefixes = 7;
-    repeated string routed_ipv6_prefixes = 8;
-}
-
-// =============================================================================
-// Status Updates (Node → API)
-// =============================================================================
-
-message UpdateResourceStatusRequest {
-    string node_id = 1;
-    oneof status {
-        NetworkStatus network_status = 2;
-        VmStatus vm_status = 3;
-        NicStatus nic_status = 4;
-    }
-}
-
-message UpdateResourceStatusResponse {
-    bool success = 1;
-    string message = 2;
-}
-
-// NetworkStatus - actual state of a network on this node
-message NetworkStatus {
-    string id = 1;
-    ResourcePhase phase = 2;
-    string message = 3;           // Error message if phase is FAILED
-    string bridge_name = 4;       // Actual bridge device name
-}
-
-// VmStatus - actual state of a VM
-message VmStatus {
-    string id = 1;
-    VmPhase phase = 2;
-    string message = 3;
-    string ip_address = 4;        // Assigned IP address
-    uint64 pid = 5;               // Hypervisor process PID
-}
-
-// NicStatus - actual state of a NIC
-message NicStatus {
-    string id = 1;
-    ResourcePhase phase = 2;
-    string message = 3;
-    string socket_path = 4;       // vhost-user socket path
-}
-
-// Common resource phase
+// Common resource phase (for resources with status)
 enum ResourcePhase {
     RESOURCE_PHASE_UNSPECIFIED = 0;
     RESOURCE_PHASE_PENDING = 1;
@@ -208,4 +102,267 @@ enum VmPhase {
     VM_PHASE_STOPPING = 5;
     VM_PHASE_STOPPED = 6;
     VM_PHASE_FAILED = 7;
+}
+
+enum VmDesiredState {
+    VM_DESIRED_STATE_UNSPECIFIED = 0;
+    VM_DESIRED_STATE_RUNNING = 1;
+    VM_DESIRED_STATE_STOPPED = 2;
+}
+
+// =============================================================================
+// Spec Streaming (API → Node)
+// =============================================================================
+
+message WatchSpecsRequest {
+    string node_id = 1;
+    uint64 since_revision = 2;    // Resume from this revision (0 = from start)
+}
+
+// SpecEvent wraps spec changes streamed to the node
+// - revision: Monotonically increasing, for resumption after disconnect
+// - type: CREATE/UPDATE/DELETE
+// - spec: The actual spec
+message SpecEvent {
+    uint64 revision = 1;
+    SpecEventType type = 2;
+    oneof spec {
+        NetworkSpec network = 3;          // Info-only (no status expected)
+        VmSpec vm = 4;
+        NicSpec nic = 5;
+        TemplateSpec template = 6;
+        VolumeSpec volume = 7;
+        SecurityGroupSpec security_group = 8;
+        RouteSpec route = 9;
+    }
+}
+
+enum SpecEventType {
+    SPEC_EVENT_TYPE_UNSPECIFIED = 0;
+    SPEC_EVENT_TYPE_CREATE = 1;
+    SPEC_EVENT_TYPE_UPDATE = 2;
+    SPEC_EVENT_TYPE_DELETE = 3;
+}
+
+// =============================================================================
+// NetworkSpec (Info-only, no status)
+// =============================================================================
+
+// Networks are not physically created on the node, but the node needs this info
+// because NICs inherit values from the Network (DNS, NTP, etc.).
+message NetworkSpec {
+    ResourceMeta meta = 1;
+
+    // IPv4 Configuration
+    bool ipv4_enabled = 2;
+    string ipv4_prefix = 3;           // e.g. "10.0.0.0/24"
+
+    // IPv6 Configuration
+    bool ipv6_enabled = 4;
+    string ipv6_prefix = 5;           // e.g. "fd00::/64"
+
+    // Services (inherited by NICs)
+    repeated string dns_servers = 6;
+    repeated string ntp_servers = 7;
+
+    // Flags
+    bool is_public = 8;
+}
+
+// NO NetworkStatus - Node does not report status for Networks
+
+// =============================================================================
+// VmSpec / VmStatus
+// =============================================================================
+
+message VmSpec {
+    ResourceMeta meta = 1;            // node_id is set here!
+
+    // Compute
+    uint32 cpu_cores = 2;
+    uint64 memory_mb = 3;
+
+    // Storage
+    string volume_id = 4;             // Reference to Volume
+
+    // Network
+    string nic_id = 5;
+
+    // Boot
+    string image = 6;                 // Template/Image reference
+
+    // Desired State
+    VmDesiredState desired_state = 7;
+}
+
+message VmStatus {
+    string id = 1;
+    VmPhase phase = 2;
+    optional string message = 3;
+
+    optional string ip_address = 4;
+    optional uint64 pid = 5;          // cloud-hypervisor PID
+}
+
+// =============================================================================
+// NicSpec / NicStatus
+// =============================================================================
+
+message NicSpec {
+    ResourceMeta meta = 1;
+
+    // Network Attachment
+    string network_id = 2;
+
+    // Addressing
+    string mac_address = 3;
+    optional string ipv4_address = 4;
+    optional string ipv6_address = 5;
+
+    // Routed Prefixes (for VMs acting as routers)
+    repeated string routed_ipv4_prefixes = 6;
+    repeated string routed_ipv6_prefixes = 7;
+
+    // Security
+    string security_group_id = 8;
+}
+
+message NicStatus {
+    string id = 1;
+    ResourcePhase phase = 2;
+    optional string message = 3;
+
+    string socket_path = 4;           // vhost-user socket
+}
+
+// =============================================================================
+// TemplateSpec / TemplateStatus (image download)
+// =============================================================================
+
+// Node downloads and stores the template image locally.
+message TemplateSpec {
+    ResourceMeta meta = 1;            // node_id is set here!
+
+    string url = 2;                   // Download URL for the image
+    optional string checksum = 3;     // Expected checksum (e.g. "sha256:abc...")
+}
+
+message TemplateStatus {
+    string id = 1;
+    ResourcePhase phase = 2;
+    optional string message = 3;
+
+    uint64 size_bytes = 4;            // Downloaded size
+    string local_path = 5;           // Path on node (e.g. ZFS dataset)
+}
+
+// =============================================================================
+// VolumeSpec / VolumeStatus (for mvirt-zfs)
+// =============================================================================
+
+message VolumeSpec {
+    ResourceMeta meta = 1;            // node_id is set here!
+
+    uint64 size_gb = 2;
+    optional string template_id = 3;  // Clone from this template (if set)
+
+    // Optional: Attach to VM
+    optional string attached_vm_id = 4;
+}
+
+message VolumeStatus {
+    string id = 1;
+    ResourcePhase phase = 2;
+    optional string message = 3;
+
+    string zfs_path = 4;              // e.g. "rpool/mvirt/volumes/vol-123"
+    string device_path = 5;           // e.g. "/dev/zvol/rpool/mvirt/volumes/vol-123"
+    uint64 used_bytes = 6;
+}
+
+// =============================================================================
+// SecurityGroupSpec / SecurityGroupStatus (for mvirt-ebpf/nftables)
+// =============================================================================
+
+message SecurityGroupSpec {
+    ResourceMeta meta = 1;
+
+    repeated SecurityRule rules = 2;
+}
+
+message SecurityRule {
+    string id = 1;
+    RuleDirection direction = 2;
+    RuleProtocol protocol = 3;
+    optional uint32 port_start = 4;
+    optional uint32 port_end = 5;
+
+    // Source/Destination - either CIDR or SecurityGroup
+    oneof target {
+        string cidr = 6;                // IP Prefix: e.g. "10.0.0.0/8", "0.0.0.0/0"
+        string security_group_id = 7;   // Reference to another SecurityGroup
+    }
+}
+
+enum RuleDirection {
+    RULE_DIRECTION_UNSPECIFIED = 0;
+    RULE_DIRECTION_INGRESS = 1;
+    RULE_DIRECTION_EGRESS = 2;
+}
+
+enum RuleProtocol {
+    RULE_PROTOCOL_UNSPECIFIED = 0;
+    RULE_PROTOCOL_ALL = 1;
+    RULE_PROTOCOL_TCP = 2;
+    RULE_PROTOCOL_UDP = 3;
+    RULE_PROTOCOL_ICMP = 4;
+    RULE_PROTOCOL_ICMPV6 = 5;
+}
+
+message SecurityGroupStatus {
+    string id = 1;
+    ResourcePhase phase = 2;
+    optional string message = 3;
+
+    uint32 rule_count = 4;            // Number of active rules
+}
+
+// =============================================================================
+// RouteSpec / RouteStatus (for Inter-Node IP-in-IPv6 Tunneling)
+// =============================================================================
+
+message RouteSpec {
+    ResourceMeta meta = 1;            // node_id is set here!
+
+    string destination = 2;           // CIDR: e.g. "10.0.1.0/24"
+    string tunnel_remote = 3;         // IPv6 address of remote node for IP-in-IPv6 tunnel
+}
+
+message RouteStatus {
+    string id = 1;
+    ResourcePhase phase = 2;
+    optional string message = 3;
+
+    bool active = 4;                  // Route is in kernel routing table
+}
+
+// =============================================================================
+// Status Updates (Node → API)
+// =============================================================================
+
+message UpdateResourceStatusRequest {
+    string node_id = 1;
+    oneof status {
+        VmStatus vm_status = 2;
+        NicStatus nic_status = 3;
+        TemplateStatus template_status = 4;
+        VolumeStatus volume_status = 5;
+        SecurityGroupStatus security_group_status = 6;
+        RouteStatus route_status = 7;
+    }
+}
+
+message UpdateResourceStatusResponse {
+    bool success = 1;
+    string message = 2;
 }

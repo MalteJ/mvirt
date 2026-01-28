@@ -166,7 +166,36 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/storage/pool", get(ui_handlers::get_pool_stats))
         // Logs
         .route("/logs", get(ui_handlers::query_logs))
-        .route("/logs/stream", get(ui_handlers::log_events));
+        .route("/logs/stream", get(ui_handlers::log_events))
+        // Security Groups
+        .route("/security-groups", get(ui_handlers::list_security_groups))
+        .route("/security-groups", post(ui_handlers::create_security_group))
+        .route(
+            "/security-groups/{id}",
+            get(ui_handlers::get_security_group),
+        )
+        .route(
+            "/security-groups/{id}",
+            delete(ui_handlers::delete_security_group),
+        )
+        .route(
+            "/security-groups/{id}/rules",
+            post(ui_handlers::create_security_group_rule),
+        )
+        .route(
+            "/security-groups/{sg_id}/rules/{rule_id}",
+            delete(ui_handlers::delete_security_group_rule),
+        )
+        // Notifications (stub)
+        .route("/notifications", get(ui_handlers::list_notifications))
+        .route(
+            "/notifications/{id}/read",
+            post(ui_handlers::mark_notification_read),
+        )
+        .route(
+            "/notifications/read-all",
+            post(ui_handlers::mark_all_notifications_read),
+        );
 
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))

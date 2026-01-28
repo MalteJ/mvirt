@@ -152,7 +152,7 @@ impl ApiState {
     pub fn list_vms_by_project(&self, project_id: &str) -> Vec<&VmData> {
         self.vms
             .values()
-            .filter(|v| v.spec.project_id.as_deref() == Some(project_id))
+            .filter(|v| v.spec.project_id == project_id)
             .collect()
     }
 
@@ -374,9 +374,10 @@ impl StateMachine<Command, Response> for ApiState {
             Command::CreateNetwork {
                 id,
                 timestamp,
+                project_id,
                 name,
                 ipv4_enabled,
-                ipv4_subnet,
+                ipv4_prefix,
                 ipv6_enabled,
                 ipv6_prefix,
                 dns_servers,
@@ -406,9 +407,10 @@ impl StateMachine<Command, Response> for ApiState {
                 // Use timestamp from command (set before Raft replication for determinism)
                 let network = NetworkData {
                     id: id.clone(),
+                    project_id,
                     name,
                     ipv4_enabled,
-                    ipv4_subnet,
+                    ipv4_prefix,
                     ipv6_enabled,
                     ipv6_prefix,
                     dns_servers,
@@ -509,6 +511,7 @@ impl StateMachine<Command, Response> for ApiState {
             Command::CreateNic {
                 id,
                 timestamp,
+                project_id,
                 network_id,
                 name,
                 mac_address,
@@ -516,6 +519,7 @@ impl StateMachine<Command, Response> for ApiState {
                 ipv6_address,
                 routed_ipv4_prefixes,
                 routed_ipv6_prefixes,
+                security_group_id,
                 ..
             } => {
                 // Check network exists
@@ -540,6 +544,7 @@ impl StateMachine<Command, Response> for ApiState {
                 // Use timestamp from command for determinism
                 let nic = NicData {
                     id: id.clone(),
+                    project_id,
                     name,
                     network_id: network_id.clone(),
                     mac_address: mac,
@@ -547,6 +552,7 @@ impl StateMachine<Command, Response> for ApiState {
                     ipv6_address,
                     routed_ipv4_prefixes,
                     routed_ipv6_prefixes,
+                    security_group_id,
                     socket_path: format!("/run/mvirt-net/nic-{}.sock", id),
                     state: NicStateData::Created,
                     created_at: timestamp.clone(),
@@ -640,12 +646,12 @@ impl StateMachine<Command, Response> for ApiState {
                     return (Response::Vm(self.vms.get(&id).unwrap().clone()), vec![]);
                 }
 
-                // Check network exists
-                if !self.networks.contains_key(&spec.network_id) {
+                // Check NIC exists
+                if !self.nics.contains_key(&spec.nic_id) {
                     return (
                         Response::Error {
                             code: 404,
-                            message: format!("Network '{}' not found", spec.network_id),
+                            message: format!("NIC '{}' not found", spec.nic_id),
                         },
                         vec![],
                     );
@@ -1131,10 +1137,11 @@ mod tests {
         Command::CreateNetwork {
             request_id: request_id.to_string(),
             id: id.to_string(),
-            timestamp: "2024-01-01T00:00:00Z".to_string(), // Fixed timestamp for deterministic tests
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            project_id: "test-project".to_string(),
             name: name.to_string(),
             ipv4_enabled: true,
-            ipv4_subnet: Some("10.0.0.0/24".to_string()),
+            ipv4_prefix: Some("10.0.0.0/24".to_string()),
             ipv6_enabled: false,
             ipv6_prefix: None,
             dns_servers: vec!["8.8.8.8".to_string()],
@@ -1147,7 +1154,8 @@ mod tests {
         Command::CreateNic {
             request_id: request_id.to_string(),
             id: id.to_string(),
-            timestamp: "2024-01-01T00:00:00Z".to_string(), // Fixed timestamp for deterministic tests
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            project_id: "test-project".to_string(),
             network_id: network_id.to_string(),
             name: name.map(|s| s.to_string()),
             mac_address: None,
@@ -1155,6 +1163,7 @@ mod tests {
             ipv6_address: None,
             routed_ipv4_prefixes: vec![],
             routed_ipv6_prefixes: vec![],
+            security_group_id: None,
         }
     }
 
@@ -1169,7 +1178,7 @@ mod tests {
                 assert_eq!(data.id, "net-1");
                 assert_eq!(data.name, "test-network");
                 assert!(data.ipv4_enabled);
-                assert_eq!(data.ipv4_subnet, Some("10.0.0.0/24".to_string()));
+                assert_eq!(data.ipv4_prefix, Some("10.0.0.0/24".to_string()));
                 assert!(!data.ipv6_enabled);
                 assert_eq!(data.dns_servers, vec!["8.8.8.8".to_string()]);
                 assert_eq!(data.nic_count, 0);

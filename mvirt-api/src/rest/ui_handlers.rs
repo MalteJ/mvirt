@@ -14,7 +14,7 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use super::handlers::{ApiError, AppState};
 use super::ui_types::*;
-use crate::command::{DiskConfig, VmDesiredState, VmPhase, VmSpec, VmStatus};
+use crate::command::{VmDesiredState, VmPhase, VmSpec, VmStatus};
 use crate::store::{
     CreateNetworkRequest as StoreCreateNetworkRequest, CreateNicRequest as StoreCreateNicRequest,
     CreateProjectRequest as StoreCreateProjectRequest,
@@ -65,7 +65,34 @@ pub async fn create_project(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UiCreateProjectRequest>,
 ) -> Result<Json<UiProject>, ApiError> {
+    // Validate project ID format: must be lowercase alphanumeric
+    if req.id.is_empty() {
+        return Err(ApiError {
+            error: "Project ID cannot be empty".to_string(),
+            code: 400,
+        });
+    }
+    if !req
+        .id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return Err(ApiError {
+            error: "Project ID must contain only lowercase letters and numbers".to_string(),
+            code: 400,
+        });
+    }
+
+    // Check if project ID already exists
+    if state.store.get_project(&req.id).await?.is_some() {
+        return Err(ApiError {
+            error: format!("Project ID '{}' already exists", req.id),
+            code: 409,
+        });
+    }
+
     let store_req = StoreCreateProjectRequest {
+        id: req.id,
         name: req.name,
         description: req.description,
     };
@@ -106,7 +133,7 @@ pub async fn list_vms(
             query
                 .project_id
                 .as_ref()
-                .is_none_or(|pid| vm.spec.project_id.as_ref() == Some(pid))
+                .is_none_or(|pid| &vm.spec.project_id == pid)
         })
         .map(UiVm::from)
         .collect();
@@ -146,24 +173,9 @@ pub async fn create_vm(
         node_selector: req.node_selector,
         cpu_cores: req.config.vcpus,
         memory_mb: req.config.memory_mb,
-        disk_gb: 10, // Default disk size, not directly used in UI model
-        network_id: req
-            .config
-            .nics
-            .first()
-            .map(|n| n.nic_id.clone())
-            .unwrap_or_default(),
-        nic_id: req.config.nics.first().map(|n| n.nic_id.clone()),
-        image: req.config.boot_disk.unwrap_or_default(),
-        disks: req
-            .config
-            .disks
-            .into_iter()
-            .map(|d| DiskConfig {
-                volume_id: d.volume_id,
-                readonly: d.readonly,
-            })
-            .collect(),
+        volume_id: req.config.volume_id,
+        nic_id: req.config.nic_id,
+        image: req.config.image,
         desired_state: VmDesiredState::Running,
     };
 
@@ -355,13 +367,14 @@ pub async fn create_network(
     Json(req): Json<UiCreateNetworkRequest>,
 ) -> Result<Json<UiNetwork>, ApiError> {
     let store_req = StoreCreateNetworkRequest {
+        project_id: req.project_id,
         name: req.name.clone(),
         ipv4_enabled: req.ipv4_enabled,
-        ipv4_subnet: req.ipv4_subnet,
+        ipv4_prefix: req.ipv4_prefix,
         ipv6_enabled: req.ipv6_enabled,
         ipv6_prefix: req.ipv6_prefix,
         dns_servers: req.dns_servers,
-        ntp_servers: vec![],
+        ntp_servers: req.ntp_servers,
         is_public: req.is_public,
     };
 
@@ -421,6 +434,7 @@ pub async fn create_nic(
     Json(req): Json<UiCreateNicRequest>,
 ) -> Result<Json<UiNic>, ApiError> {
     let store_req = StoreCreateNicRequest {
+        project_id: req.project_id,
         network_id: req.network_id,
         name: req.name,
         mac_address: req.mac_address,
@@ -428,6 +442,7 @@ pub async fn create_nic(
         ipv6_address: req.ipv6_address,
         routed_ipv4_prefixes: vec![],
         routed_ipv6_prefixes: vec![],
+        security_group_id: req.security_group_id,
     };
 
     let data = state.store.create_nic(store_req).await?;
@@ -680,4 +695,160 @@ pub async fn console_ws(
         StatusCode::NOT_IMPLEMENTED,
         "Console WebSocket not implemented",
     )
+}
+
+// =============================================================================
+// Security Group Handlers (in-memory store)
+// =============================================================================
+
+use std::sync::{LazyLock, Mutex};
+
+static SECURITY_GROUPS: LazyLock<Mutex<Vec<UiSecurityGroup>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// List all security groups
+pub async fn list_security_groups(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<SecurityGroupListResponse>, ApiError> {
+    let groups = SECURITY_GROUPS.lock().unwrap();
+    Ok(Json(SecurityGroupListResponse {
+        security_groups: groups.clone(),
+    }))
+}
+
+/// Get a security group by ID
+pub async fn get_security_group(
+    State(_state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<UiSecurityGroup>, ApiError> {
+    let groups = SECURITY_GROUPS.lock().unwrap();
+    match groups.iter().find(|g| g.id == id) {
+        Some(group) => Ok(Json(group.clone())),
+        None => Err(ApiError {
+            error: "Security group not found".to_string(),
+            code: 404,
+        }),
+    }
+}
+
+/// Create a new security group
+pub async fn create_security_group(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<UiCreateSecurityGroupRequest>,
+) -> Result<Json<UiSecurityGroup>, ApiError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let group = UiSecurityGroup {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: req.name.clone(),
+        description: req.description,
+        rules: Vec::new(),
+        nic_count: 0,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+
+    {
+        let mut groups = SECURITY_GROUPS.lock().unwrap();
+        groups.push(group.clone());
+    }
+
+    Ok(Json(group))
+}
+
+/// Delete a security group
+pub async fn delete_security_group(
+    State(_state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let mut groups = SECURITY_GROUPS.lock().unwrap();
+    let initial_len = groups.len();
+    groups.retain(|g| g.id != id);
+
+    if groups.len() == initial_len {
+        return Err(ApiError {
+            error: "Security group not found".to_string(),
+            code: 404,
+        });
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Create a rule in a security group
+pub async fn create_security_group_rule(
+    State(_state): State<Arc<AppState>>,
+    Path(sg_id): Path<String>,
+    Json(req): Json<UiCreateSecurityGroupRuleRequest>,
+) -> Result<Json<UiSecurityGroupRule>, ApiError> {
+    let mut groups = SECURITY_GROUPS.lock().unwrap();
+    let group = groups.iter_mut().find(|g| g.id == sg_id).ok_or(ApiError {
+        error: "Security group not found".to_string(),
+        code: 404,
+    })?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let rule = UiSecurityGroupRule {
+        id: uuid::Uuid::new_v4().to_string(),
+        security_group_id: sg_id.clone(),
+        direction: req.direction,
+        protocol: req.protocol,
+        port_start: req.port_start,
+        port_end: req.port_end,
+        cidr: req.cidr,
+        description: req.description,
+        created_at: now.clone(),
+    };
+
+    group.rules.push(rule.clone());
+    group.updated_at = now;
+
+    Ok(Json(rule))
+}
+
+/// Delete a rule from a security group
+pub async fn delete_security_group_rule(
+    State(_state): State<Arc<AppState>>,
+    Path((sg_id, rule_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let mut groups = SECURITY_GROUPS.lock().unwrap();
+    let group = groups.iter_mut().find(|g| g.id == sg_id).ok_or(ApiError {
+        error: "Security group not found".to_string(),
+        code: 404,
+    })?;
+
+    let initial_len = group.rules.len();
+    group.rules.retain(|r| r.id != rule_id);
+
+    if group.rules.len() == initial_len {
+        return Err(ApiError {
+            error: "Rule not found".to_string(),
+            code: 404,
+        });
+    }
+
+    group.updated_at = chrono::Utc::now().to_rfc3339();
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// =============================================================================
+// Notification Handlers (stub - returns empty data)
+// =============================================================================
+
+/// List notifications (stub - returns empty array)
+pub async fn list_notifications(State(_state): State<Arc<AppState>>) -> Json<Vec<()>> {
+    Json(vec![])
+}
+
+/// Mark a notification as read (stub - no-op)
+pub async fn mark_notification_read(
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
+) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+/// Mark all notifications as read (stub - no-op)
+pub async fn mark_all_notifications_read(State(_state): State<Arc<AppState>>) -> StatusCode {
+    StatusCode::NO_CONTENT
 }

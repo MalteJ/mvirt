@@ -167,7 +167,8 @@ impl NetworkStore for RaftStore {
             timestamp: Utc::now().to_rfc3339(),
             name: req.name,
             ipv4_enabled: req.ipv4_enabled,
-            ipv4_subnet: req.ipv4_subnet,
+            project_id: req.project_id,
+            ipv4_prefix: req.ipv4_prefix,
             ipv6_enabled: req.ipv6_enabled,
             ipv6_prefix: req.ipv6_prefix,
             dns_servers: req.dns_servers,
@@ -245,6 +246,7 @@ impl NicStore for RaftStore {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
+            project_id: req.project_id,
             network_id: req.network_id,
             name: req.name,
             mac_address: req.mac_address,
@@ -252,6 +254,7 @@ impl NicStore for RaftStore {
             ipv6_address: req.ipv6_address,
             routed_ipv4_prefixes: req.routed_ipv4_prefixes,
             routed_ipv6_prefixes: req.routed_ipv6_prefixes,
+            security_group_id: req.security_group_id,
         };
 
         match self.write_command(cmd).await? {
@@ -505,7 +508,7 @@ impl ProjectStore for RaftStore {
     async fn create_project(&self, req: CreateProjectRequest) -> Result<ProjectData> {
         let cmd = Command::CreateProject {
             request_id: uuid::Uuid::new_v4().to_string(),
-            id: uuid::Uuid::new_v4().to_string(),
+            id: req.id,
             timestamp: Utc::now().to_rfc3339(),
             name: req.name,
             description: req.description,

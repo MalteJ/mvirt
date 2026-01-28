@@ -1,89 +1,100 @@
 //! Client for mvirt-vmm daemon.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tonic::transport::Channel;
 use tracing::debug;
 
-/// VM state from mvirt-vmm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmState {
-    Creating,
-    Running,
-    Stopping,
-    Stopped,
-    Failed,
-}
+use crate::proto::vmm::{
+    vm_service_client::VmServiceClient, CreateVmRequest, DeleteVmRequest, GetVmRequest,
+    KillVmRequest, StartVmRequest, StopVmRequest,
+};
 
-/// VM info from mvirt-vmm.
-#[derive(Debug, Clone)]
-pub struct VmInfo {
-    pub id: String,
-    pub name: String,
-    pub state: VmState,
-    pub pid: Option<u32>,
-}
+pub use crate::proto::vmm::{BootMode, DiskConfig, NicConfig, Vm, VmConfig, VmState};
 
 /// Client for interacting with mvirt-vmm.
 pub struct VmmClient {
-    endpoint: String,
+    client: VmServiceClient<Channel>,
 }
 
 impl VmmClient {
-    pub fn new(endpoint: String) -> Self {
-        Self { endpoint }
-    }
-
-    /// Check if connected to mvirt-vmm.
-    pub async fn health_check(&self) -> Result<bool> {
-        debug!("Health check for mvirt-vmm at {}", self.endpoint);
-        // TODO: Implement actual health check
-        Ok(true)
+    pub async fn connect(endpoint: &str) -> Result<Self> {
+        let client = VmServiceClient::connect(endpoint.to_string())
+            .await
+            .context("Failed to connect to mvirt-vmm")?;
+        Ok(Self { client })
     }
 
     /// Get VM by ID.
-    pub async fn get_vm(&self, id: &str) -> Result<Option<VmInfo>> {
+    pub async fn get_vm(&mut self, id: &str) -> Result<Option<Vm>> {
         debug!("Getting VM {} from mvirt-vmm", id);
-        // TODO: Implement via gRPC
-        Ok(None)
+        match self
+            .client
+            .get_vm(GetVmRequest { id: id.to_string() })
+            .await
+        {
+            Ok(resp) => Ok(Some(resp.into_inner())),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(e) => Err(e).context("Failed to get VM"),
+        }
     }
 
     /// Create a VM.
-    pub async fn create_vm(
-        &self,
-        name: &str,
-        cpu_cores: u32,
-        memory_mb: u64,
-        disk_path: &str,
-        nic_socket: &str,
-        image: &str,
-    ) -> Result<VmInfo> {
+    pub async fn create_vm(&mut self, name: &str, config: VmConfig) -> Result<Vm> {
         debug!("Creating VM {} in mvirt-vmm", name);
-        // TODO: Implement via gRPC
-        Ok(VmInfo {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.to_string(),
-            state: VmState::Creating,
-            pid: None,
-        })
+        let resp = self
+            .client
+            .create_vm(CreateVmRequest {
+                name: Some(name.to_string()),
+                config: Some(config),
+            })
+            .await
+            .context("Failed to create VM")?;
+        Ok(resp.into_inner())
     }
 
     /// Start a VM.
-    pub async fn start_vm(&self, id: &str) -> Result<()> {
+    pub async fn start_vm(&mut self, id: &str) -> Result<Vm> {
         debug!("Starting VM {} in mvirt-vmm", id);
-        // TODO: Implement via gRPC
-        Ok(())
+        let resp = self
+            .client
+            .start_vm(StartVmRequest { id: id.to_string() })
+            .await
+            .context("Failed to start VM")?;
+        Ok(resp.into_inner())
     }
 
-    /// Stop a VM.
-    pub async fn stop_vm(&self, id: &str) -> Result<()> {
+    /// Stop a VM gracefully.
+    pub async fn stop_vm(&mut self, id: &str) -> Result<Vm> {
         debug!("Stopping VM {} in mvirt-vmm", id);
-        // TODO: Implement via gRPC
-        Ok(())
+        let resp = self
+            .client
+            .stop_vm(StopVmRequest {
+                id: id.to_string(),
+                timeout_seconds: 30,
+            })
+            .await
+            .context("Failed to stop VM")?;
+        Ok(resp.into_inner())
+    }
+
+    /// Kill a VM (force stop).
+    pub async fn kill_vm(&mut self, id: &str) -> Result<Vm> {
+        debug!("Killing VM {} in mvirt-vmm", id);
+        let resp = self
+            .client
+            .kill_vm(KillVmRequest { id: id.to_string() })
+            .await
+            .context("Failed to kill VM")?;
+        Ok(resp.into_inner())
     }
 
     /// Delete a VM.
-    pub async fn delete_vm(&self, id: &str) -> Result<()> {
+    pub async fn delete_vm(&mut self, id: &str) -> Result<()> {
         debug!("Deleting VM {} in mvirt-vmm", id);
-        // TODO: Implement via gRPC
+        self.client
+            .delete_vm(DeleteVmRequest { id: id.to_string() })
+            .await
+            .context("Failed to delete VM")?;
         Ok(())
     }
 }

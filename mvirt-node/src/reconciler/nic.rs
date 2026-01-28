@@ -2,50 +2,23 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tokio::sync::Mutex;
+use tracing::{error, info};
 
 use super::Reconciler;
-
-/// NIC spec from the API.
-#[derive(Debug, Clone)]
-pub struct NicSpec {
-    pub id: String,
-    pub name: Option<String>,
-    pub network_id: String,
-    pub mac_address: String,
-    pub ipv4_address: Option<String>,
-    pub ipv6_address: Option<String>,
-    pub routed_ipv4_prefixes: Vec<String>,
-    pub routed_ipv6_prefixes: Vec<String>,
-}
-
-/// NIC status to report back.
-#[derive(Debug, Clone)]
-pub struct NicStatus {
-    pub phase: NicPhase,
-    pub socket_path: Option<String>,
-    pub message: Option<String>,
-}
-
-/// NIC lifecycle phase.
-#[derive(Debug, Clone, Copy)]
-pub enum NicPhase {
-    Pending,
-    Creating,
-    Active,
-    Updating,
-    Deleting,
-    Failed,
-}
+use crate::clients::NetClient;
+use crate::proto::node::{NicSpec, NicStatus, ResourcePhase};
 
 /// NIC reconciler that interacts with mvirt-net.
 pub struct NicReconciler {
-    net_endpoint: String,
+    net: Mutex<NetClient>,
 }
 
 impl NicReconciler {
-    pub fn new(net_endpoint: String) -> Self {
-        Self { net_endpoint }
+    pub fn new(net: NetClient) -> Self {
+        Self {
+            net: Mutex::new(net),
+        }
     }
 }
 
@@ -56,44 +29,71 @@ impl Reconciler for NicReconciler {
 
     async fn reconcile(&self, id: &str, spec: &Self::Spec) -> Result<Self::Status> {
         info!("Reconciling NIC {} in network {}", id, spec.network_id);
-        debug!("NIC spec: {:?}", spec);
 
-        // TODO: Connect to mvirt-net and check current state
-        // For now, just return Active status
+        let mut net = self.net.lock().await;
 
-        // 1. Get current state from mvirt-net
-        // let current = self.net_client.get_nic(id).await?;
+        // Check if NIC already exists
+        match net.get_nic(id).await? {
+            Some(nic) => {
+                // NIC exists, report its current state
+                Ok(NicStatus {
+                    id: id.to_string(),
+                    phase: ResourcePhase::Ready as i32,
+                    message: None,
+                    socket_path: nic.socket_path,
+                })
+            }
+            None => {
+                // NIC doesn't exist, create it
+                let meta = spec.meta.as_ref().expect("NicSpec must have meta");
+                match net
+                    .create_nic(
+                        &spec.network_id,
+                        &meta.name,
+                        &spec.mac_address,
+                        &spec.ipv4_address.clone().unwrap_or_default(),
+                        &spec.ipv6_address.clone().unwrap_or_default(),
+                        spec.routed_ipv4_prefixes.clone(),
+                        spec.routed_ipv6_prefixes.clone(),
+                    )
+                    .await
+                {
+                    Ok(nic) => {
+                        // If security group is set, attach it
+                        if !spec.security_group_id.is_empty() {
+                            if let Err(e) = net
+                                .attach_security_group(&nic.id, &spec.security_group_id)
+                                .await
+                            {
+                                error!("Failed to attach security group: {}", e);
+                            }
+                        }
 
-        // 2. Compare with spec
-        // if current.is_none() {
-        //     // Create NIC
-        //     let result = self.net_client.create_nic(spec).await?;
-        //     return Ok(NicStatus {
-        //         phase: NicPhase::Creating,
-        //         socket_path: Some(result.socket_path),
-        //         message: None,
-        //     });
-        // }
-
-        // 3. Check if update needed
-        // if needs_update(&current, spec) {
-        //     self.net_client.update_nic(spec).await?;
-        //     return Ok(NicStatus { phase: NicPhase::Updating, .. });
-        // }
-
-        Ok(NicStatus {
-            phase: NicPhase::Active,
-            socket_path: Some(format!("/run/mvirt/nics/{}.sock", id)),
-            message: None,
-        })
+                        Ok(NicStatus {
+                            id: id.to_string(),
+                            phase: ResourcePhase::Ready as i32,
+                            message: None,
+                            socket_path: nic.socket_path,
+                        })
+                    }
+                    Err(e) => {
+                        error!("Failed to create NIC {}: {}", id, e);
+                        Ok(NicStatus {
+                            id: id.to_string(),
+                            phase: ResourcePhase::Failed as i32,
+                            message: Some(format!("Failed to create: {}", e)),
+                            socket_path: String::new(),
+                        })
+                    }
+                }
+            }
+        }
     }
 
     async fn finalize(&self, id: &str) -> Result<()> {
         info!("Finalizing (deleting) NIC {}", id);
-
-        // TODO: Connect to mvirt-net and delete
-        // self.net_client.delete_nic(id).await?;
-
+        let mut net = self.net.lock().await;
+        net.delete_nic(id).await?;
         Ok(())
     }
 }

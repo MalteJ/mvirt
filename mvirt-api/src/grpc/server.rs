@@ -122,8 +122,9 @@ impl NodeServiceImpl {
     /// Handle a state machine event and send specs to nodes.
     async fn handle_state_event(&self, event: Event) -> Result<(), Status> {
         use super::proto::{
-            NetworkSpec as ProtoNetworkSpec, NicSpec as ProtoNicSpec, SpecEvent, SpecEventType,
-            VmDesiredState as ProtoVmDesiredState, VmSpec as ProtoVmSpec, spec_event,
+            NetworkSpec as ProtoNetworkSpec, NicSpec as ProtoNicSpec, ResourceMeta, SpecEvent,
+            SpecEventType, VmDesiredState as ProtoVmDesiredState, VmSpec as ProtoVmSpec,
+            spec_event,
         };
 
         let revision = self.next_revision().await;
@@ -145,14 +146,17 @@ impl NodeServiceImpl {
                         revision,
                         r#type: SpecEventType::Create as i32,
                         spec: Some(spec_event::Spec::Vm(ProtoVmSpec {
-                            id: id.clone(),
-                            name: new.spec.name.clone(),
-                            node_id: node_id.clone(),
+                            meta: Some(ResourceMeta {
+                                id: id.clone(),
+                                name: new.spec.name.clone(),
+                                project_id: new.spec.project_id.clone(),
+                                node_id: Some(node_id.clone()),
+                                labels: Default::default(),
+                            }),
                             cpu_cores: new.spec.cpu_cores,
                             memory_mb: new.spec.memory_mb,
-                            disk_gb: new.spec.disk_gb,
-                            network_id: new.spec.network_id.clone(),
-                            nic_id: new.spec.nic_id.clone().unwrap_or_default(),
+                            volume_id: new.spec.volume_id.clone(),
+                            nic_id: new.spec.nic_id.clone(),
                             image: new.spec.image.clone(),
                             desired_state,
                         })),
@@ -169,12 +173,17 @@ impl NodeServiceImpl {
                     revision,
                     r#type: SpecEventType::Create as i32,
                     spec: Some(spec_event::Spec::Network(ProtoNetworkSpec {
-                        id: network.id.clone(),
-                        name: network.name.clone(),
+                        meta: Some(ResourceMeta {
+                            id: network.id.clone(),
+                            name: network.name.clone(),
+                                project_id: network.project_id.clone(),
+                            node_id: None,
+                            labels: Default::default(),
+                        }),
                         ipv4_enabled: network.ipv4_enabled,
-                        ipv4_subnet: network.ipv4_subnet.unwrap_or_default(),
+                        ipv4_prefix: network.ipv4_prefix.clone().unwrap_or_default(),
                         ipv6_enabled: network.ipv6_enabled,
-                        ipv6_prefix: network.ipv6_prefix.unwrap_or_default(),
+                        ipv6_prefix: network.ipv6_prefix.clone().unwrap_or_default(),
                         dns_servers: network.dns_servers.clone(),
                         ntp_servers: network.ntp_servers.clone(),
                         is_public: network.is_public,
@@ -191,7 +200,10 @@ impl NodeServiceImpl {
                     revision,
                     r#type: SpecEventType::Delete as i32,
                     spec: Some(spec_event::Spec::Network(ProtoNetworkSpec {
-                        id: id.clone(),
+                        meta: Some(ResourceMeta {
+                            id: id.clone(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     })),
                 };
@@ -206,14 +218,20 @@ impl NodeServiceImpl {
                     revision,
                     r#type: SpecEventType::Create as i32,
                     spec: Some(spec_event::Spec::Nic(ProtoNicSpec {
-                        id: nic.id.clone(),
-                        name: nic.name.clone().unwrap_or_default(),
+                        meta: Some(ResourceMeta {
+                            id: nic.id.clone(),
+                            name: nic.name.clone().unwrap_or_default(),
+                            project_id: nic.project_id.clone(),
+                            node_id: None,
+                            labels: Default::default(),
+                        }),
                         network_id: nic.network_id.clone(),
                         mac_address: nic.mac_address.clone(),
-                        ipv4_address: nic.ipv4_address.clone().unwrap_or_default(),
-                        ipv6_address: nic.ipv6_address.clone().unwrap_or_default(),
+                        ipv4_address: nic.ipv4_address.clone(),
+                        ipv6_address: nic.ipv6_address.clone(),
                         routed_ipv4_prefixes: nic.routed_ipv4_prefixes.clone(),
                         routed_ipv6_prefixes: nic.routed_ipv6_prefixes.clone(),
+                        security_group_id: nic.security_group_id.clone().unwrap_or_default(),
                     })),
                 };
 
@@ -228,7 +246,10 @@ impl NodeServiceImpl {
                     revision,
                     r#type: SpecEventType::Delete as i32,
                     spec: Some(spec_event::Spec::Nic(ProtoNicSpec {
-                        id: id.clone(),
+                        meta: Some(ResourceMeta {
+                            id: id.clone(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     })),
                 };
@@ -243,7 +264,10 @@ impl NodeServiceImpl {
                     revision,
                     r#type: SpecEventType::Delete as i32,
                     spec: Some(spec_event::Spec::Vm(ProtoVmSpec {
-                        id: id.clone(),
+                        meta: Some(ResourceMeta {
+                            id: id.clone(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     })),
                 };

@@ -192,19 +192,19 @@ export function ClusterPage() {
             <dl className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
               <div>
                 <dt className="text-muted-foreground">Cluster Name</dt>
-                <dd className="font-medium">{clusterInfo.name}</dd>
+                <dd className="font-medium">{clusterInfo.name ?? '-'}</dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Cluster ID</dt>
-                <dd className="font-mono text-xs">{truncateId(clusterInfo.id)}</dd>
+                <dd className="font-mono text-xs">{clusterInfo.id ? truncateId(clusterInfo.id) : '-'}</dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Leader</dt>
-                <dd className="font-mono text-xs">{truncateId(clusterInfo.leaderNodeId)}</dd>
+                <dd className="font-mono text-xs">{clusterInfo.leaderNodeId ? truncateId(clusterInfo.leaderNodeId) : '-'}</dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Created</dt>
-                <dd>{new Date(clusterInfo.createdAt).toLocaleDateString()}</dd>
+                <dd>{clusterInfo.createdAt ? new Date(clusterInfo.createdAt).toLocaleDateString() : '-'}</dd>
               </div>
             </dl>
           </CardContent>

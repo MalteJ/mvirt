@@ -5,7 +5,11 @@
 
 pub mod network;
 pub mod nic;
+pub mod route;
+pub mod security_group;
+pub mod template;
 pub mod vm;
+pub mod volume;
 
 use anyhow::Result;
 use async_trait::async_trait;

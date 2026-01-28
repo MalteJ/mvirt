@@ -9,11 +9,19 @@ use tokio::time::interval;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
+use crate::clients::{NetClient, VmmClient, ZfsClient};
 use crate::proto::node_service_client::NodeServiceClient;
 use crate::proto::{
-    HeartbeatRequest, NodeResources as ProtoNodeResources, RegisterRequest, SpecEvent,
-    WatchSpecsRequest,
+    update_resource_status_request::Status, HeartbeatRequest, NodeResources as ProtoNodeResources,
+    RegisterRequest, SpecEvent, UpdateResourceStatusRequest, WatchSpecsRequest,
 };
+use crate::reconciler::nic::NicReconciler;
+use crate::reconciler::route::RouteReconciler;
+use crate::reconciler::security_group::SecurityGroupReconciler;
+use crate::reconciler::template::TemplateReconciler;
+use crate::reconciler::vm::VmReconciler;
+use crate::reconciler::volume::VolumeReconciler;
+use crate::reconciler::Reconciler;
 
 /// Node resource information.
 #[derive(Debug, Clone, Default)]
@@ -97,9 +105,17 @@ pub struct NodeAgent {
     resources: NodeResources,
     audit: Arc<NodeAuditLogger>,
     last_revision: u64,
+    // Reconcilers
+    vm_reconciler: VmReconciler,
+    nic_reconciler: NicReconciler,
+    template_reconciler: TemplateReconciler,
+    volume_reconciler: VolumeReconciler,
+    security_group_reconciler: SecurityGroupReconciler,
+    route_reconciler: RouteReconciler,
 }
 
 impl NodeAgent {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         api_endpoint: String,
         node_name: String,
@@ -107,7 +123,11 @@ impl NodeAgent {
         heartbeat_interval: Duration,
         resources: NodeResources,
         audit: Arc<NodeAuditLogger>,
+        vmm_client: VmmClient,
+        zfs_client: ZfsClient,
+        net_client: NetClient,
     ) -> Self {
+        // Clone clients for reconcilers that share the same backend
         Self {
             api_endpoint,
             node_name,
@@ -116,6 +136,12 @@ impl NodeAgent {
             resources,
             audit,
             last_revision: 0,
+            vm_reconciler: VmReconciler::new(vmm_client),
+            nic_reconciler: NicReconciler::new(net_client.clone()),
+            template_reconciler: TemplateReconciler::new(zfs_client.clone()),
+            volume_reconciler: VolumeReconciler::new(zfs_client),
+            security_group_reconciler: SecurityGroupReconciler::new(net_client),
+            route_reconciler: RouteReconciler::new(),
         }
     }
 
@@ -164,79 +190,199 @@ impl NodeAgent {
         Ok(node_id)
     }
 
-    /// Send a heartbeat to the API server.
-    async fn heartbeat(
-        &self,
-        client: &mut NodeServiceClient<Channel>,
-        node_id: &str,
-    ) -> Result<()> {
-        let request = HeartbeatRequest {
+    /// Report resource status back to API.
+    async fn report_status(client: &mut NodeServiceClient<Channel>, node_id: &str, status: Status) {
+        let request = UpdateResourceStatusRequest {
             node_id: node_id.to_string(),
-            current_resources: Some((&self.resources).into()),
+            status: Some(status),
         };
 
-        let response = client
-            .heartbeat(request)
-            .await
-            .context("Failed to send heartbeat")?
-            .into_inner();
-
-        if !response.success {
-            warn!("Heartbeat failed: {}", response.message);
-        } else {
-            debug!("Heartbeat sent successfully");
+        match client.update_resource_status(request).await {
+            Ok(resp) => {
+                let resp = resp.into_inner();
+                if !resp.success {
+                    warn!("Status update rejected: {}", resp.message);
+                }
+            }
+            Err(e) => {
+                error!("Failed to report status: {}", e);
+            }
         }
-
-        Ok(())
     }
 
     /// Handle a spec event from the API server.
-    async fn handle_spec_event(&mut self, node_id: &str, event: SpecEvent) -> Result<()> {
+    async fn handle_spec_event(
+        &self,
+        client: &mut NodeServiceClient<Channel>,
+        node_id: &str,
+        event: SpecEvent,
+    ) {
         use crate::proto::{spec_event::Spec, SpecEventType};
 
-        self.last_revision = event.revision;
         let event_type =
             SpecEventType::try_from(event.r#type).unwrap_or(SpecEventType::Unspecified);
+        let is_delete = event_type == SpecEventType::Delete;
 
         if let Some(spec) = event.spec {
             match spec {
                 Spec::Network(net_spec) => {
-                    let action = match event_type {
-                        SpecEventType::Delete => "delete",
-                        SpecEventType::Create => "create",
-                        SpecEventType::Update => "update",
-                        _ => "unknown",
-                    };
-                    info!("Received network {} event: {}", action, net_spec.id);
-                    self.audit.spec_received(node_id, "network", &net_spec.id);
-                    // TODO: Reconcile with mvirt-net based on event_type
+                    let id = net_spec
+                        .meta
+                        .as_ref()
+                        .map(|m| m.id.as_str())
+                        .unwrap_or("unknown");
+                    info!("Received network event: {}", id);
+                    self.audit.spec_received(node_id, "network", id);
+                    // Networks are info-only, no reconciliation needed
                 }
                 Spec::Vm(vm_spec) => {
-                    let action = match event_type {
-                        SpecEventType::Delete => "delete",
-                        SpecEventType::Create => "create",
-                        SpecEventType::Update => "update",
-                        _ => "unknown",
-                    };
-                    info!("Received VM {} event: {}", action, vm_spec.id);
-                    self.audit.spec_received(node_id, "vm", &vm_spec.id);
-                    // TODO: Reconcile with mvirt-vmm based on event_type
+                    let id = vm_spec
+                        .meta
+                        .as_ref()
+                        .map(|m| m.id.clone())
+                        .unwrap_or_default();
+                    self.audit.spec_received(node_id, "vm", &id);
+
+                    if is_delete {
+                        if let Err(e) = self.vm_reconciler.finalize(&id).await {
+                            error!("Failed to finalize VM {}: {}", id, e);
+                        }
+                    } else {
+                        match self.vm_reconciler.reconcile(&id, &vm_spec).await {
+                            Ok(status) => {
+                                Self::report_status(client, node_id, Status::VmStatus(status))
+                                    .await;
+                            }
+                            Err(e) => error!("VM reconciliation failed for {}: {}", id, e),
+                        }
+                    }
                 }
                 Spec::Nic(nic_spec) => {
-                    let action = match event_type {
-                        SpecEventType::Delete => "delete",
-                        SpecEventType::Create => "create",
-                        SpecEventType::Update => "update",
-                        _ => "unknown",
-                    };
-                    info!("Received NIC {} event: {}", action, nic_spec.id);
-                    self.audit.spec_received(node_id, "nic", &nic_spec.id);
-                    // TODO: Reconcile with mvirt-net based on event_type
+                    let id = nic_spec
+                        .meta
+                        .as_ref()
+                        .map(|m| m.id.clone())
+                        .unwrap_or_default();
+                    self.audit.spec_received(node_id, "nic", &id);
+
+                    if is_delete {
+                        if let Err(e) = self.nic_reconciler.finalize(&id).await {
+                            error!("Failed to finalize NIC {}: {}", id, e);
+                        }
+                    } else {
+                        match self.nic_reconciler.reconcile(&id, &nic_spec).await {
+                            Ok(status) => {
+                                Self::report_status(client, node_id, Status::NicStatus(status))
+                                    .await;
+                            }
+                            Err(e) => error!("NIC reconciliation failed for {}: {}", id, e),
+                        }
+                    }
+                }
+                Spec::Template(tpl_spec) => {
+                    let id = tpl_spec
+                        .meta
+                        .as_ref()
+                        .map(|m| m.id.clone())
+                        .unwrap_or_default();
+                    self.audit.spec_received(node_id, "template", &id);
+
+                    if is_delete {
+                        if let Err(e) = self.template_reconciler.finalize(&id).await {
+                            error!("Failed to finalize template {}: {}", id, e);
+                        }
+                    } else {
+                        match self.template_reconciler.reconcile(&id, &tpl_spec).await {
+                            Ok(status) => {
+                                Self::report_status(
+                                    client,
+                                    node_id,
+                                    Status::TemplateStatus(status),
+                                )
+                                .await;
+                            }
+                            Err(e) => error!("Template reconciliation failed for {}: {}", id, e),
+                        }
+                    }
+                }
+                Spec::Volume(vol_spec) => {
+                    let id = vol_spec
+                        .meta
+                        .as_ref()
+                        .map(|m| m.id.clone())
+                        .unwrap_or_default();
+                    self.audit.spec_received(node_id, "volume", &id);
+
+                    if is_delete {
+                        if let Err(e) = self.volume_reconciler.finalize(&id).await {
+                            error!("Failed to finalize volume {}: {}", id, e);
+                        }
+                    } else {
+                        match self.volume_reconciler.reconcile(&id, &vol_spec).await {
+                            Ok(status) => {
+                                Self::report_status(client, node_id, Status::VolumeStatus(status))
+                                    .await;
+                            }
+                            Err(e) => error!("Volume reconciliation failed for {}: {}", id, e),
+                        }
+                    }
+                }
+                Spec::SecurityGroup(sg_spec) => {
+                    let id = sg_spec
+                        .meta
+                        .as_ref()
+                        .map(|m| m.id.clone())
+                        .unwrap_or_default();
+                    self.audit.spec_received(node_id, "security_group", &id);
+
+                    if is_delete {
+                        if let Err(e) = self.security_group_reconciler.finalize(&id).await {
+                            error!("Failed to finalize security group {}: {}", id, e);
+                        }
+                    } else {
+                        match self
+                            .security_group_reconciler
+                            .reconcile(&id, &sg_spec)
+                            .await
+                        {
+                            Ok(status) => {
+                                Self::report_status(
+                                    client,
+                                    node_id,
+                                    Status::SecurityGroupStatus(status),
+                                )
+                                .await;
+                            }
+                            Err(e) => {
+                                error!("SecurityGroup reconciliation failed for {}: {}", id, e)
+                            }
+                        }
+                    }
+                }
+                Spec::Route(route_spec) => {
+                    let id = route_spec
+                        .meta
+                        .as_ref()
+                        .map(|m| m.id.clone())
+                        .unwrap_or_default();
+                    self.audit.spec_received(node_id, "route", &id);
+
+                    if is_delete {
+                        if let Err(e) = self.route_reconciler.finalize(&id).await {
+                            error!("Failed to finalize route {}: {}", id, e);
+                        }
+                    } else {
+                        match self.route_reconciler.reconcile(&id, &route_spec).await {
+                            Ok(status) => {
+                                Self::report_status(client, node_id, Status::RouteStatus(status))
+                                    .await;
+                            }
+                            Err(e) => error!("Route reconciliation failed for {}: {}", id, e),
+                        }
+                    }
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Main agent loop.
@@ -308,9 +454,8 @@ impl NodeAgent {
         loop {
             match tokio::time::timeout(Duration::from_secs(60), stream.message()).await {
                 Ok(Ok(Some(event))) => {
-                    if let Err(e) = self.handle_spec_event(&node_id, event).await {
-                        error!("Failed to handle spec event: {}", e);
-                    }
+                    self.last_revision = event.revision;
+                    self.handle_spec_event(&mut client, &node_id, event).await;
                 }
                 Ok(Ok(None)) => {
                     info!("Spec stream ended");
@@ -321,7 +466,6 @@ impl NodeAgent {
                     break;
                 }
                 Err(_) => {
-                    // Timeout - continue to allow reconnection handling
                     debug!("Spec stream timeout, continuing...");
                 }
             }

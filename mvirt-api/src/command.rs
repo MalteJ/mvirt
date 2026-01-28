@@ -37,9 +37,10 @@ pub enum Command {
         id: String,
         /// Timestamp when command was created (set before Raft replication)
         timestamp: String,
+        project_id: String,
         name: String,
         ipv4_enabled: bool,
-        ipv4_subnet: Option<String>,
+        ipv4_prefix: Option<String>,
         ipv6_enabled: bool,
         ipv6_prefix: Option<String>,
         dns_servers: Vec<String>,
@@ -67,6 +68,7 @@ pub enum Command {
         id: String,
         /// Timestamp when command was created (set before Raft replication)
         timestamp: String,
+        project_id: String,
         network_id: String,
         name: Option<String>,
         mac_address: Option<String>,
@@ -74,6 +76,7 @@ pub enum Command {
         ipv6_address: Option<String>,
         routed_ipv4_prefixes: Vec<String>,
         routed_ipv6_prefixes: Vec<String>,
+        security_group_id: Option<String>,
     },
     UpdateNic {
         request_id: String,
@@ -262,9 +265,10 @@ pub struct NodeResources {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkData {
     pub id: String,
+    pub project_id: String,
     pub name: String,
     pub ipv4_enabled: bool,
-    pub ipv4_subnet: Option<String>,
+    pub ipv4_prefix: Option<String>,
     pub ipv6_enabled: bool,
     pub ipv6_prefix: Option<String>,
     pub dns_servers: Vec<String>,
@@ -279,6 +283,7 @@ pub struct NetworkData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NicData {
     pub id: String,
+    pub project_id: String,
     pub name: Option<String>,
     pub network_id: String,
     pub mac_address: String,
@@ -286,6 +291,7 @@ pub struct NicData {
     pub ipv6_address: Option<String>,
     pub routed_ipv4_prefixes: Vec<String>,
     pub routed_ipv6_prefixes: Vec<String>,
+    pub security_group_id: Option<String>,
     pub socket_path: String,
     pub state: NicStateData,
     pub created_at: String,
@@ -317,23 +323,14 @@ pub struct VmData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmSpec {
     pub name: String,
-    pub project_id: Option<String>,    // Project this VM belongs to
+    pub project_id: String,
     pub node_selector: Option<String>, // Optional: require specific node
     pub cpu_cores: u32,
     pub memory_mb: u64,
-    pub disk_gb: u64,
-    pub network_id: String,
-    pub nic_id: Option<String>, // Will be auto-created if not provided
-    pub image: String,          // Boot image reference
-    pub disks: Vec<DiskConfig>, // Additional disk volumes
+    pub volume_id: String,  // Boot volume reference
+    pub nic_id: String,     // NIC reference (network comes via NIC)
+    pub image: String,      // Boot image reference
     pub desired_state: VmDesiredState,
-}
-
-/// Disk configuration for a VM
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiskConfig {
-    pub volume_id: String,
-    pub readonly: bool,
 }
 
 /// Desired power state for a VM

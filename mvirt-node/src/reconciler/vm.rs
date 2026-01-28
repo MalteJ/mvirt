@@ -2,62 +2,23 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tokio::sync::Mutex;
+use tracing::{error, info};
 
 use super::Reconciler;
-
-/// VM spec from the API.
-#[derive(Debug, Clone)]
-pub struct VmSpec {
-    pub id: String,
-    pub name: String,
-    pub cpu_cores: u32,
-    pub memory_mb: u64,
-    pub disk_gb: u64,
-    pub network_id: String,
-    pub nic_id: Option<String>,
-    pub image: String,
-    pub desired_state: VmDesiredState,
-}
-
-/// Desired power state for a VM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmDesiredState {
-    Running,
-    Stopped,
-}
-
-/// VM status to report back.
-#[derive(Debug, Clone)]
-pub struct VmStatus {
-    pub phase: VmPhase,
-    pub ip_address: Option<String>,
-    pub message: Option<String>,
-}
-
-/// VM lifecycle phase.
-#[derive(Debug, Clone, Copy)]
-pub enum VmPhase {
-    Pending,
-    Scheduled,
-    Creating,
-    Running,
-    Stopping,
-    Stopped,
-    Failed,
-}
+use crate::clients::VmmClient;
+use crate::proto::node::{VmDesiredState, VmPhase, VmSpec, VmStatus};
+use crate::proto::vmm::{BootMode, DiskConfig, NicConfig, VmConfig, VmState};
 
 /// VM reconciler that interacts with mvirt-vmm.
 pub struct VmReconciler {
-    vmm_endpoint: String,
-    zfs_endpoint: String,
+    vmm: Mutex<VmmClient>,
 }
 
 impl VmReconciler {
-    pub fn new(vmm_endpoint: String, zfs_endpoint: String) -> Self {
+    pub fn new(vmm: VmmClient) -> Self {
         Self {
-            vmm_endpoint,
-            zfs_endpoint,
+            vmm: Mutex::new(vmm),
         }
     }
 }
@@ -68,67 +29,162 @@ impl Reconciler for VmReconciler {
     type Status = VmStatus;
 
     async fn reconcile(&self, id: &str, spec: &Self::Spec) -> Result<Self::Status> {
-        info!("Reconciling VM {} ({})", spec.name, id);
-        debug!("VM spec: {:?}", spec);
+        let meta = spec.meta.as_ref().expect("VmSpec must have meta");
+        info!("Reconciling VM {} ({})", meta.name, id);
 
-        // TODO: Implement full reconciliation logic
-        // This is a placeholder implementation
+        let mut vmm = self.vmm.lock().await;
+        let current = vmm.get_vm(id).await?;
+        let desired =
+            VmDesiredState::try_from(spec.desired_state).unwrap_or(VmDesiredState::Running);
 
-        // 1. Check if VM exists in mvirt-vmm
-        // let current = self.vmm_client.get_vm(id).await?;
+        match (current, desired) {
+            // VM doesn't exist, desired Running → create + start
+            (None, VmDesiredState::Running) => {
+                info!("Creating VM {}", meta.name);
+                let config = VmConfig {
+                    vcpus: spec.cpu_cores,
+                    memory_mb: spec.memory_mb,
+                    boot_mode: BootMode::Disk as i32,
+                    kernel: None,
+                    initramfs: None,
+                    cmdline: None,
+                    disks: vec![DiskConfig {
+                        path: format!("/dev/zvol/mvirt/volumes/{}", spec.volume_id),
+                        readonly: false,
+                    }],
+                    nics: vec![NicConfig {
+                        tap: None,
+                        mac: None,
+                        vhost_socket: Some(format!("/run/mvirt-net/nic-{}.sock", spec.nic_id)),
+                    }],
+                    user_data: None,
+                    nested_virt: false,
+                };
 
-        // 2. If VM doesn't exist and desired state is Running, create it
-        // if current.is_none() && spec.desired_state == VmDesiredState::Running {
-        //     // First ensure disk exists (mvirt-zfs)
-        //     // self.zfs_client.create_volume(&spec.name, spec.disk_gb).await?;
-        //
-        //     // Then create VM
-        //     // self.vmm_client.create_vm(spec).await?;
-        //     return Ok(VmStatus {
-        //         phase: VmPhase::Creating,
-        //         ip_address: None,
-        //         message: Some("Creating VM".to_string()),
-        //     });
-        // }
-
-        // 3. If VM exists, check if state matches desired
-        // match (current.state, spec.desired_state) {
-        //     (VmState::Running, VmDesiredState::Stopped) => {
-        //         self.vmm_client.stop_vm(id).await?;
-        //         return Ok(VmStatus { phase: VmPhase::Stopping, .. });
-        //     }
-        //     (VmState::Stopped, VmDesiredState::Running) => {
-        //         self.vmm_client.start_vm(id).await?;
-        //         return Ok(VmStatus { phase: VmPhase::Creating, .. });
-        //     }
-        //     _ => {}
-        // }
-
-        // For now, return a placeholder status
-        let phase = match spec.desired_state {
-            VmDesiredState::Running => VmPhase::Running,
-            VmDesiredState::Stopped => VmPhase::Stopped,
-        };
-
-        Ok(VmStatus {
-            phase,
-            ip_address: None,
-            message: None,
-        })
+                match vmm.create_vm(&meta.name, config).await {
+                    Ok(vm) => {
+                        // Auto-start after creation
+                        match vmm.start_vm(&vm.id).await {
+                            Ok(_) => Ok(VmStatus {
+                                id: id.to_string(),
+                                phase: VmPhase::Running as i32,
+                                message: None,
+                                ip_address: None,
+                                pid: None,
+                            }),
+                            Err(e) => {
+                                error!("Failed to start VM {}: {}", id, e);
+                                Ok(VmStatus {
+                                    id: id.to_string(),
+                                    phase: VmPhase::Failed as i32,
+                                    message: Some(format!("Failed to start: {}", e)),
+                                    ip_address: None,
+                                    pid: None,
+                                })
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to create VM {}: {}", id, e);
+                        Ok(VmStatus {
+                            id: id.to_string(),
+                            phase: VmPhase::Failed as i32,
+                            message: Some(format!("Failed to create: {}", e)),
+                            ip_address: None,
+                            pid: None,
+                        })
+                    }
+                }
+            }
+            // VM doesn't exist, desired Stopped → nothing to do
+            (None, VmDesiredState::Stopped) => Ok(VmStatus {
+                id: id.to_string(),
+                phase: VmPhase::Stopped as i32,
+                message: None,
+                ip_address: None,
+                pid: None,
+            }),
+            // VM exists, desired Stopped, currently running → stop
+            (Some(vm), VmDesiredState::Stopped)
+                if vm.state == VmState::Running as i32 || vm.state == VmState::Starting as i32 =>
+            {
+                info!("Stopping VM {}", id);
+                match vmm.stop_vm(&vm.id).await {
+                    Ok(_) => Ok(VmStatus {
+                        id: id.to_string(),
+                        phase: VmPhase::Stopped as i32,
+                        message: None,
+                        ip_address: None,
+                        pid: None,
+                    }),
+                    Err(e) => Ok(VmStatus {
+                        id: id.to_string(),
+                        phase: VmPhase::Failed as i32,
+                        message: Some(format!("Failed to stop: {}", e)),
+                        ip_address: None,
+                        pid: None,
+                    }),
+                }
+            }
+            // VM exists, desired Running, currently stopped → start
+            (Some(vm), VmDesiredState::Running) if vm.state == VmState::Stopped as i32 => {
+                info!("Starting VM {}", id);
+                match vmm.start_vm(&vm.id).await {
+                    Ok(_) => Ok(VmStatus {
+                        id: id.to_string(),
+                        phase: VmPhase::Running as i32,
+                        message: None,
+                        ip_address: None,
+                        pid: None,
+                    }),
+                    Err(e) => Ok(VmStatus {
+                        id: id.to_string(),
+                        phase: VmPhase::Failed as i32,
+                        message: Some(format!("Failed to start: {}", e)),
+                        ip_address: None,
+                        pid: None,
+                    }),
+                }
+            }
+            // VM exists and state matches or is transitioning → report current
+            (Some(vm), _) => {
+                let phase = match VmState::try_from(vm.state) {
+                    Ok(VmState::Running) => VmPhase::Running,
+                    Ok(VmState::Stopped) => VmPhase::Stopped,
+                    Ok(VmState::Starting) => VmPhase::Creating,
+                    Ok(VmState::Stopping) => VmPhase::Stopping,
+                    _ => VmPhase::Pending,
+                };
+                Ok(VmStatus {
+                    id: id.to_string(),
+                    phase: phase as i32,
+                    message: None,
+                    ip_address: None,
+                    pid: None,
+                })
+            }
+            // Catch-all
+            _ => Ok(VmStatus {
+                id: id.to_string(),
+                phase: VmPhase::Pending as i32,
+                message: None,
+                ip_address: None,
+                pid: None,
+            }),
+        }
     }
 
     async fn finalize(&self, id: &str) -> Result<()> {
         info!("Finalizing (deleting) VM {}", id);
+        let mut vmm = self.vmm.lock().await;
 
-        // TODO: Implement deletion
-        // 1. Stop VM if running
-        // self.vmm_client.stop_vm(id).await?;
-        //
-        // 2. Delete VM
-        // self.vmm_client.delete_vm(id).await?;
-        //
-        // 3. Delete disk
-        // self.zfs_client.delete_volume(id).await?;
+        // Try to stop first, then delete
+        if let Some(vm) = vmm.get_vm(id).await? {
+            if vm.state == VmState::Running as i32 {
+                let _ = vmm.stop_vm(&vm.id).await;
+            }
+            vmm.delete_vm(&vm.id).await?;
+        }
 
         Ok(())
     }

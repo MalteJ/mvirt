@@ -31,13 +31,16 @@ export const useAuth = create<AuthState>()(
           token,
           user: user ?? { name: 'Admin', email: 'admin@localhost' },
         }),
-      logout: () =>
+      logout: () => {
+        localStorage.removeItem('mvirt-auth')
+        localStorage.removeItem('mvirt-project')
         set({
           isAuthenticated: false,
           authMethod: null,
           token: null,
           user: null,
-        }),
+        })
+      },
     }),
     {
       name: 'mvirt-auth',
