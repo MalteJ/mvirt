@@ -59,7 +59,7 @@
         mvirt-cli = mvirtPackages.mvirt-cli;
         mvirt-vmm = mvirtPackages.mvirt-vmm;
         mvirt-zfs = mvirtPackages.mvirt-zfs;
-        mvirt-net = mvirtPackages.mvirt-net;
+        mvirt-ebpf = mvirtPackages.mvirt-ebpf;
         mvirt-log = mvirtPackages.mvirt-log;
 
         # External dependencies

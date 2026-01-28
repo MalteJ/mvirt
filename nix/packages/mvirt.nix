@@ -113,6 +113,6 @@ in {
   mvirt-cli = buildPackage "mvirt-cli" "mvirt";
   mvirt-vmm = buildPackage "mvirt-vmm" "mvirt-vmm";
   mvirt-zfs = buildPackage "mvirt-zfs" "mvirt-zfs";
-  mvirt-net = buildPackage "mvirt-net" "mvirt-net";
+  mvirt-ebpf = buildPackage "mvirt-ebpf" "mvirt-ebpf";
   mvirt-log = buildPackage "mvirt-log" "mvirt-log";
 }

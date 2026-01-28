@@ -89,19 +89,19 @@ in {
       };
     };
 
-    net = {
-      enable = mkEnableOption "mvirt-net (Network management)" // { default = true; };
+    ebpf = {
+      enable = mkEnableOption "mvirt-ebpf (eBPF network management)" // { default = true; };
 
       port = mkOption {
         type = types.port;
         default = 50054;
-        description = "gRPC port for mvirt-net";
+        description = "gRPC port for mvirt-ebpf";
       };
 
       extraArgs = mkOption {
         type = types.listOf types.str;
         default = [];
-        description = "Extra arguments to pass to mvirt-net";
+        description = "Extra arguments to pass to mvirt-ebpf";
       };
     };
   };
@@ -122,9 +122,9 @@ in {
       "d ${cfg.dataDir} 0755 root root -"
       "d ${cfg.dataDir}/vmm 0755 root root -"
       "d ${cfg.dataDir}/log 0750 mvirt mvirt -"
-      "d ${cfg.dataDir}/net 0755 root root -"
+      "d ${cfg.dataDir}/ebpf 0755 root root -"
       "d /run/mvirt 0755 root root -"
-      "d /run/mvirt/net 0755 root root -"
+      "d /run/mvirt/ebpf 0755 root root -"
     ];
 
     # mvirt-log service (starts first, others depend on it)
@@ -205,9 +205,9 @@ in {
       };
     };
 
-    # mvirt-net service
-    systemd.services.mvirt-net = mkIf cfg.net.enable {
-      description = "mvirt Network Manager";
+    # mvirt-ebpf service
+    systemd.services.mvirt-ebpf = mkIf cfg.ebpf.enable {
+      description = "mvirt eBPF Network Manager";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" "mvirt-log.service" ];
       wants = [ "mvirt-log.service" ];
@@ -219,12 +219,12 @@ in {
 
       serviceConfig = {
         Type = "simple";
-        User = "root";  # Needs root for TUN device
-        ExecStart = "${mvirtPkgs}/bin/mvirt-net ${concatStringsSep " " cfg.net.extraArgs}";
+        User = "root";  # Needs root for eBPF and TUN device
+        ExecStart = "${mvirtPkgs}/bin/mvirt-ebpf ${concatStringsSep " " cfg.ebpf.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
-        # Hardening (limited due to root requirement for TUN)
+        # Hardening (limited due to root requirement for eBPF)
         NoNewPrivileges = false;
         ProtectSystem = "full";
         PrivateTmp = true;

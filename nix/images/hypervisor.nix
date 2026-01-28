@@ -166,7 +166,7 @@ in
         50051   # mvirt-vmm gRPC
         50052   # mvirt-log gRPC
         50053   # mvirt-zfs gRPC
-        50054   # mvirt-net gRPC
+        50054   # mvirt-ebpf gRPC
       ];
     };
 
@@ -189,12 +189,12 @@ in
 
     vmm.enable = true;
     log.enable = true;
-    net.enable = true;
+    ebpf.enable = true;
     zfs.enable = true;
   };
 
   # NTP for time synchronization
-  services.timesyncd.enable = true;
+  services.chrony.enable = true;
 
   # SSH access
   services.openssh = {
