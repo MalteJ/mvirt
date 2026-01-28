@@ -7,7 +7,7 @@
 //! 4. NS (Neighbor Solicitation) → NA (Neighbor Advertisement)
 //! 5. Echo Request → Echo Reply (ping6 to gateway)
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use mvirt_net::router::{Router, VhostConfig};
@@ -34,13 +34,20 @@ async fn test_ipv6_rs_ra_dhcpv6() {
     let gateway_ipv6 = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
     let gateway_ipv4 = Ipv4Addr::new(10, 50, 0, 1);
 
+    // DNS servers to configure and verify
+    let dns_servers: Vec<IpAddr> = vec![
+        "2001:4860:4860::8888".parse().unwrap(), // Google DNS IPv6
+        "2001:4860:4860::8844".parse().unwrap(),
+    ];
+
     // Clean up any stale socket
     let _ = std::fs::remove_file(socket_path);
 
     // Start router with vhost-user backend and IPv6 configuration
     let vhost_config = VhostConfig::new(socket_path.to_string(), vm_mac)
         .with_ipv4(Ipv4Addr::new(10, 50, 0, 10), gateway_ipv4, 24)
-        .with_ipv6(vm_ipv6, gateway_ipv6, 128);
+        .with_ipv6(vm_ipv6, gateway_ipv6, 128)
+        .with_dns(dns_servers.clone());
 
     let router = Router::with_config_and_vhost(
         "tun_dhcpv6_test",
@@ -105,8 +112,13 @@ async fn test_ipv6_rs_ra_dhcpv6() {
     assert!(ra.managed_flag, "M flag should be set");
     assert!(ra.router_lifetime > 0, "Router lifetime should be non-zero");
     assert_eq!(ra.router_mac, Some(GATEWAY_MAC), "Router MAC mismatch");
+    // O flag should be set when DNS servers are configured (Other Config for DNS via DHCPv6)
+    assert!(
+        ra.other_flag,
+        "O flag should be set for DNS via DHCPv6 when DNS servers are configured"
+    );
 
-    println!("\nRA indicates: Use DHCPv6 for address configuration");
+    println!("\nRA indicates: Use DHCPv6 for address configuration (M+O flags set)");
 
     // =========================================================================
     // DHCPv6 SOLICIT → ADVERTISE
@@ -150,6 +162,34 @@ async fn test_ipv6_rs_ra_dhcpv6() {
     assert_eq!(advertise.addresses[0], vm_ipv6, "Offered address mismatch");
     assert!(!advertise.server_duid.is_empty(), "No server DUID");
 
+    // Verify DNS servers are advertised
+    let expected_dns_v6: Vec<Ipv6Addr> = dns_servers
+        .iter()
+        .filter_map(|ip| {
+            if let IpAddr::V6(v6) = ip {
+                Some(*v6)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        !advertise.dns_servers.is_empty(),
+        "DNS servers should be advertised"
+    );
+    assert_eq!(
+        advertise.dns_servers.len(),
+        expected_dns_v6.len(),
+        "All IPv6 DNS servers should be advertised"
+    );
+    for expected_dns in &expected_dns_v6 {
+        assert!(
+            advertise.dns_servers.contains(expected_dns),
+            "DNS server {} should be in ADVERTISE",
+            expected_dns
+        );
+    }
+
     // =========================================================================
     // DHCPv6 REQUEST → REPLY
     // =========================================================================
@@ -191,9 +231,23 @@ async fn test_ipv6_rs_ra_dhcpv6() {
     assert!(!reply.addresses.is_empty(), "No address assigned");
     assert_eq!(reply.addresses[0], vm_ipv6, "Assigned address mismatch");
 
+    // Verify DNS servers are in the REPLY
+    assert!(
+        !reply.dns_servers.is_empty(),
+        "DNS servers should be in REPLY"
+    );
+    for expected_dns in &expected_dns_v6 {
+        assert!(
+            reply.dns_servers.contains(expected_dns),
+            "DNS server {} should be in REPLY",
+            expected_dns
+        );
+    }
+
     println!("\n=== Test PASSED ===");
     println!("Successfully completed: RS → RA → DHCPv6 SOLICIT → ADVERTISE → REQUEST → REPLY");
     println!("Assigned IPv6 address: {}", reply.addresses[0]);
+    println!("DNS servers: {:?}", reply.dns_servers);
 
     // Cleanup
     router.prepare_shutdown();

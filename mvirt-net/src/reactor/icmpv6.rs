@@ -322,9 +322,10 @@ fn build_echo_reply(
 /// Build a Router Advertisement response.
 ///
 /// This RA does NOT include a prefix (no SLAAC). It sets the M flag to indicate
-/// that VMs must use DHCPv6 to obtain addresses.
+/// that VMs must use DHCPv6 to obtain addresses. The O flag is set when DNS
+/// servers are configured, indicating other configuration is available via DHCPv6.
 fn build_router_advertisement(
-    _nic_config: &NicConfig,
+    nic_config: &NicConfig,
     virtio_hdr: &[u8],
     dst_addr: Ipv6Address,
     dst_mac: EthernetAddress,
@@ -377,8 +378,14 @@ fn build_router_advertisement(
     icmpv6_data[2..4].fill(0);
     // Cur Hop Limit: 64
     icmpv6_data[4] = 64;
-    // Flags: M (Managed) = 0x80
-    icmpv6_data[5] = 0x80;
+    // Flags: M (Managed) = 0x80, O (Other Config) = 0x40
+    // Set O flag when DNS servers are configured
+    let flags = if nic_config.dns_servers.is_empty() {
+        0x80 // M flag only
+    } else {
+        0xC0 // M + O flags
+    };
+    icmpv6_data[5] = flags;
     // Router Lifetime: 1800 seconds (30 minutes)
     icmpv6_data[6..8].copy_from_slice(&1800u16.to_be_bytes());
     // Reachable Time: 0 (unspecified)
@@ -396,6 +403,7 @@ fn build_router_advertisement(
 
     debug!(
         dst = %dst_addr,
+        o_flag = !nic_config.dns_servers.is_empty(),
         "RA built (M flag set, no prefix)"
     );
 
