@@ -100,3 +100,7 @@ required-features = ["test-util"]
 [[test]]
 name = "ipv6_test"
 required-features = ["test-util"]
+
+[[test]]
+name = "integration_test"
+required-features = ["test-util"]

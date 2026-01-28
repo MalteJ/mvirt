@@ -10,8 +10,8 @@ members = [
     "mvirt-api",
     "mvirt-node",
     "mvirt-ebpf",
-    "mvirt-ebpf-programs",
 ]
+# Note: mvirt-ebpf/programs is excluded - requires nightly + bpfel target
 
 # Size optimization for init process (MicroVM init)
 [profile.release.package.mvirt-one]
