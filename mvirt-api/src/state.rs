@@ -1222,7 +1222,10 @@ impl StateMachine<Command, Response> for ApiState {
                 };
 
                 self.import_jobs.insert(id, job.clone());
-                (Response::ImportJob(job), vec![])
+                (
+                    Response::ImportJob(job.clone()),
+                    vec![Event::ImportJobCreated(job)],
+                )
             }
 
             Command::UpdateImportJob {

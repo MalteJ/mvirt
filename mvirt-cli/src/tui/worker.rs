@@ -922,6 +922,7 @@ pub async fn action_worker(
             } => {
                 if let Some(ref mut client) = net_client {
                     let req = CreateNetworkRequest {
+                        id: String::new(),
                         name,
                         ipv4_enabled: ipv4_subnet.is_some(),
                         ipv4_subnet: ipv4_subnet.unwrap_or_default(),

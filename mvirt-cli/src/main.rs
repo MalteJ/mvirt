@@ -783,6 +783,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let response = net_client
                         .create_network(net_proto::CreateNetworkRequest {
+                            id: String::new(),
                             name: name.clone(),
                             ipv4_enabled,
                             ipv4_subnet: ipv4_subnet.clone().unwrap_or_default(),

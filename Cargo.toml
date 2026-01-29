@@ -10,6 +10,7 @@ members = [
     "mvirt-api",
     "mvirt-node",
     "mvirt-ebpf",
+    "mvirt-shipper",
 ]
 # Note: mvirt-ebpf/programs is excluded - requires nightly + bpfel target
 

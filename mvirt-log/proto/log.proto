@@ -50,6 +50,10 @@ enum LogLevel {
   ERROR = 2;
   DEBUG = 3;
   AUDIT = 4;
+  NOTICE = 5;
+  CRITICAL = 6;
+  ALERT = 7;
+  EMERGENCY = 8;
 }
 
 message LogRequest { LogEntry entry = 1; }

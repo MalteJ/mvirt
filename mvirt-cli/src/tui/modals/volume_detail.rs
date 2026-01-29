@@ -37,7 +37,7 @@ fn level_style(level: i32) -> (String, Color) {
         Ok(LogLevel::Error) => ("E".to_string(), Color::Red),
         Ok(LogLevel::Debug) => ("D".to_string(), Color::DarkGray),
         Ok(LogLevel::Audit) => ("A".to_string(), Color::Cyan),
-        Err(_) => ("?".to_string(), Color::White),
+        Err(_) | Ok(_) => ("?".to_string(), Color::White),
     }
 }
 

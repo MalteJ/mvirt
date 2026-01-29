@@ -17,9 +17,14 @@
       url = "github:nix-community/disko/latest";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    colmena = {
+      url = "github:zhaofengli/colmena";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, crane, disko }:
+  outputs = { self, nixpkgs, rust-overlay, crane, disko, colmena }:
     let
       system = "x86_64-linux";
 
@@ -70,6 +75,9 @@
         # Hypervisor ISO image
         hypervisor-image = self.nixosConfigurations.hypervisor.config.system.build.isoImage;
 
+        # Node VM disk image (4 GB raw)
+        node-image = self.nixosConfigurations.node.config.system.build.image;
+
         default = mvirtPackages.mvirt;
       };
 
@@ -91,6 +99,136 @@
         ];
       };
 
+      # Node VM image configuration
+      nixosConfigurations.node = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit self;
+          mvirtPkgs = self.packages.${system};
+        };
+        modules = [
+          self.nixosModules.mvirt
+          ./nix/images/node.nix
+          ({ config, lib, pkgs, modulesPath, ... }: {
+            imports = [ "${modulesPath}/image/repart.nix" ];
+
+            # GRUB config now in node.nix
+
+            image.repart = {
+              name = "mvirt-node";
+              partitions = {
+                "00-esp" = {
+                  contents =
+                    let
+                      toplevel = config.system.build.toplevel;
+                      grubCfg = pkgs.writeText "grub.cfg" ''
+                        serial --speed=115200
+                        terminal_output serial console
+                        terminal_input serial console
+
+                        set timeout=3
+                        search --set=root --label nixos
+
+                        menuentry "NixOS" {
+                          linux ${toplevel}/kernel init=${toplevel}/init ${builtins.concatStringsSep " " config.boot.kernelParams}
+                          initrd ${toplevel}/initrd
+                        }
+                      '';
+                      grubEfi = pkgs.runCommand "grub-efi-image" { nativeBuildInputs = [ pkgs.grub2_efi ]; } ''
+                        mkdir -p $out
+                        grub-mkimage \
+                          -o $out/BOOTX64.EFI \
+                          -p /EFI/BOOT \
+                          -O x86_64-efi \
+                          part_gpt fat ext2 normal boot linux search search_label configfile serial terminal
+                      '';
+                    in
+                    {
+                      "/EFI/BOOT/BOOTX64.EFI".source = "${grubEfi}/BOOTX64.EFI";
+                      "/EFI/BOOT/grub.cfg".source = grubCfg;
+                    };
+                  repartConfig = {
+                    Type = "esp";
+                    Format = "vfat";
+                    SizeMinBytes = "256M";
+                    SizeMaxBytes = "256M";
+                  };
+                };
+                "10-root" = {
+                  storePaths = [ config.system.build.toplevel ];
+                  repartConfig = {
+                    Type = "root";
+                    Format = "ext4";
+                    SizeMinBytes = "3500M";
+                    Label = "nixos";
+                  };
+                };
+              };
+            };
+          })
+        ];
+      };
+
+      # Colmena deployment
+      colmenaHive = colmena.lib.makeHive self.colmena;
+      colmena = {
+        meta = {
+          nixpkgs = pkgs;
+          specialArgs = {
+            inherit self;
+            mvirtPkgs = self.packages.${system};
+          };
+        };
+
+        defaults = { ... }: {
+          imports = [
+            self.nixosModules.mvirt
+            ./nix/images/node.nix
+          ];
+          services.mvirt.node.enable = true;
+        };
+
+        node-1 = { ... }: {
+          deployment = {
+            targetHost = "10.0.0.11";
+            targetUser = "root";
+          };
+          networking.hostName = "mvirt-node-1";
+          networking.hostId = "a1b2c3d1";
+          services.mvirt.api = {
+            enable = true;
+            dev = true;
+            grpcListen = "[::]:50056";
+          };
+        };
+
+        node-2 = { ... }: {
+          deployment = {
+            targetHost = "10.0.0.12";
+            targetUser = "root";
+          };
+          networking.hostName = "mvirt-node-2";
+          networking.hostId = "a1b2c3d2";
+          services.mvirt.node.apiEndpoint = "http://10.0.0.11:50056";
+        };
+
+        node-3 = { ... }: {
+          deployment = {
+            targetHost = "10.0.0.13";
+            targetUser = "root";
+          };
+          networking.hostName = "mvirt-node-3";
+          networking.hostId = "a1b2c3d3";
+          services.mvirt.node.apiEndpoint = "http://10.0.0.11:50056";
+        };
+      };
+
+      # Colmena app for `nix run .#colmena`
+      apps.${system}.colmena = {
+        type = "app";
+        program = "${colmena.packages.${system}.colmena}/bin/colmena";
+      };
+
       # Development shell
       devShells.${system}.default = pkgs.mkShell {
         buildInputs = with pkgs; [
@@ -109,6 +247,9 @@
 
           # Additional tools
           sqlite
+
+          # Deployment
+          colmena.packages.${system}.colmena
 
           # For testing
           qemu

@@ -1,6 +1,6 @@
 //! Events emitted by state machine changes.
 
-use crate::command::{NetworkData, NicData, NodeData, VmData, VolumeData};
+use crate::command::{ImportJobData, NetworkData, NicData, NodeData, VmData, VolumeData};
 
 /// Events emitted when state changes occur.
 ///
@@ -68,6 +68,10 @@ pub enum Event {
     /// A volume was deleted.
     VolumeDeleted { id: String, node_id: String },
 
+    // Import Job events
+    /// An import job was created (template download).
+    ImportJobCreated(ImportJobData),
+
     // Security Group events
     /// A security group was created.
     SecurityGroupCreated { id: String },
@@ -91,6 +95,7 @@ impl Event {
             | Event::VmStatusUpdated { .. }
             | Event::VmDeleted { .. } => "vm",
             Event::VolumeCreated(_) | Event::VolumeDeleted { .. } => "volume",
+            Event::ImportJobCreated(_) => "import_job",
             Event::SecurityGroupCreated { .. } | Event::SecurityGroupDeleted { .. } => {
                 "security_group"
             }
@@ -115,6 +120,7 @@ impl Event {
             Event::VmDeleted { id } => id,
             Event::VolumeCreated(v) => &v.id,
             Event::VolumeDeleted { id, .. } => id,
+            Event::ImportJobCreated(j) => &j.id,
             Event::SecurityGroupCreated { id } | Event::SecurityGroupDeleted { id } => id,
         }
     }

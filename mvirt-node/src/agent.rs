@@ -15,6 +15,7 @@ use crate::proto::{
     update_resource_status_request::Status, HeartbeatRequest, NodeResources as ProtoNodeResources,
     RegisterRequest, SpecEvent, UpdateResourceStatusRequest, WatchSpecsRequest,
 };
+use crate::reconciler::network::NetworkReconciler;
 use crate::reconciler::nic::NicReconciler;
 use crate::reconciler::route::RouteReconciler;
 use crate::reconciler::security_group::SecurityGroupReconciler;
@@ -107,6 +108,7 @@ pub struct NodeAgent {
     last_revision: u64,
     // Reconcilers
     vm_reconciler: VmReconciler,
+    network_reconciler: NetworkReconciler,
     nic_reconciler: NicReconciler,
     template_reconciler: TemplateReconciler,
     volume_reconciler: VolumeReconciler,
@@ -137,6 +139,7 @@ impl NodeAgent {
             audit,
             last_revision: 0,
             vm_reconciler: VmReconciler::new(vmm_client),
+            network_reconciler: NetworkReconciler::new(net_client.clone()),
             nic_reconciler: NicReconciler::new(net_client.clone()),
             template_reconciler: TemplateReconciler::new(zfs_client.clone()),
             volume_reconciler: VolumeReconciler::new(zfs_client),
@@ -229,11 +232,22 @@ impl NodeAgent {
                     let id = net_spec
                         .meta
                         .as_ref()
-                        .map(|m| m.id.as_str())
-                        .unwrap_or("unknown");
-                    info!("Received network event: {}", id);
-                    self.audit.spec_received(node_id, "network", id);
-                    // Networks are info-only, no reconciliation needed
+                        .map(|m| m.id.clone())
+                        .unwrap_or_default();
+                    self.audit.spec_received(node_id, "network", &id);
+
+                    if is_delete {
+                        if let Err(e) = self.network_reconciler.finalize(&id).await {
+                            error!("Failed to finalize network {}: {}", id, e);
+                        }
+                    } else {
+                        match self.network_reconciler.reconcile(&id, &net_spec).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!("Network reconciliation failed for {}: {}", id, e)
+                            }
+                        }
+                    }
                 }
                 Spec::Vm(vm_spec) => {
                     let id = vm_spec

@@ -92,11 +92,12 @@ impl NodeServiceImpl {
         }
         // Try resolving name to ID
         if let Ok(Some(node)) = self.store.get_node_by_name(node_id).await
-            && let Some(sender) = senders.get(&node.id) {
-                sender.send(Ok(event)).await.map_err(|_| {
-                    Status::internal(format!("Failed to send spec to node {}", node_id))
-                })?;
-            }
+            && let Some(sender) = senders.get(&node.id)
+        {
+            sender.send(Ok(event)).await.map_err(|_| {
+                Status::internal(format!("Failed to send spec to node {}", node_id))
+            })?;
+        }
         Ok(())
     }
 
@@ -173,6 +174,39 @@ impl NodeServiceImpl {
 
                     tracing::info!("Sending VM spec {} to node {}", id, node_id);
                     self.send_spec_to_node(node_id, spec_event).await?;
+
+                    // Send the NIC spec to the same node so it can set up networking
+                    if !new.spec.nic_id.is_empty() {
+                        if let Ok(Some(nic)) = self.store.get_nic(&new.spec.nic_id).await {
+                            let nic_revision = self.next_revision().await;
+                            let nic_event = SpecEvent {
+                                revision: nic_revision,
+                                r#type: SpecEventType::Create as i32,
+                                spec: Some(spec_event::Spec::Nic(ProtoNicSpec {
+                                    meta: Some(ResourceMeta {
+                                        id: nic.id.clone(),
+                                        name: nic.name.clone().unwrap_or_default(),
+                                        project_id: nic.project_id.clone(),
+                                        node_id: Some(node_id.clone()),
+                                        labels: Default::default(),
+                                    }),
+                                    network_id: nic.network_id.clone(),
+                                    mac_address: nic.mac_address.clone(),
+                                    ipv4_address: nic.ipv4_address.clone(),
+                                    ipv6_address: nic.ipv6_address.clone(),
+                                    routed_ipv4_prefixes: nic.routed_ipv4_prefixes.clone(),
+                                    routed_ipv6_prefixes: nic.routed_ipv6_prefixes.clone(),
+                                    security_group_id: nic
+                                        .security_group_id
+                                        .clone()
+                                        .unwrap_or_default(),
+                                })),
+                            };
+
+                            tracing::info!("Sending NIC spec {} to node {}", nic.id, node_id);
+                            self.send_spec_to_node(node_id, nic_event).await?;
+                        }
+                    }
                 }
             }
 
@@ -221,35 +255,10 @@ impl NodeServiceImpl {
                 self.broadcast_spec(spec_event).await;
             }
 
-            // NIC created - send to nodes that need it
-            Event::NicCreated(nic) => {
-                let spec_event = SpecEvent {
-                    revision,
-                    r#type: SpecEventType::Create as i32,
-                    spec: Some(spec_event::Spec::Nic(ProtoNicSpec {
-                        meta: Some(ResourceMeta {
-                            id: nic.id.clone(),
-                            name: nic.name.clone().unwrap_or_default(),
-                            project_id: nic.project_id.clone(),
-                            node_id: None,
-                            labels: Default::default(),
-                        }),
-                        network_id: nic.network_id.clone(),
-                        mac_address: nic.mac_address.clone(),
-                        ipv4_address: nic.ipv4_address.clone(),
-                        ipv6_address: nic.ipv6_address.clone(),
-                        routed_ipv4_prefixes: nic.routed_ipv4_prefixes.clone(),
-                        routed_ipv6_prefixes: nic.routed_ipv6_prefixes.clone(),
-                        security_group_id: nic.security_group_id.clone().unwrap_or_default(),
-                    })),
-                };
+            // NIC created - no broadcast; NIC is sent to the node when its VM is scheduled.
+            Event::NicCreated(_) => {}
 
-                // Broadcast NIC creation (nodes will filter by relevance)
-                tracing::info!("Broadcasting NIC spec {}", nic.id);
-                self.broadcast_spec(spec_event).await;
-            }
-
-            // NIC deleted
+            // NIC deleted - broadcast delete so the node running the VM can clean up.
             Event::NicDeleted { id, .. } => {
                 let spec_event = SpecEvent {
                     revision,
@@ -329,6 +338,28 @@ impl NodeServiceImpl {
 
                 tracing::info!("Sending volume delete {} to node {}", id, node_id);
                 self.send_spec_to_node(&node_id, spec_event).await?;
+            }
+
+            // Import job created - broadcast TemplateSpec to all nodes
+            Event::ImportJobCreated(job) => {
+                let spec_event = SpecEvent {
+                    revision,
+                    r#type: SpecEventType::Create as i32,
+                    spec: Some(spec_event::Spec::Template(super::proto::TemplateSpec {
+                        meta: Some(ResourceMeta {
+                            id: job.id.clone(),
+                            name: job.template_name.clone(),
+                            project_id: job.project_id.clone(),
+                            node_id: None,
+                            labels: Default::default(),
+                        }),
+                        url: job.url.clone(),
+                        checksum: None,
+                    })),
+                };
+
+                tracing::info!("Broadcasting template spec {} (url: {})", job.id, job.url);
+                self.broadcast_spec(spec_event).await;
             }
 
             // Other events don't require spec distribution

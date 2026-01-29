@@ -8,12 +8,18 @@
 
   # System identification
   system.stateVersion = "24.11";
-  networking.hostId = "aabbccdd";  # Overridden per-node
+  networking.hostId = lib.mkDefault "aabbccdd";  # Overridden per-node
 
   # Boot configuration
   boot = {
-    loader.systemd-boot.enable = true;
-    loader.efi.canTouchEfiVariables = true;
+    loader.systemd-boot.enable = lib.mkDefault false;
+    loader.efi.canTouchEfiVariables = false;
+    loader.grub = {
+      enable = lib.mkDefault true;
+      efiSupport = true;
+      efiInstallAsRemovable = true;
+      device = "nodev";
+    };
 
     supportedFilesystems = [ "zfs" ];
     zfs.devNodes = "/dev/disk/by-path";
@@ -73,6 +79,8 @@
         50052  # mvirt-log
         50053  # mvirt-zfs
         50054  # mvirt-ebpf
+        8080   # mvirt-api
+        50056  # mvirt-api grpc (node agents)
       ];
     };
   };
@@ -123,7 +131,7 @@
 
   # Packages
   environment.systemPackages = with pkgs; [
-    vim htop tmux git
+    vim htop tmux git nftables
     bridge-utils iproute2 tcpdump curl
     parted
     mvirtPkgs.mvirt-cli

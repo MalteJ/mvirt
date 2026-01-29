@@ -449,8 +449,15 @@ impl NetService for EbpfNetServiceImpl {
             .collect();
 
         let now = Utc::now();
+        let id = if req.id.is_empty() {
+            Uuid::new_v4()
+        } else {
+            Uuid::parse_str(&req.id).map_err(|_| {
+                Status::invalid_argument(format!("Invalid network ID: {}", req.id))
+            })?
+        };
         let network = NetworkData {
-            id: Uuid::new_v4(),
+            id,
             name: req.name,
             ipv4_enabled: req.ipv4_enabled,
             ipv4_subnet,

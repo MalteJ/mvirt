@@ -46,7 +46,7 @@ in {
 
     src = pkgs.fetchurl {
       url = "https://github.com/cloud-hypervisor/edk2/releases/download/ch-${edk2Version}/CLOUDHV.fd";
-      sha256 = "121z2abiwr6vqjww0x1b2q1747yrc2d3krhbp28iy1wi8si2fk3v";
+      sha256 = "sha256-BiTAbF0Hy47+OIBokM5wdsQcCQLy/NWyN28QcDPjIis=";
     };
 
     dontUnpack = true;

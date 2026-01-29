@@ -89,6 +89,72 @@ in {
       };
     };
 
+    api = {
+      enable = mkEnableOption "mvirt-api (REST API control plane)";
+
+      port = mkOption {
+        type = types.port;
+        default = 8080;
+        description = "REST API port";
+      };
+
+      dev = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Run in development mode (single-node, ephemeral storage)";
+      };
+
+      grpcListen = mkOption {
+        type = types.str;
+        default = "[::1]:50056";
+        description = "gRPC listen address for node agents";
+      };
+
+      nodeId = mkOption {
+        type = types.int;
+        default = 1;
+        description = "Raft node ID";
+      };
+
+      extraArgs = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Extra arguments to pass to mvirt-api";
+      };
+    };
+
+    node = {
+      enable = mkEnableOption "mvirt-node (Node agent for reconciliation)";
+
+      apiEndpoint = mkOption {
+        type = types.str;
+        default = "http://[::1]:50056";
+        description = "mvirt-api gRPC endpoint for node registration and spec streaming";
+      };
+
+      extraArgs = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Extra arguments to pass to mvirt-node";
+      };
+    };
+
+    shipper = {
+      enable = mkEnableOption "mvirt-shipper (Journald log shipper)" // { default = true; };
+
+      units = mkOption {
+        type = types.listOf types.str;
+        default = [ "mvirt-vmm" "mvirt-zfs" "mvirt-ebpf" "mvirt-node" ];
+        description = "Systemd units to ship logs from";
+      };
+
+      extraArgs = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Extra arguments to pass to mvirt-shipper";
+      };
+    };
+
     ebpf = {
       enable = mkEnableOption "mvirt-ebpf (eBPF network management)" // { default = true; };
 
@@ -122,7 +188,9 @@ in {
       "d ${cfg.dataDir} 0755 root root -"
       "d ${cfg.dataDir}/vmm 0755 root root -"
       "d ${cfg.dataDir}/log 0750 mvirt mvirt -"
+      "d ${cfg.dataDir}/cp 0755 root root -"
       "d ${cfg.dataDir}/ebpf 0755 root root -"
+      "d ${cfg.dataDir}/shipper 0750 mvirt mvirt -"
       "d /run/mvirt 0755 root root -"
       "d /run/mvirt/ebpf 0755 root root -"
     ];
@@ -138,6 +206,30 @@ in {
         User = "mvirt";
         Group = "mvirt";
         ExecStart = "${mvirtPkgs}/bin/mvirt-log --listen [::1]:${toString cfg.log.port} --data-dir ${cfg.dataDir}/log ${concatStringsSep " " cfg.log.extraArgs}";
+        Restart = "on-failure";
+        RestartSec = "5s";
+
+        # Hardening
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = [ cfg.dataDir ];
+        PrivateTmp = true;
+      };
+    };
+
+    # mvirt-shipper service
+    systemd.services.mvirt-shipper = mkIf cfg.shipper.enable {
+      description = "mvirt Journald Log Shipper";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" "mvirt-log.service" ];
+      wants = [ "mvirt-log.service" ];
+
+      serviceConfig = {
+        Type = "simple";
+        User = "mvirt";
+        Group = "mvirt";
+        ExecStart = "${mvirtPkgs}/bin/mvirt-shipper --units ${concatStringsSep "," cfg.shipper.units} --log-endpoint http://[::1]:${toString cfg.log.port} --cursor-dir ${cfg.dataDir}/shipper ${concatStringsSep " " cfg.shipper.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
@@ -187,6 +279,8 @@ in {
       wants = [ "mvirt-log.service" ];
       requires = [ "zfs.target" ];
 
+      path = [ config.boot.zfs.package pkgs.qemu-utils ];
+
       environment = {
         MVIRT_LOG_ENDPOINT = "http://[::1]:${toString cfg.log.port}";
       };
@@ -212,6 +306,8 @@ in {
       after = [ "network.target" "mvirt-log.service" ];
       wants = [ "mvirt-log.service" ];
 
+      path = [ pkgs.nftables pkgs.iproute2 ];
+
       environment = {
         MVIRT_DATA_DIR = cfg.dataDir;
         MVIRT_LOG_ENDPOINT = "http://[::1]:${toString cfg.log.port}";
@@ -225,6 +321,49 @@ in {
         RestartSec = "5s";
 
         # Hardening (limited due to root requirement for eBPF)
+        NoNewPrivileges = false;
+        ProtectSystem = "full";
+        PrivateTmp = true;
+      };
+    };
+
+    # mvirt-node agent
+    systemd.services.mvirt-node = mkIf cfg.node.enable {
+      description = "mvirt Node Agent";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" "mvirt-log.service" "mvirt-vmm.service" "mvirt-zfs.service" "mvirt-ebpf.service" ];
+      wants = [ "mvirt-log.service" "mvirt-vmm.service" "mvirt-zfs.service" "mvirt-ebpf.service" ];
+
+      serviceConfig = {
+        Type = "simple";
+        User = "root";
+        ExecStart = "${mvirtPkgs}/bin/mvirt-node --api-endpoint ${cfg.node.apiEndpoint} --vmm-endpoint http://[::1]:${toString cfg.vmm.port} --zfs-endpoint http://[::1]:${toString cfg.zfs.port} --net-endpoint http://[::1]:${toString cfg.ebpf.port} --log-endpoint http://[::1]:${toString cfg.log.port} ${concatStringsSep " " cfg.node.extraArgs}";
+        Restart = "on-failure";
+        RestartSec = "5s";
+
+        NoNewPrivileges = false;
+        ProtectSystem = "full";
+        PrivateTmp = true;
+      };
+    };
+
+    # mvirt-api service
+    systemd.services.mvirt-api = mkIf cfg.api.enable {
+      description = "mvirt API Server";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" "mvirt-log.service" "mvirt-vmm.service" "mvirt-zfs.service" "mvirt-ebpf.service" ];
+      wants = [ "mvirt-log.service" "mvirt-vmm.service" "mvirt-zfs.service" "mvirt-ebpf.service" ];
+
+      serviceConfig = {
+        Type = "simple";
+        User = "root";
+        ExecStart = let
+          devFlag = if cfg.api.dev then " --dev" else "";
+          nodeIdFlag = " --node-id ${toString cfg.api.nodeId}";
+        in "${mvirtPkgs}/bin/mvirt-api --listen [::]:${toString cfg.api.port} --grpc-listen ${cfg.api.grpcListen} --data-dir ${cfg.dataDir}/cp --log-endpoint http://[::1]:${toString cfg.log.port}${devFlag}${nodeIdFlag} ${concatStringsSep " " cfg.api.extraArgs}";
+        Restart = "on-failure";
+        RestartSec = "5s";
+
         NoNewPrivileges = false;
         ProtectSystem = "full";
         PrivateTmp = true;

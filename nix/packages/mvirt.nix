@@ -13,6 +13,12 @@ let
       (builtins.match ".*/migrations/.*" path != null);
   };
 
+  # Pre-fetch Swagger UI for utoipa-swagger-ui (build.rs needs it, no network in sandbox)
+  swaggerUi = pkgs.fetchurl {
+    url = "https://github.com/swagger-api/swagger-ui/archive/refs/tags/v5.17.14.zip";
+    sha256 = "sha256-SBJE0IEgl7Efuu73n3HZQrFxYX+cn5UU5jrL4T5xzNw=";
+  };
+
   # Common arguments for all builds
   commonArgs = {
     inherit src;
@@ -36,6 +42,13 @@ let
 
     # Protobuf compiler
     PROTOC = "${pkgs.protobuf}/bin/protoc";
+
+    # Swagger UI (offline, for utoipa-swagger-ui build.rs)
+    preBuild = ''
+      cp ${swaggerUi} /tmp/swagger-ui.zip
+      chmod 644 /tmp/swagger-ui.zip
+      export SWAGGER_UI_DOWNLOAD_URL="file:///tmp/swagger-ui.zip"
+    '';
 
     nativeBuildInputs = with pkgs; [
       protobuf
@@ -115,4 +128,5 @@ in {
   mvirt-zfs = buildPackage "mvirt-zfs" "mvirt-zfs";
   mvirt-ebpf = buildPackage "mvirt-ebpf" "mvirt-ebpf";
   mvirt-log = buildPackage "mvirt-log" "mvirt-log";
+  mvirt-shipper = buildPackage "mvirt-shipper" "mvirt-shipper";
 }

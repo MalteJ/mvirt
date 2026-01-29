@@ -36,6 +36,7 @@ impl NetClient {
     #[allow(clippy::too_many_arguments)]
     pub async fn create_network(
         &mut self,
+        id: &str,
         name: &str,
         ipv4_enabled: bool,
         ipv4_subnet: &str,
@@ -45,10 +46,11 @@ impl NetClient {
         ntp_servers: Vec<String>,
         is_public: bool,
     ) -> Result<Network> {
-        debug!("Creating network {} in mvirt-net", name);
+        debug!("Creating network {} ({}) in mvirt-net", name, id);
         let resp = self
             .client
             .create_network(CreateNetworkRequest {
+                id: id.to_string(),
                 name: name.to_string(),
                 ipv4_enabled,
                 ipv4_subnet: ipv4_subnet.to_string(),

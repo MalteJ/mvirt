@@ -12,8 +12,9 @@ use tracing::{debug, error, info, warn};
 use crate::proto::{BootMode, VmConfig};
 use crate::store::VmStore;
 
-const CLOUD_HYPERVISOR_BIN: &str = "/usr/bin/cloud-hypervisor";
-const FIRMWARE_PATH: &str = "/usr/share/mvirt/CLOUDHV.fd";
+fn firmware_path_default() -> String {
+    std::env::var("HYPERVISOR_FW").unwrap_or_else(|_| "/usr/share/mvirt/CLOUDHV.fd".to_string())
+}
 const HUGEPAGES_FREE_PATH: &str = "/sys/kernel/mm/hugepages/hugepages-2048kB/free_hugepages";
 const HUGEPAGE_SIZE_KB: u64 = 2048;
 
@@ -65,7 +66,7 @@ impl Hypervisor {
     }
 
     fn firmware_path(&self) -> PathBuf {
-        PathBuf::from(FIRMWARE_PATH)
+        PathBuf::from(firmware_path_default())
     }
 
     async fn create_cloudinit_iso(
@@ -157,7 +158,7 @@ ethernets:
         debug!(vm_dir = %vm_dir.display(), "VM directory created");
 
         // Build cloud-hypervisor command
-        let mut cmd = Command::new(CLOUD_HYPERVISOR_BIN);
+        let mut cmd = Command::new("cloud-hypervisor");
 
         cmd.arg("--api-socket")
             .arg(format!("path={}", api_socket.display()));

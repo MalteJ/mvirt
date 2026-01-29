@@ -1,0 +1,18 @@
+[package]
+name = "mvirt-shipper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "process", "io-util", "signal", "fs"] }
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+mvirt-log = { path = "../mvirt-log" }
+tonic = "0.14"
+anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3.24"

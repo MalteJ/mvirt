@@ -70,17 +70,23 @@ impl AuditLogger {
 
         // Always log locally via tracing
         match level {
+            LogLevel::Emergency | LogLevel::Alert | LogLevel::Critical => {
+                tracing::error!(target: "audit", component = %self.component, objects = ?object_ids, "{}", message)
+            }
             LogLevel::Error => {
                 tracing::error!(target: "audit", component = %self.component, objects = ?object_ids, "{}", message)
             }
             LogLevel::Warn => {
                 tracing::warn!(target: "audit", component = %self.component, objects = ?object_ids, "{}", message)
             }
-            LogLevel::Audit => {
+            LogLevel::Notice | LogLevel::Audit => {
                 tracing::info!(target: "audit", component = %self.component, objects = ?object_ids, "{}", message)
             }
-            _ => {
+            LogLevel::Info => {
                 tracing::info!(target: "audit", component = %self.component, objects = ?object_ids, "{}", message)
+            }
+            LogLevel::Debug => {
+                tracing::debug!(target: "audit", component = %self.component, objects = ?object_ids, "{}", message)
             }
         }
 

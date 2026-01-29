@@ -25,7 +25,7 @@ fn level_style(level: i32) -> (&'static str, Style) {
         Ok(LogLevel::Error) => ("ERROR", Style::default().fg(Color::Red).bold()),
         Ok(LogLevel::Debug) => ("DEBUG", Style::default().fg(Color::DarkGray).bold()),
         Ok(LogLevel::Audit) => ("AUDIT", Style::default().fg(Color::Cyan).bold()),
-        Err(_) => ("???", Style::default().fg(Color::White)),
+        Err(_) | Ok(_) => ("???", Style::default().fg(Color::White)),
     }
 }
 
