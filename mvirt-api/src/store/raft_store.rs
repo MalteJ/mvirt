@@ -17,11 +17,11 @@ use crate::state::ApiState;
 use super::error::{Result, StoreError};
 use super::event::Event;
 use super::traits::{
-    ClusterInfo, ClusterStore, CreateNetworkRequest, CreateNicRequest, CreateProjectRequest,
-    CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest, CreateSnapshotRequest,
-    CreateVmRequest, CreateVolumeRequest, DataStore, DeleteNetworkResult, ImportTemplateRequest,
-    Membership, MembershipNode, NetworkStore, NicStore, NodeStore, ProjectStore,
-    RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore, TemplateStore,
+    ControlplaneInfo, ControlplaneStore, CreateNetworkRequest, CreateNicRequest,
+    CreateProjectRequest, CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest,
+    CreateSnapshotRequest, CreateVmRequest, CreateVolumeRequest, DataStore, DeleteNetworkResult,
+    ImportTemplateRequest, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore,
+    ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore, TemplateStore,
     UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateVmSpecRequest,
     UpdateVmStatusRequest, VmStore, VolumeStore,
 };
@@ -476,17 +476,17 @@ impl VmStore for RaftStore {
 }
 
 #[async_trait]
-impl ClusterStore for RaftStore {
-    async fn get_cluster_info(&self) -> Result<ClusterInfo> {
+impl ControlplaneStore for RaftStore {
+    async fn get_controlplane_info(&self) -> Result<ControlplaneInfo> {
         let node = self.node.read().await;
         let metrics = node.metrics();
 
-        Ok(ClusterInfo {
+        Ok(ControlplaneInfo {
             cluster_id: "mvirt-cluster".to_string(),
             leader_id: metrics.current_leader,
             current_term: metrics.current_term,
             commit_index: metrics.last_applied.map(|l| l.index).unwrap_or(0),
-            node_id: self.node_id,
+            peer_id: self.node_id,
             is_leader: metrics.current_leader == Some(self.node_id),
         })
     }
@@ -495,7 +495,7 @@ impl ClusterStore for RaftStore {
         let node = self.node.read().await;
         let membership = node.get_membership();
 
-        let nodes: Vec<MembershipNode> = membership
+        let peers: Vec<MembershipPeer> = membership
             .nodes
             .iter()
             .map(|(id, addr)| {
@@ -506,7 +506,7 @@ impl ClusterStore for RaftStore {
                 } else {
                     "unknown"
                 };
-                MembershipNode {
+                MembershipPeer {
                     id: *id,
                     address: addr.clone(),
                     role: role.to_string(),
@@ -517,13 +517,13 @@ impl ClusterStore for RaftStore {
         Ok(Membership {
             voters: membership.voters.into_iter().collect(),
             learners: membership.learners.into_iter().collect(),
-            nodes,
+            peers,
         })
     }
 
-    async fn create_join_token(&self, node_id: u64, valid_for_secs: u64) -> Result<String> {
+    async fn create_join_token(&self, peer_id: u64, valid_for_secs: u64) -> Result<String> {
         let node = self.node.read().await;
-        node.create_join_token(node_id, valid_for_secs)
+        node.create_join_token(peer_id, valid_for_secs)
             .await
             .map_err(|e| match e {
                 mraft::JoinError::NotLeader => StoreError::NotLeader { leader_id: None },
@@ -534,12 +534,12 @@ impl ClusterStore for RaftStore {
             })
     }
 
-    async fn remove_node(&self, node_id: u64) -> Result<()> {
+    async fn remove_peer(&self, peer_id: u64) -> Result<()> {
         let node = self.node.read().await;
-        node.remove_node(node_id).await.map_err(|e| match e {
+        node.remove_node(peer_id).await.map_err(|e| match e {
             mraft::JoinError::NotLeader => StoreError::NotLeader { leader_id: None },
             mraft::JoinError::NotMember(_) => {
-                StoreError::NotFound(format!("Node {} not found", node_id))
+                StoreError::NotFound(format!("Peer {} not found", peer_id))
             }
             _ => StoreError::Internal(e.to_string()),
         })

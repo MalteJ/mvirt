@@ -164,31 +164,31 @@ pub struct ImportTemplateRequest {
 }
 
 // =============================================================================
-// Cluster DTOs
+// Controlplane DTOs
 // =============================================================================
 
-/// Cluster information.
+/// Control plane information.
 #[derive(Debug, Clone)]
-pub struct ClusterInfo {
+pub struct ControlplaneInfo {
     pub cluster_id: String,
     pub leader_id: Option<u64>,
     pub current_term: u64,
     pub commit_index: u64,
-    pub node_id: u64,
+    pub peer_id: u64,
     pub is_leader: bool,
 }
 
-/// Cluster membership information.
+/// Control plane membership information.
 #[derive(Debug, Clone)]
 pub struct Membership {
     pub voters: Vec<u64>,
     pub learners: Vec<u64>,
-    pub nodes: Vec<MembershipNode>,
+    pub peers: Vec<MembershipPeer>,
 }
 
-/// Node in membership.
+/// Peer in membership.
 #[derive(Debug, Clone)]
-pub struct MembershipNode {
+pub struct MembershipPeer {
     pub id: u64,
     pub address: String,
     pub role: String,
@@ -316,20 +316,20 @@ pub trait VmStore: Send + Sync {
     async fn delete_vm(&self, id: &str) -> Result<()>;
 }
 
-/// Store trait for cluster operations.
+/// Store trait for control plane operations.
 #[async_trait]
-pub trait ClusterStore: Send + Sync {
-    /// Get cluster information.
-    async fn get_cluster_info(&self) -> Result<ClusterInfo>;
+pub trait ControlplaneStore: Send + Sync {
+    /// Get control plane information.
+    async fn get_controlplane_info(&self) -> Result<ControlplaneInfo>;
 
-    /// Get cluster membership.
+    /// Get control plane membership.
     async fn get_membership(&self) -> Result<Membership>;
 
-    /// Create a join token for a new node.
-    async fn create_join_token(&self, node_id: u64, valid_for_secs: u64) -> Result<String>;
+    /// Create a join token for a new peer.
+    async fn create_join_token(&self, peer_id: u64, valid_for_secs: u64) -> Result<String>;
 
-    /// Remove a node from the cluster.
-    async fn remove_node(&self, node_id: u64) -> Result<()>;
+    /// Remove a peer from the control plane.
+    async fn remove_peer(&self, peer_id: u64) -> Result<()>;
 }
 
 /// Store trait for project operations.
@@ -482,7 +482,7 @@ pub trait SecurityGroupStore: Send + Sync {
 /// - Project CRUD operations
 /// - Volume CRUD operations
 /// - Template and import operations
-/// - Cluster management operations
+/// - Control plane management operations
 /// - Event subscription for real-time updates
 pub trait DataStore:
     NodeStore
@@ -493,7 +493,7 @@ pub trait DataStore:
     + VolumeStore
     + TemplateStore
     + SecurityGroupStore
-    + ClusterStore
+    + ControlplaneStore
     + Send
     + Sync
 {

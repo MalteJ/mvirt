@@ -35,11 +35,11 @@ impl ApiAuditLogger {
         );
     }
 
-    pub fn node_removed(&self, node_id: u64) {
+    pub fn peer_removed(&self, peer_id: u64) {
         self.log_async(
             LogLevel::Audit,
-            format!("Node removed: {}", node_id),
-            vec![format!("node-{}", node_id)],
+            format!("Peer removed: {}", peer_id),
+            vec![format!("peer-{}", peer_id)],
         );
     }
 
@@ -285,7 +285,7 @@ mod tests {
 
         // Call all methods - none should panic
         logger.node_joined(1, "test-node", "127.0.0.1:6001");
-        logger.node_removed(1);
+        logger.peer_removed(1);
         logger.leader_elected(1, 1);
         logger.network_created("net-123", "test-network");
         logger.network_updated("net-123");
