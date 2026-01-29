@@ -2241,10 +2241,15 @@ name = "mvirt-log"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "bincode",
  "clap",
+ "mraft",
+ "portpicker",
  "prost 0.14.3",
  "rand 0.8.5",
  "redb",
+ "serde",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic 0.14.2",

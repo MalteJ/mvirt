@@ -31,6 +31,9 @@ pub mod proto {
 }
 
 mod audit;
+pub mod command;
+pub mod distributed;
+pub mod storage;
 
 // Re-export commonly used types at crate root
 pub use proto::log_service_client::LogServiceClient;
