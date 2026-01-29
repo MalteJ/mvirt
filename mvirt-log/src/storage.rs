@@ -1,79 +1,65 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use prost::Message;
+use redb::{Database, TableDefinition};
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use ulid::Ulid;
 
 use mvirt_log::LogEntry;
 
+const TABLE_LOGS: TableDefinition<u128, &[u8]> = TableDefinition::new("logs");
+const TABLE_IDX_OBJECT: TableDefinition<(&str, u128), ()> = TableDefinition::new("idx_object");
+const TABLE_IDX_COMPONENT: TableDefinition<(&str, i32, u128), ()> =
+    TableDefinition::new("idx_component");
+
 pub struct LogManager {
-    conn: Mutex<Connection>,
+    db: Database,
 }
 
 impl LogManager {
     pub fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
-        let db_path = data_dir.as_ref().join("logs.db");
-        let conn = Connection::open(&db_path)?;
+        let db_path = data_dir.as_ref().join("logs.redb");
+        let db = Database::create(&db_path)?;
 
-        conn.execute_batch(
-            "
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA foreign_keys = ON;
+        let txn = db.begin_write()?;
+        txn.open_table(TABLE_LOGS)?;
+        txn.open_table(TABLE_IDX_OBJECT)?;
+        txn.open_table(TABLE_IDX_COMPONENT)?;
+        txn.commit()?;
 
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY,
-                timestamp_ns INTEGER NOT NULL,
-                message TEXT NOT NULL,
-                level INTEGER NOT NULL,
-                component TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS log_objects (
-                log_id INTEGER NOT NULL,
-                object_id TEXT NOT NULL,
-                PRIMARY KEY (log_id, object_id),
-                FOREIGN KEY (log_id) REFERENCES logs(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp_ns);
-            CREATE INDEX IF NOT EXISTS idx_log_objects_object ON log_objects(object_id);
-            ",
-        )?;
-
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        Ok(Self { db })
     }
 
-    pub fn append(&self, mut entry: LogEntry) -> Result<String> {
-        if entry.timestamp_ns == 0 {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
-            entry.timestamp_ns = now.as_nanos() as i64;
+    pub fn append_batch(&self, entries: Vec<LogEntry>) -> Result<()> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut logs = txn.open_table(TABLE_LOGS)?;
+            let mut idx_obj = txn.open_table(TABLE_IDX_OBJECT)?;
+            let mut idx_comp = txn.open_table(TABLE_IDX_COMPONENT)?;
+
+            for mut entry in entries {
+                if entry.timestamp_ns == 0 {
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
+                    entry.timestamp_ns = now.as_nanos() as i64;
+                }
+
+                let ms = (entry.timestamp_ns / 1_000_000) as u64;
+                let ulid = Ulid::from_parts(ms, rand::random());
+                entry.id = ulid.to_string();
+
+                let key = ulid.0;
+                let encoded = entry.encode_to_vec();
+                logs.insert(key, encoded.as_slice())?;
+
+                for obj_id in &entry.related_object_ids {
+                    idx_obj.insert((obj_id.as_str(), key), ())?;
+                }
+
+                idx_comp.insert((entry.component.as_str(), entry.level, key), ())?;
+            }
         }
-
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO logs (timestamp_ns, message, level, component)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                entry.timestamp_ns,
-                entry.message,
-                entry.level,
-                entry.component,
-            ],
-        )?;
-
-        let id = conn.last_insert_rowid();
-
-        for obj_id in &entry.related_object_ids {
-            conn.execute(
-                "INSERT INTO log_objects (log_id, object_id) VALUES (?1, ?2)",
-                params![id, obj_id],
-            )?;
-        }
-
-        Ok(id.to_string())
+        txn.commit()?;
+        Ok(())
     }
 
     pub fn query(
@@ -83,67 +69,41 @@ impl LogManager {
         end_ns: Option<i64>,
         limit: usize,
     ) -> Result<Vec<LogEntry>> {
-        let conn = self.conn.lock().unwrap();
-        let start = start_ns.unwrap_or(0);
-        let end = end_ns.unwrap_or(i64::MAX);
+        let start_ms = start_ns.unwrap_or(0) / 1_000_000;
+        let end_ms = end_ns.unwrap_or(i64::MAX) / 1_000_000;
+        let min_ulid = Ulid::from_parts(start_ms as u64, 0).0;
+        let max_ulid = Ulid::from_parts(end_ms as u64, u128::MAX).0;
 
-        let rows: Vec<(i64, i64, String, i32, String)> = if let Some(obj) = object_id {
-            let mut stmt = conn.prepare(
-                "SELECT l.id, l.timestamp_ns, l.message, l.level, l.component
-                 FROM logs l
-                 JOIN log_objects lo ON l.id = lo.log_id
-                 WHERE lo.object_id = ?1
-                   AND l.timestamp_ns >= ?2
-                   AND l.timestamp_ns <= ?3
-                 ORDER BY l.timestamp_ns
-                 LIMIT ?4",
-            )?;
-            let mapped = stmt.query_map(params![obj, start, end, limit as i64], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })?;
-            mapped.collect::<Result<Vec<_>, _>>()?
+        let txn = self.db.begin_read()?;
+        let logs = txn.open_table(TABLE_LOGS)?;
+        let mut results = Vec::new();
+
+        if let Some(obj) = object_id {
+            let idx_obj = txn.open_table(TABLE_IDX_OBJECT)?;
+            let range = idx_obj.range((obj.as_str(), min_ulid)..=(obj.as_str(), max_ulid))?;
+
+            for item in range {
+                if results.len() >= limit {
+                    break;
+                }
+                let (key, _) = item?;
+                let (_, ulid_key) = key.value();
+                if let Some(access) = logs.get(ulid_key)? {
+                    let entry = LogEntry::decode(access.value())?;
+                    results.push(entry);
+                }
+            }
         } else {
-            let mut stmt = conn.prepare(
-                "SELECT id, timestamp_ns, message, level, component
-                 FROM logs
-                 WHERE timestamp_ns >= ?1 AND timestamp_ns <= ?2
-                 ORDER BY timestamp_ns
-                 LIMIT ?3",
-            )?;
-            let mapped = stmt.query_map(params![start, end, limit as i64], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })?;
-            mapped.collect::<Result<Vec<_>, _>>()?
-        };
+            let range = logs.range(min_ulid..=max_ulid)?;
 
-        let mut results = Vec::with_capacity(rows.len());
-        for (id, timestamp_ns, message, level, component) in rows {
-            let mut obj_stmt =
-                conn.prepare("SELECT object_id FROM log_objects WHERE log_id = ?1")?;
-            let related: Vec<String> = obj_stmt
-                .query_map(params![id], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            results.push(LogEntry {
-                id: id.to_string(),
-                timestamp_ns,
-                message,
-                level,
-                component,
-                related_object_ids: related,
-            });
+            for item in range {
+                if results.len() >= limit {
+                    break;
+                }
+                let (_, value) = item?;
+                let entry = LogEntry::decode(value.value())?;
+                results.push(entry);
+            }
         }
 
         Ok(results)

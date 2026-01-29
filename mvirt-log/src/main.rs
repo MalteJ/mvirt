@@ -1,15 +1,17 @@
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{error, info};
+use tracing::info;
 
 use mvirt_log::proto::{GetVersionRequest, VersionInfo};
 use mvirt_log::{LogEntry, LogRequest, LogResponse, LogService, LogServiceServer, QueryRequest};
 
+mod batcher;
 mod storage;
-use std::sync::Arc;
+use batcher::Batcher;
 use storage::LogManager;
 
 #[derive(Parser, Debug)]
@@ -26,6 +28,7 @@ struct Args {
 
 pub struct MyLogService {
     manager: Arc<LogManager>,
+    batcher: Arc<Batcher>,
 }
 
 #[tonic::async_trait]
@@ -45,13 +48,8 @@ impl LogService for MyLogService {
             .entry
             .ok_or_else(|| Status::invalid_argument("Missing entry"))?;
 
-        match self.manager.append(entry) {
-            Ok(id) => Ok(Response::new(LogResponse { id })),
-            Err(e) => {
-                error!("Failed to write log: {:?}", e);
-                Err(Status::internal("Storage error"))
-            }
-        }
+        self.batcher.submit(entry);
+        Ok(Response::new(LogResponse { id: String::new() }))
     }
 
     type QueryStream = ReceiverStream<Result<LogEntry, Status>>;
@@ -71,11 +69,9 @@ impl LogService for MyLogService {
                 req.limit as usize
             };
 
-            // Map optional fields
             let start = req.start_time_ns;
             let end = req.end_time_ns;
 
-            // Handle object_id properly: if it's Some("") treat as None? Or just pass through.
             let obj = match req.object_id {
                 Some(o) if o.is_empty() => None,
                 Some(o) => Some(o),
@@ -115,14 +111,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
-    // Ensure data directory exists
     std::fs::create_dir_all(&args.data_dir)?;
 
     info!("Opening log storage at {:?}", args.data_dir);
     let manager = Arc::new(LogManager::new(&args.data_dir)?);
 
+    let batcher = Arc::new(Batcher::new(manager.clone()));
+
     let addr = args.listen.parse()?;
-    let service = MyLogService { manager };
+    let service = MyLogService { manager, batcher };
 
     info!("mvirt-log listening on {}", addr);
 
