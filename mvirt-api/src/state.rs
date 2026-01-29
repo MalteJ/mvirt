@@ -1041,7 +1041,10 @@ impl StateMachine<Command, Response> for ApiState {
                 }
 
                 self.volumes.insert(id, volume.clone());
-                (Response::Volume(volume), vec![])
+                (
+                    Response::Volume(volume.clone()),
+                    vec![Event::VolumeCreated(volume)],
+                )
             }
 
             Command::DeleteVolume { id, .. } => match self.volumes.remove(&id) {
@@ -1052,7 +1055,11 @@ impl StateMachine<Command, Response> for ApiState {
                     {
                         template.clone_count = template.clone_count.saturating_sub(1);
                     }
-                    (Response::Deleted { id }, vec![])
+                    let node_id = vol.node_id.clone();
+                    (
+                        Response::Deleted { id: id.clone() },
+                        vec![Event::VolumeDeleted { id, node_id }],
+                    )
                 }
                 None => (
                     Response::Error {

@@ -1,6 +1,6 @@
 // Allow dead code for legacy handlers during transition to UI-compatible API
 #[allow(dead_code)]
-mod cluster;
+mod controlplane;
 #[allow(dead_code)]
 mod networks;
 #[allow(dead_code)]
@@ -20,7 +20,7 @@ use crate::audit::ApiAuditLogger;
 use crate::store::{DataStore, StoreError};
 
 #[allow(unused_imports)]
-pub use cluster::*;
+pub use controlplane::*;
 #[allow(unused_imports)]
 pub use networks::*;
 #[allow(unused_imports)]

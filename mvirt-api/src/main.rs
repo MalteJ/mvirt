@@ -164,6 +164,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Waiting for leader election...");
     if let Some(leader) = node.wait_for_leader(Duration::from_secs(10)).await {
         info!("Leader elected: node {}", leader);
+        // Set is_leader flag so state machine emits events via broadcast channel
+        if leader == node_id {
+            let flag = node.is_leader_flag();
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     } else {
         warn!("No leader elected within timeout");
     }

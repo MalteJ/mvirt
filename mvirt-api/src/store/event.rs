@@ -1,6 +1,6 @@
 //! Events emitted by state machine changes.
 
-use crate::command::{NetworkData, NicData, NodeData, VmData};
+use crate::command::{NetworkData, NicData, NodeData, VmData, VolumeData};
 
 /// Events emitted when state changes occur.
 ///
@@ -62,6 +62,12 @@ pub enum Event {
     /// A VM was deleted.
     VmDeleted { id: String },
 
+    // Volume events
+    /// A new volume was created.
+    VolumeCreated(VolumeData),
+    /// A volume was deleted.
+    VolumeDeleted { id: String, node_id: String },
+
     // Security Group events
     /// A security group was created.
     SecurityGroupCreated { id: String },
@@ -84,6 +90,7 @@ impl Event {
             | Event::VmUpdated { .. }
             | Event::VmStatusUpdated { .. }
             | Event::VmDeleted { .. } => "vm",
+            Event::VolumeCreated(_) | Event::VolumeDeleted { .. } => "volume",
             Event::SecurityGroupCreated { .. } | Event::SecurityGroupDeleted { .. } => {
                 "security_group"
             }
@@ -106,6 +113,8 @@ impl Event {
             Event::VmUpdated { id, .. } => id,
             Event::VmStatusUpdated { id, .. } => id,
             Event::VmDeleted { id } => id,
+            Event::VolumeCreated(v) => &v.id,
+            Event::VolumeDeleted { id, .. } => id,
             Event::SecurityGroupCreated { id } | Event::SecurityGroupDeleted { id } => id,
         }
     }

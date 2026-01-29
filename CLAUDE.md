@@ -6,16 +6,47 @@ See [README.md](README.md) for build commands and project overview.
 
 ```
 mvirt/
-├── mvirt-cli/       # CLI client + TUI
-├── mvirt-vmm/       # Daemon (VM Manager)
-├── mvirt-log/       # Centralized logging service
-├── mvirt-zfs/       # ZFS storage management
-├── mvirt-one/       # MicroVM Init System for isolated Pods
-│   ├── src/         # Rust init process (PID 1)
-│   ├── proto/       # one gRPC API
+├── mvirt-api/       # Raft-based distributed control plane
+│   ├── src/
+│   │   ├── grpc/    # gRPC NodeService server
+│   │   ├── rest/    # REST API (handlers per resource)
+│   │   ├── store/   # Raft storage, event sourcing
+│   │   ├── state.rs # State machine + command handling
+│   │   └── scheduler.rs
+│   └── proto/       # node.proto
+├── mvirt-node/      # Node agent (reconciles desired state from API)
+│   ├── src/
+│   │   ├── clients/ # gRPC clients for local services (vmm, ebpf, zfs)
+│   │   └── reconciler/ # Per-resource reconcilers (vm, nic, volume, network, route, security_group, template)
+├── mvirt-vmm/       # Local hypervisor daemon (VM + Pod management)
+│   ├── src/
+│   │   ├── grpc.rs        # VmService implementation
+│   │   ├── hypervisor.rs  # cloud-hypervisor process management
+│   │   ├── pod_service.rs # PodService implementation
+│   │   └── store.rs       # SQLite state
+│   └── proto/       # mvirt.proto (VmService + PodService)
+├── mvirt-ebpf/      # eBPF-based networking (replaces mvirt-net)
+│   ├── src/
+│   │   ├── ebpf_loader.rs   # eBPF program loading
+│   │   ├── proto_handler.rs # IPv4/IPv6/DHCP/ICMP handling
+│   │   ├── tap.rs           # TAP device management
+│   │   └── nat.rs           # NAT + conntrack
+│   └── programs/    # eBPF kernel-space programs
+├── mvirt-zfs/       # ZFS storage daemon
+│   └── proto/       # zfs.proto
+├── mvirt-log/       # Centralized audit logging service
+│   └── proto/       # log.proto
+├── mvirt-one/       # MicroVM Init System (PID 1 for Pods)
+│   ├── src/
+│   ├── proto/       # one.proto
 │   └── initramfs/   # rootfs skeleton
-├── proto/           # gRPC API definition
-└── images/          # Kernel and disk images (not in git)
+├── mvirt-cli/       # CLI client + TUI (ratatui)
+├── mvirt-ui/        # Web UI (React + Vite + Tailwind)
+├── nix/             # NixOS modules, packages, images
+│   ├── modules/     # mvirt.nix (service definitions)
+│   ├── packages/    # Build derivations
+│   └── images/      # hypervisor.nix, node.nix
+└── proto/           # Legacy shared proto (per-crate protos preferred)
 ```
 
 ## Code Quality
@@ -29,143 +60,119 @@ No warnings allowed.
 
 ## Architecture
 
-### gRPC API (proto/mvirt.proto)
-- `CreateVm`, `GetVm`, `ListVms`, `DeleteVm` - CRUD
-- `StartVm`, `StopVm`, `KillVm` - Lifecycle
-- `Console` - Bidirectional streaming for serial console
+### Distributed Control Plane (mvirt-api)
 
-### SQLite Schema (store.rs)
-- `vms` table: VM definitions (id, name, state, config_json, timestamps)
-- `vm_runtime` table: Runtime info for running VMs (pid, sockets)
+Raft-based consensus for multi-node cluster management.
 
-### Hypervisor (hypervisor.rs)
+- **Raft** via `mraft` for leader election and log replication
+- **REST API** on port 8080 for external clients and UI
+- **gRPC NodeService** on port 50056 for node agents
+- **Raft** inter-node communication on port 6001
+- **Event-sourced state machine** (`state.rs`) processes all commands
+- **Scheduler** assigns resources to nodes
+
+REST handlers are split per resource: `controlplane.rs`, `nodes.rs`, `vms.rs`, `networks.rs`, `nics.rs`.
+
+### Node Agent (mvirt-node)
+
+Runs on each hypervisor node, connects to mvirt-api.
+
+- Registers with the API, sends heartbeats
+- Watches spec stream (`WatchSpecs`) for desired state
+- Reconciles locally via per-resource reconcilers (VM, NIC, volume, network, route, security group, template)
+- Reports status back via `UpdateResourceStatus`
+
+### Local Hypervisor (mvirt-vmm)
+
+gRPC services: **VmService** + **PodService** on port 50051.
+
 - Spawns cloud-hypervisor processes
 - Creates TAP devices and attaches to bridge
 - Generates cloud-init ISO
 - Background watcher monitors child processes
 - `recover_vms()` on daemon startup cleans up stale VMs
+- Pod lifecycle via vsock communication with mvirt-one
 
-### TUI (tui.rs)
-- Non-blocking async with channels
-- Background worker handles gRPC calls
-- Auto-refresh every 2 seconds
+### eBPF Networking (mvirt-ebpf)
+
+Replaces legacy mvirt-net. In-kernel packet processing via eBPF.
+
+- IPv4/IPv6 routing, DHCP, ICMP handling
+- NAT and connection tracking
+- TAP device management
+- Security groups
+
+### ZFS Storage (mvirt-zfs)
+
+gRPC **ZfsService** for volume management.
+
+- Volume CRUD and resize
+- Snapshot management
+- Template import with progress tracking (HTTP/file)
+- Clone from templates
 
 ### Event Logging (mvirt-log)
 
-Centralized audit log for all mvirt components. Logs are stored in SQLite with many-to-many object relations.
+Centralized audit log. SQLite with many-to-many object relations.
 
 **Schema:**
 ```sql
 logs (id INTEGER PRIMARY KEY, timestamp_ns, message, level, component)
-log_objects (log_id, object_id)  -- junction table for many-to-many
+log_objects (log_id, object_id)  -- junction table
 ```
 
-**Proto API** (`mvirt-log/proto/log.proto`):
-```protobuf
-service LogService {
-  rpc Log(LogRequest) returns (LogResponse);      // append log
-  rpc Query(QueryRequest) returns (stream LogEntry);  // query logs
-}
-
-message LogEntry {
-  string id = 1;
-  int64 timestamp_ns = 2;
-  string message = 3;
-  LogLevel level = 4;           // INFO, WARN, ERROR, DEBUG, AUDIT
-  string component = 5;         // "vmm", "zfs", "cli"
-  repeated string related_object_ids = 6;  // ["vm-123", "vol-456"]
-}
-```
-
-**Dependency** (in component's Cargo.toml):
-```toml
-mvirt-log = { path = "../mvirt-log" }
-```
-
-**Logging from components:**
-```rust
-use mvirt_log::{LogServiceClient, LogEntry, LogLevel, LogRequest};
-
-// Connect to mvirt-log
-let mut client = LogServiceClient::connect("http://[::1]:50052").await?;
-
-// Log an event with related objects
-client.log(LogRequest {
-    entry: Some(LogEntry {
-        message: "VM started".into(),
-        level: LogLevel::Info as i32,
-        component: "vmm".into(),
-        related_object_ids: vec![vm_id.clone()],
-        ..Default::default()  // id and timestamp auto-generated
-    }),
-}).await?;
-
-// Log event related to multiple objects (e.g., disk attached to VM)
-client.log(LogRequest {
-    entry: Some(LogEntry {
-        message: "Volume attached".into(),
-        level: LogLevel::Audit as i32,
-        component: "zfs".into(),
-        related_object_ids: vec![vm_id, volume_id],  // indexed under both
-        ..Default::default()
-    }),
-}).await?;
-```
-
-**Querying logs:**
-```rust
-use mvirt_log::{LogServiceClient, QueryRequest};
-
-let mut stream = client.query(QueryRequest {
-    object_id: Some("vm-123".into()),
-    limit: 100,
-    ..Default::default()
-}).await?.into_inner();
-
-while let Some(entry) = stream.message().await? {
-    println!("{}: {}", entry.timestamp_ns, entry.message);
-}
-```
-
-### Log-Level Guidelines
-
-| Level | Verwendung | Beispiele |
-|-------|------------|-----------|
-| **AUDIT** | Alle State-ändernden Operationen (CRUD + Lifecycle) | VM/Volume/NIC created/deleted/started/stopped/killed |
-| **INFO** | Informative Events ohne State-Änderung | Service gestartet, Connection hergestellt |
-| **WARN** | Degraded Operations, Retries | Connection retry, Fallback aktiviert |
-| **ERROR** | Fehlgeschlagene Operationen | VM start failed, Import failed |
-| **DEBUG** | Entwickler-Diagnostik | Detaillierte Trace-Infos |
-
-**AuditLogger Usage** (empfohlen statt direktem Client):
+**AuditLogger Usage** (recommended):
 ```rust
 use mvirt_log::{AuditLogger, LogLevel, create_audit_logger};
 
-// In main.rs: Create shared audit logger
 let audit = create_audit_logger("http://[::1]:50052", "vmm");
-
-// Automatisch: Dual-Logging (lokal via tracing + remote via mvirt-log)
 audit.log(LogLevel::Audit, "VM created", vec![vm_id]).await;
 ```
 
-**Component-specific wrappers** (in `mvirt-zfs`, `mvirt-net`):
-```rust
-// ZfsAuditLogger wraps AuditLogger with domain-specific methods
-use crate::audit::{create_audit_logger, ZfsAuditLogger};
+### MicroVM Init (mvirt-one)
 
-let audit = create_audit_logger(&args.log_endpoint);
-audit.volume_created(&volume_id, &volume_name, size).await;
-```
+PID 1 init process running inside MicroVMs for container pods. Provides OneService gRPC for container lifecycle, log streaming, exec sessions.
+
+### TUI (mvirt-cli)
+
+ratatui-based terminal UI with non-blocking async and background gRPC workers.
+
+### Web UI (mvirt-ui)
+
+React + Vite + Tailwind dashboard. Communicates with mvirt-api REST API on port 8080.
+
+## gRPC Services
+
+| Proto | Service | Port | Key RPCs |
+|-------|---------|------|----------|
+| `mvirt-api/proto/node.proto` | NodeService | 50056 | Register, Heartbeat, Deregister, WatchSpecs, UpdateResourceStatus |
+| `mvirt-vmm/proto/mvirt.proto` | VmService, PodService | 50051 | CreateVm, StartVm, StopVm, Console, PodLogs, PodExec |
+| `mvirt-one/proto/one.proto` | OneService | (vsock) | CreatePod, StartPod, StopPod, Logs, Exec |
+| `mvirt-zfs/proto/zfs.proto` | ZfsService | 50053 | CreateVolume, ImportTemplate, CreateSnapshot, CloneFromTemplate |
+| `mvirt-log/proto/log.proto` | LogService | 50052 | Log, Query |
+
+## Log-Level Guidelines
+
+| Level | Usage | Examples |
+|-------|-------|---------|
+| **AUDIT** | State-changing operations (CRUD + Lifecycle) | VM/Volume/NIC created/deleted/started/stopped |
+| **INFO** | Informational events without state change | Service started, connection established |
+| **WARN** | Degraded operations, retries | Connection retry, fallback activated |
+| **ERROR** | Failed operations | VM start failed, import failed |
+| **DEBUG** | Developer diagnostics | Detailed trace info |
 
 ## Key Decisions
 
-- **SQLite** for persistence (not in-memory)
+- **Raft consensus** for distributed cluster state (mraft)
+- **Event sourcing** in mvirt-api state machine
+- **Reconciliation loop** pattern (desired state vs actual state)
+- **SQLite** for local persistence
 - **cloud-hypervisor** instead of QEMU
-- **TAP + bridge** networking
-- **Async channels** in TUI
-- **Console escape**: Ctrl+a t
+- **eBPF** for in-kernel networking (replaces bridge-based mvirt-net)
 - **musl** for static linking
 - **Direct kernel boot** for MicroVMs
+- **NixOS** for reproducible builds and deployment (flake.nix + crane)
+- **Console escape**: Ctrl+a t
 
 ## Common Issues
 

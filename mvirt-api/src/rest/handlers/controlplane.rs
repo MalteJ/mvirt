@@ -8,19 +8,19 @@ use utoipa::ToSchema;
 
 use super::{ApiError, AppState};
 
-/// Cluster information
+/// Control plane information
 #[derive(Serialize, ToSchema)]
-pub struct ClusterInfo {
+pub struct ControlplaneInfo {
     pub cluster_id: String,
     pub leader_id: Option<u64>,
     pub current_term: u64,
     pub commit_index: u64,
-    pub nodes: Vec<NodeInfo>,
+    pub peers: Vec<PeerInfo>,
 }
 
-/// Node information
+/// Peer information
 #[derive(Serialize, ToSchema)]
-pub struct NodeInfo {
+pub struct PeerInfo {
     pub id: u64,
     pub name: String,
     pub address: String,
@@ -28,27 +28,27 @@ pub struct NodeInfo {
     pub is_leader: bool,
 }
 
-/// Get cluster information
+/// Get control plane information
 #[utoipa::path(
     get,
-    path = "/v1/cluster",
+    path = "/v1/controlplane",
     responses(
-        (status = 200, description = "Cluster information", body = ClusterInfo)
+        (status = 200, description = "Control plane information", body = ControlplaneInfo)
     ),
-    tag = "cluster"
+    tag = "controlplane"
 )]
-pub async fn get_cluster_info(
+pub async fn get_controlplane_info(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<ClusterInfo>, ApiError> {
-    let info = state.store.get_cluster_info().await?;
+) -> Result<Json<ControlplaneInfo>, ApiError> {
+    let info = state.store.get_controlplane_info().await?;
     let membership = state.store.get_membership().await?;
 
-    let nodes: Vec<NodeInfo> = membership
-        .nodes
+    let peers: Vec<PeerInfo> = membership
+        .peers
         .into_iter()
-        .map(|n| NodeInfo {
+        .map(|n| PeerInfo {
             id: n.id,
-            name: format!("node-{}", n.id),
+            name: format!("peer-{}", n.id),
             address: n.address,
             state: if Some(n.id) == info.leader_id {
                 "leader".to_string()
@@ -59,67 +59,67 @@ pub async fn get_cluster_info(
         })
         .collect();
 
-    Ok(Json(ClusterInfo {
+    Ok(Json(ControlplaneInfo {
         cluster_id: info.cluster_id,
         leader_id: info.leader_id,
         current_term: info.current_term,
         commit_index: info.commit_index,
-        nodes,
+        peers,
     }))
 }
 
-/// Cluster membership information
+/// Control plane membership information
 #[derive(Serialize, ToSchema)]
-pub struct ClusterMembership {
+pub struct ControlplaneMembership {
     pub voters: Vec<u64>,
     pub learners: Vec<u64>,
-    pub nodes: Vec<MembershipNode>,
+    pub peers: Vec<MembershipPeer>,
 }
 
-/// Node in membership
+/// Peer in membership
 #[derive(Serialize, ToSchema)]
-pub struct MembershipNode {
+pub struct MembershipPeer {
     pub id: u64,
     pub address: String,
     pub role: String,
 }
 
-/// Get cluster membership
+/// Get control plane membership
 #[utoipa::path(
     get,
-    path = "/v1/cluster/membership",
+    path = "/v1/controlplane/membership",
     responses(
-        (status = 200, description = "Cluster membership", body = ClusterMembership)
+        (status = 200, description = "Control plane membership", body = ControlplaneMembership)
     ),
-    tag = "cluster"
+    tag = "controlplane"
 )]
-pub async fn get_membership(
+pub async fn get_controlplane_membership(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<ClusterMembership>, ApiError> {
+) -> Result<Json<ControlplaneMembership>, ApiError> {
     let membership = state.store.get_membership().await?;
 
-    let nodes: Vec<MembershipNode> = membership
-        .nodes
+    let peers: Vec<MembershipPeer> = membership
+        .peers
         .into_iter()
-        .map(|n| MembershipNode {
+        .map(|n| MembershipPeer {
             id: n.id,
             address: n.address,
             role: n.role,
         })
         .collect();
 
-    Ok(Json(ClusterMembership {
+    Ok(Json(ControlplaneMembership {
         voters: membership.voters,
         learners: membership.learners,
-        nodes,
+        peers,
     }))
 }
 
 /// Request to create a join token
 #[derive(Deserialize, ToSchema)]
 pub struct CreateJoinTokenRequest {
-    /// Node ID that will use this token
-    pub node_id: u64,
+    /// Peer ID that will use this token
+    pub peer_id: u64,
     /// Token validity in seconds (default: 3600 = 1 hour)
     pub valid_for_secs: Option<u64>,
 }
@@ -128,29 +128,29 @@ pub struct CreateJoinTokenRequest {
 #[derive(Serialize, ToSchema)]
 pub struct CreateJoinTokenResponse {
     pub token: String,
-    pub node_id: u64,
+    pub peer_id: u64,
     pub valid_for_secs: u64,
 }
 
-/// Create a join token for a new node
+/// Create a join token for a new peer
 #[utoipa::path(
     post,
-    path = "/v1/cluster/join-token",
+    path = "/v1/controlplane/join-token",
     request_body = CreateJoinTokenRequest,
     responses(
         (status = 200, description = "Join token created", body = CreateJoinTokenResponse),
         (status = 503, description = "Not the leader or cluster secret not configured", body = ApiError)
     ),
-    tag = "cluster"
+    tag = "controlplane"
 )]
-pub async fn create_join_token(
+pub async fn create_controlplane_join_token(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateJoinTokenRequest>,
 ) -> Result<Json<CreateJoinTokenResponse>, ApiError> {
     let valid_for = req.valid_for_secs.unwrap_or(3600);
     let token = state
         .store
-        .create_join_token(req.node_id, valid_for)
+        .create_join_token(req.peer_id, valid_for)
         .await
         .map_err(|e| ApiError {
             error: format!("Failed to create join token: {}", e),
@@ -159,49 +159,49 @@ pub async fn create_join_token(
 
     Ok(Json(CreateJoinTokenResponse {
         token,
-        node_id: req.node_id,
+        peer_id: req.peer_id,
         valid_for_secs: valid_for,
     }))
 }
 
-/// Request to remove a node from the cluster
+/// Request to remove a peer from the control plane
 #[derive(Deserialize, ToSchema)]
 #[allow(dead_code)]
-pub struct RemoveNodeRequest {
+pub struct RemovePeerRequest {
     /// Force remove even if it would break quorum (not yet implemented)
     pub force: Option<bool>,
 }
 
-/// Response for remove node
+/// Response for remove peer
 #[derive(Serialize, ToSchema)]
-pub struct RemoveNodeResponse {
+pub struct RemovePeerResponse {
     pub removed: bool,
-    pub node_id: u64,
+    pub peer_id: u64,
 }
 
-/// Remove a node from the cluster
+/// Remove a peer from the control plane
 #[utoipa::path(
     delete,
-    path = "/v1/cluster/nodes/{id}",
+    path = "/v1/controlplane/peers/{id}",
     params(
-        ("id" = u64, Path, description = "Node ID to remove")
+        ("id" = u64, Path, description = "Peer ID to remove")
     ),
     responses(
-        (status = 200, description = "Node removed", body = RemoveNodeResponse),
-        (status = 404, description = "Node not found", body = ApiError),
+        (status = 200, description = "Peer removed", body = RemovePeerResponse),
+        (status = 404, description = "Peer not found", body = ApiError),
         (status = 503, description = "Not the leader", body = ApiError)
     ),
-    tag = "cluster"
+    tag = "controlplane"
 )]
-pub async fn remove_node(
+pub async fn remove_peer(
     State(state): State<Arc<AppState>>,
-    Path(node_id): Path<u64>,
-) -> Result<Json<RemoveNodeResponse>, ApiError> {
-    state.store.remove_node(node_id).await?;
-    state.audit.node_removed(node_id);
+    Path(peer_id): Path<u64>,
+) -> Result<Json<RemovePeerResponse>, ApiError> {
+    state.store.remove_peer(peer_id).await?;
+    state.audit.peer_removed(peer_id);
 
-    Ok(Json(RemoveNodeResponse {
+    Ok(Json(RemovePeerResponse {
         removed: true,
-        node_id,
+        peer_id,
     }))
 }

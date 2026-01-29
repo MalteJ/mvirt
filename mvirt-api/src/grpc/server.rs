@@ -80,14 +80,23 @@ impl NodeServiceImpl {
         *rev
     }
 
-    /// Send a spec event to a specific node.
+    /// Send a spec event to a specific node (by ID or name).
     pub async fn send_spec_to_node(&self, node_id: &str, event: SpecEvent) -> Result<(), Status> {
         let senders = self.spec_senders.read().await;
+        // Try direct ID lookup first
         if let Some(sender) = senders.get(node_id) {
             sender.send(Ok(event)).await.map_err(|_| {
                 Status::internal(format!("Failed to send spec to node {}", node_id))
             })?;
+            return Ok(());
         }
+        // Try resolving name to ID
+        if let Ok(Some(node)) = self.store.get_node_by_name(node_id).await
+            && let Some(sender) = senders.get(&node.id) {
+                sender.send(Ok(event)).await.map_err(|_| {
+                    Status::internal(format!("Failed to send spec to node {}", node_id))
+                })?;
+            }
         Ok(())
     }
 
@@ -124,7 +133,7 @@ impl NodeServiceImpl {
         use super::proto::{
             NetworkSpec as ProtoNetworkSpec, NicSpec as ProtoNicSpec, ResourceMeta, SpecEvent,
             SpecEventType, VmDesiredState as ProtoVmDesiredState, VmSpec as ProtoVmSpec,
-            spec_event,
+            VolumeSpec as ProtoVolumeSpec, spec_event,
         };
 
         let revision = self.next_revision().await;
@@ -274,6 +283,52 @@ impl NodeServiceImpl {
 
                 tracing::info!("Broadcasting VM delete {}", id);
                 self.broadcast_spec(spec_event).await;
+            }
+
+            // Volume created - send to specific node
+            Event::VolumeCreated(volume) => {
+                let spec_event = SpecEvent {
+                    revision,
+                    r#type: SpecEventType::Create as i32,
+                    spec: Some(spec_event::Spec::Volume(ProtoVolumeSpec {
+                        meta: Some(ResourceMeta {
+                            id: volume.id.clone(),
+                            name: volume.name.clone(),
+                            project_id: volume.project_id.clone(),
+                            node_id: Some(volume.node_id.clone()),
+                            ..Default::default()
+                        }),
+                        size_gb: volume.size_bytes / (1024 * 1024 * 1024),
+                        template_id: volume.template_id.clone(),
+                        attached_vm_id: None,
+                    })),
+                };
+
+                tracing::info!(
+                    "Sending volume spec {} to node {}",
+                    volume.id,
+                    volume.node_id
+                );
+                self.send_spec_to_node(&volume.node_id, spec_event).await?;
+            }
+
+            // Volume deleted - send to specific node
+            Event::VolumeDeleted { id, node_id } => {
+                let spec_event = SpecEvent {
+                    revision,
+                    r#type: SpecEventType::Delete as i32,
+                    spec: Some(spec_event::Spec::Volume(ProtoVolumeSpec {
+                        meta: Some(ResourceMeta {
+                            id: id.clone(),
+                            node_id: Some(node_id.clone()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })),
+                };
+
+                tracing::info!("Sending volume delete {} to node {}", id, node_id);
+                self.send_spec_to_node(&node_id, spec_event).await?;
             }
 
             // Other events don't require spec distribution
