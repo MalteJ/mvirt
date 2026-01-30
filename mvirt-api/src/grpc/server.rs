@@ -237,7 +237,13 @@ impl NodeService for NodeServiceImpl {
         };
         let _ = out_tx.send(Ok(register_result)).await;
 
-        // 4. Build and send initial manifest
+        // 4. Register manifest sender (before building initial manifest to avoid race window)
+        {
+            let mut senders = self.manifest_senders.write().await;
+            senders.insert(registered_id.clone(), manifest_tx);
+        }
+
+        // 5. Build and send initial manifest
         let revision = self.next_revision().await;
         let initial_manifest = build_manifest(&self.store, &registered_id, revision).await;
         let _ = out_tx
@@ -245,12 +251,6 @@ impl NodeService for NodeServiceImpl {
                 payload: Some(api_message::Payload::Manifest(initial_manifest)),
             }))
             .await;
-
-        // 5. Register manifest sender
-        {
-            let mut senders = self.manifest_senders.write().await;
-            senders.insert(registered_id.clone(), manifest_tx);
-        }
 
         tracing::info!("Node {} connected via Sync stream", registered_id);
 

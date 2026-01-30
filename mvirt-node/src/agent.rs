@@ -119,6 +119,8 @@ pub struct NodeAgent {
     security_group_reconciler: SecurityGroupReconciler,
     route_reconciler: RouteReconciler,
     // Clients for init-from-reality
+    vmm_client: VmmClient,
+    net_client: NetClient,
     zfs_client: ZfsClient,
 }
 
@@ -143,13 +145,15 @@ impl NodeAgent {
             resources,
             audit,
             known_ids: HashMap::new(),
-            vm_reconciler: VmReconciler::new(vmm_client, zfs_client.clone()),
+            vm_reconciler: VmReconciler::new(vmm_client.clone(), zfs_client.clone()),
             network_reconciler: NetworkReconciler::new(net_client.clone()),
             nic_reconciler: NicReconciler::new(net_client.clone()),
             template_reconciler: TemplateReconciler::new(zfs_client.clone()),
             volume_reconciler: VolumeReconciler::new(zfs_client.clone()),
-            security_group_reconciler: SecurityGroupReconciler::new(net_client),
+            security_group_reconciler: SecurityGroupReconciler::new(net_client.clone()),
             route_reconciler: RouteReconciler::new(),
+            vmm_client,
+            net_client,
             zfs_client,
         }
     }
@@ -168,6 +172,72 @@ impl NodeAgent {
 
     /// Initialize known_ids from local sub-services (init from reality).
     async fn init_from_reality(&mut self) {
+        // VMs from VMM
+        match self.vmm_client.list_vms().await {
+            Ok(vms) => {
+                let ids: HashSet<String> = vms.iter().map(|v| v.id.clone()).collect();
+                info!("Init from reality: {} VMs", ids.len());
+                self.known_ids.insert("vm".to_string(), ids);
+            }
+            Err(e) => {
+                warn!("Failed to list VMs from VMM: {}", e);
+                self.known_ids.insert("vm".to_string(), HashSet::new());
+            }
+        }
+
+        // Networks from net
+        match self.net_client.list_networks().await {
+            Ok(networks) => {
+                let ids: HashSet<String> = networks.iter().map(|n| n.id.clone()).collect();
+                info!("Init from reality: {} networks", ids.len());
+                self.known_ids.insert("network".to_string(), ids);
+            }
+            Err(e) => {
+                warn!("Failed to list networks from net: {}", e);
+                self.known_ids.insert("network".to_string(), HashSet::new());
+            }
+        }
+
+        // NICs from net
+        match self.net_client.list_nics().await {
+            Ok(nics) => {
+                let ids: HashSet<String> = nics.iter().map(|n| n.id.clone()).collect();
+                info!("Init from reality: {} NICs", ids.len());
+                self.known_ids.insert("nic".to_string(), ids);
+            }
+            Err(e) => {
+                warn!("Failed to list NICs from net: {}", e);
+                self.known_ids.insert("nic".to_string(), HashSet::new());
+            }
+        }
+
+        // Security groups from net
+        match self.net_client.list_security_groups().await {
+            Ok(sgs) => {
+                let ids: HashSet<String> = sgs.iter().map(|s| s.id.clone()).collect();
+                info!("Init from reality: {} security groups", ids.len());
+                self.known_ids.insert("security_group".to_string(), ids);
+            }
+            Err(e) => {
+                warn!("Failed to list security groups from net: {}", e);
+                self.known_ids
+                    .insert("security_group".to_string(), HashSet::new());
+            }
+        }
+
+        // Volumes from ZFS
+        match self.zfs_client.list_volumes().await {
+            Ok(volumes) => {
+                let ids: HashSet<String> = volumes.iter().map(|v| v.name.clone()).collect();
+                info!("Init from reality: {} volumes", ids.len());
+                self.known_ids.insert("volume".to_string(), ids);
+            }
+            Err(e) => {
+                warn!("Failed to list volumes from ZFS: {}", e);
+                self.known_ids.insert("volume".to_string(), HashSet::new());
+            }
+        }
+
         // Templates from ZFS
         match self.zfs_client.list_templates().await {
             Ok(templates) => {
@@ -182,10 +252,8 @@ impl NodeAgent {
             }
         }
 
-        // Other resource types start empty — the first manifest will populate them
-        for key in &["vm", "network", "nic", "volume", "security_group", "route"] {
-            self.known_ids.entry(key.to_string()).or_default();
-        }
+        // Routes start empty (no local daemon to query)
+        self.known_ids.entry("route".to_string()).or_default();
     }
 
     /// Main agent loop.

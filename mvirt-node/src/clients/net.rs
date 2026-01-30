@@ -8,7 +8,8 @@ use crate::proto::net::{
     net_service_client::NetServiceClient, AddSecurityGroupRuleRequest, AttachNicRequest,
     AttachSecurityGroupRequest, CreateNetworkRequest, CreateNicRequest, CreateSecurityGroupRequest,
     DeleteNetworkRequest, DeleteNicRequest, DeleteSecurityGroupRequest, DetachSecurityGroupRequest,
-    GetNicRequest, RemoveSecurityGroupRuleRequest,
+    GetNicRequest, ListNetworksRequest, ListNicsRequest, ListSecurityGroupsRequest,
+    RemoveSecurityGroupRuleRequest,
 };
 
 pub use crate::proto::net::{
@@ -28,6 +29,43 @@ impl NetClient {
             .await
             .context("Failed to connect to mvirt-net")?;
         Ok(Self { client })
+    }
+
+    // === List operations ===
+
+    /// List all networks.
+    pub async fn list_networks(&mut self) -> Result<Vec<Network>> {
+        debug!("Listing networks from mvirt-net");
+        let resp = self
+            .client
+            .list_networks(ListNetworksRequest {})
+            .await
+            .context("Failed to list networks")?;
+        Ok(resp.into_inner().networks)
+    }
+
+    /// List all NICs.
+    pub async fn list_nics(&mut self) -> Result<Vec<Nic>> {
+        debug!("Listing NICs from mvirt-net");
+        let resp = self
+            .client
+            .list_nics(ListNicsRequest {
+                network_id: String::new(),
+            })
+            .await
+            .context("Failed to list NICs")?;
+        Ok(resp.into_inner().nics)
+    }
+
+    /// List all security groups.
+    pub async fn list_security_groups(&mut self) -> Result<Vec<SecurityGroup>> {
+        debug!("Listing security groups from mvirt-net");
+        let resp = self
+            .client
+            .list_security_groups(ListSecurityGroupsRequest {})
+            .await
+            .context("Failed to list security groups")?;
+        Ok(resp.into_inner().security_groups)
     }
 
     // === Network operations ===

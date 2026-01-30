@@ -7,7 +7,7 @@ use tracing::debug;
 use crate::proto::zfs::{
     zfs_service_client::ZfsServiceClient, CloneFromTemplateRequest, CreateVolumeRequest,
     DeleteTemplateRequest, DeleteVolumeRequest, GetImportJobRequest, GetVolumeRequest,
-    ImportTemplateRequest, ListTemplatesRequest,
+    ImportTemplateRequest, ListTemplatesRequest, ListVolumesRequest,
 };
 
 pub use crate::proto::zfs::{ImportJob, Template, Volume};
@@ -24,6 +24,17 @@ impl ZfsClient {
             .await
             .context("Failed to connect to mvirt-zfs")?;
         Ok(Self { client })
+    }
+
+    /// List all volumes.
+    pub async fn list_volumes(&mut self) -> Result<Vec<Volume>> {
+        debug!("Listing volumes from mvirt-zfs");
+        let resp = self
+            .client
+            .list_volumes(ListVolumesRequest {})
+            .await
+            .context("Failed to list volumes")?;
+        Ok(resp.into_inner().volumes)
     }
 
     /// Get volume by name.

@@ -152,7 +152,24 @@ async fn build_volume_specs(store: &Arc<dyn DataStore>, node_id: &str) -> Vec<Pr
 async fn build_template_specs(store: &Arc<dyn DataStore>, node_id: &str) -> Vec<ProtoTemplateSpec> {
     let mut specs = Vec::new();
 
-    // Pending/running import jobs — these should be sent to the target node
+    // 1. Completed templates on this node (persistent)
+    if let Ok(templates) = store.list_templates(Some(node_id)).await {
+        for tpl in &templates {
+            specs.push(ProtoTemplateSpec {
+                meta: Some(ResourceMeta {
+                    id: tpl.id.clone(),
+                    name: tpl.name.clone(),
+                    project_id: tpl.project_id.clone(),
+                    node_id: Some(tpl.node_id.clone()),
+                    labels: Default::default(),
+                }),
+                url: String::new(),
+                checksum: None,
+            });
+        }
+    }
+
+    // 2. Pending/running import jobs — these should be sent to the target node
     if let Ok(jobs) = store.list_import_jobs(None).await {
         for job in &jobs {
             if job.state == ImportJobState::Completed || job.state == ImportJobState::Failed {

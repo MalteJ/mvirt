@@ -6,12 +6,13 @@ use tracing::debug;
 
 use crate::proto::vmm::{
     vm_service_client::VmServiceClient, CreateVmRequest, DeleteVmRequest, GetVmRequest,
-    KillVmRequest, StartVmRequest, StopVmRequest,
+    KillVmRequest, ListVmsRequest, StartVmRequest, StopVmRequest,
 };
 
 pub use crate::proto::vmm::{BootMode, DiskConfig, NicConfig, Vm, VmConfig, VmState};
 
 /// Client for interacting with mvirt-vmm.
+#[derive(Clone)]
 pub struct VmmClient {
     client: VmServiceClient<Channel>,
 }
@@ -86,6 +87,17 @@ impl VmmClient {
             .await
             .context("Failed to kill VM")?;
         Ok(resp.into_inner())
+    }
+
+    /// List all VMs.
+    pub async fn list_vms(&mut self) -> Result<Vec<Vm>> {
+        debug!("Listing VMs from mvirt-vmm");
+        let resp = self
+            .client
+            .list_vms(ListVmsRequest {})
+            .await
+            .context("Failed to list VMs")?;
+        Ok(resp.into_inner().vms)
     }
 
     /// Delete a VM.
