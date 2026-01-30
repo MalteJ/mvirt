@@ -411,6 +411,9 @@ pub trait TemplateStore: Send + Sync {
     /// Get an import job by ID.
     async fn get_import_job(&self, id: &str) -> Result<Option<ImportJobData>>;
 
+    /// List import jobs, optionally filtered by state.
+    async fn list_import_jobs(&self, state: Option<ImportJobState>) -> Result<Vec<ImportJobData>>;
+
     /// Update an import job's progress.
     async fn update_import_job(
         &self,

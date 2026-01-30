@@ -1,5 +1,6 @@
 //! gRPC service for mvirt-node agents.
 
+pub mod manifest;
 pub mod server;
 
 // Include the generated protobuf code

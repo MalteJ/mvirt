@@ -1,13 +1,12 @@
-//! gRPC server implementation for NodeService.
+//! gRPC server implementation for NodeService (bidirectional Sync stream).
 
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::{RwLock, broadcast, mpsc};
-use tokio_stream::Stream;
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status};
+use tokio_stream::{Stream, StreamExt};
+use tonic::{Request, Response, Status, Streaming};
 
 use crate::audit::ApiAuditLogger;
 use crate::command::{
@@ -15,48 +14,40 @@ use crate::command::{
 };
 use crate::store::{DataStore, Event, RegisterNodeRequest, StoreError, UpdateNodeStatusRequest};
 
+use super::manifest::build_manifest;
 use super::proto::{
-    DeregisterRequest, DeregisterResponse, HeartbeatRequest, HeartbeatResponse, NodeResources,
-    RegisterRequest, RegisterResponse, SpecEvent, UpdateResourceStatusRequest,
-    UpdateResourceStatusResponse, WatchSpecsRequest, node_service_server::NodeService,
+    ApiMessage, NodeMessage, NodeResources, RegisterResult, api_message, node_message,
+    node_service_server::NodeService,
 };
 
-/// Type alias for the spec sender channel map.
-type SpecSenderMap = HashMap<String, mpsc::Sender<Result<SpecEvent, Status>>>;
+/// Type alias for manifest sender channels (one per connected node).
+type ManifestSenderMap = HashMap<String, mpsc::Sender<ApiMessage>>;
 
 /// NodeService gRPC implementation.
 pub struct NodeServiceImpl {
     store: Arc<dyn DataStore>,
     audit: Arc<ApiAuditLogger>,
-    /// Channels for pushing specs to connected nodes
-    /// Key: node_id, Value: sender for SpecEvent stream
-    spec_senders: Arc<RwLock<SpecSenderMap>>,
-    /// Global revision counter for spec events
+    /// Channels for pushing manifests to connected nodes.
+    manifest_senders: Arc<RwLock<ManifestSenderMap>>,
+    /// Global revision counter for manifests.
     revision: Arc<RwLock<u64>>,
 }
 
 impl NodeServiceImpl {
-    /// Create a new NodeServiceImpl.
     pub fn new(store: Arc<dyn DataStore>, audit: Arc<ApiAuditLogger>) -> Self {
         Self {
             store,
             audit,
-            spec_senders: Arc::new(RwLock::new(HashMap::new())),
+            manifest_senders: Arc::new(RwLock::new(HashMap::new())),
             revision: Arc::new(RwLock::new(0)),
         }
     }
 
-    /// Convert store NodeResources to proto NodeResources.
-    #[allow(dead_code)]
-    fn to_proto_resources(r: &CommandNodeResources) -> NodeResources {
-        NodeResources {
-            cpu_cores: r.cpu_cores,
-            memory_mb: r.memory_mb,
-            storage_gb: r.storage_gb,
-            available_cpu_cores: r.available_cpu_cores,
-            available_memory_mb: r.available_memory_mb,
-            available_storage_gb: r.available_storage_gb,
-        }
+    /// Get the next revision number.
+    async fn next_revision(&self) -> u64 {
+        let mut rev = self.revision.write().await;
+        *rev += 1;
+        *rev
     }
 
     /// Convert proto NodeResources to command NodeResources.
@@ -74,561 +65,355 @@ impl NodeServiceImpl {
         }
     }
 
-    /// Get the next revision number.
-    #[allow(dead_code)]
-    async fn next_revision(&self) -> u64 {
-        let mut rev = self.revision.write().await;
-        *rev += 1;
-        *rev
-    }
+    /// Build and push a manifest to a specific node.
+    async fn push_manifest_to_node(&self, node_id: &str) {
+        let revision = self.next_revision().await;
+        let manifest = build_manifest(&self.store, node_id, revision).await;
 
-    /// Send a spec event to a specific node (by ID or name).
-    pub async fn send_spec_to_node(&self, node_id: &str, event: SpecEvent) -> Result<(), Status> {
-        let senders = self.spec_senders.read().await;
-        // Try direct ID lookup first
+        let senders = self.manifest_senders.read().await;
         if let Some(sender) = senders.get(node_id) {
-            sender.send(Ok(event)).await.map_err(|_| {
-                Status::internal(format!("Failed to send spec to node {}", node_id))
-            })?;
-            return Ok(());
-        }
-        // Try resolving name to ID
-        if let Ok(Some(node)) = self.store.get_node_by_name(node_id).await
-            && let Some(sender) = senders.get(&node.id)
-        {
-            sender.send(Ok(event)).await.map_err(|_| {
-                Status::internal(format!("Failed to send spec to node {}", node_id))
-            })?;
-        }
-        Ok(())
-    }
-
-    /// Broadcast a spec event to all connected nodes.
-    pub async fn broadcast_spec(&self, event: SpecEvent) {
-        let senders = self.spec_senders.read().await;
-        for (node_id, sender) in senders.iter() {
-            if let Err(e) = sender.send(Ok(event.clone())).await {
-                tracing::warn!("Failed to send spec to node {}: {}", node_id, e);
+            let msg = ApiMessage {
+                payload: Some(api_message::Payload::Manifest(manifest)),
+            };
+            if let Err(e) = sender.send(msg).await {
+                tracing::warn!("Failed to push manifest to node {}: {}", node_id, e);
             }
         }
     }
 
-    /// Start listening for state events and forward specs to nodes.
-    ///
-    /// This spawns a background task that converts state machine events
-    /// to SpecEvents and sends them to the appropriate nodes.
+    /// Build and push manifest to all connected nodes.
+    async fn push_manifest_to_all(&self) {
+        let node_ids: Vec<String> = {
+            let senders = self.manifest_senders.read().await;
+            senders.keys().cloned().collect()
+        };
+
+        for node_id in &node_ids {
+            self.push_manifest_to_node(node_id).await;
+        }
+    }
+
+    /// Start listening for state events and push manifests to affected nodes.
     pub fn start_event_listener(self: Arc<Self>, mut events: broadcast::Receiver<Event>) {
         tokio::spawn(async move {
-            tracing::info!("Started spec event listener");
+            tracing::info!("Started manifest event listener");
 
             while let Ok(event) = events.recv().await {
-                if let Err(e) = self.handle_state_event(event).await {
-                    tracing::error!("Failed to handle state event: {}", e);
-                }
+                self.handle_state_event(event).await;
             }
 
-            tracing::info!("Spec event listener stopped");
+            tracing::info!("Manifest event listener stopped");
         });
     }
 
-    /// Handle a state machine event and send specs to nodes.
-    async fn handle_state_event(&self, event: Event) -> Result<(), Status> {
-        use super::proto::{
-            NetworkSpec as ProtoNetworkSpec, NicSpec as ProtoNicSpec, ResourceMeta, SpecEvent,
-            SpecEventType, VmDesiredState as ProtoVmDesiredState, VmSpec as ProtoVmSpec,
-            VolumeSpec as ProtoVolumeSpec, spec_event,
-        };
-
-        let revision = self.next_revision().await;
-
+    /// Determine affected nodes from an event and push updated manifests.
+    async fn handle_state_event(&self, event: Event) {
         match event {
-            // VM scheduled to a node - send spec to that node
-            Event::VmStatusUpdated { id, new, .. } => {
+            // VM events — push to the node the VM is (or was) on
+            Event::VmStatusUpdated { new, .. } | Event::VmUpdated { new, .. } => {
                 if let Some(ref node_id) = new.status.node_id {
-                    let desired_state = match new.spec.desired_state {
-                        crate::command::VmDesiredState::Running => {
-                            ProtoVmDesiredState::Running as i32
-                        }
-                        crate::command::VmDesiredState::Stopped => {
-                            ProtoVmDesiredState::Stopped as i32
-                        }
-                    };
-
-                    let spec_event = SpecEvent {
-                        revision,
-                        r#type: SpecEventType::Create as i32,
-                        spec: Some(spec_event::Spec::Vm(ProtoVmSpec {
-                            meta: Some(ResourceMeta {
-                                id: id.clone(),
-                                name: new.spec.name.clone(),
-                                project_id: new.spec.project_id.clone(),
-                                node_id: Some(node_id.clone()),
-                                labels: Default::default(),
-                            }),
-                            cpu_cores: new.spec.cpu_cores,
-                            memory_mb: new.spec.memory_mb,
-                            volume_id: new.spec.volume_id.clone(),
-                            volume_name: {
-                                match self.store.get_volume(&new.spec.volume_id).await {
-                                    Ok(Some(vol)) => vol.name,
-                                    _ => new.spec.volume_id.clone(), // fallback to ID
-                                }
-                            },
-                            nic_id: new.spec.nic_id.clone(),
-                            image: new.spec.image.clone(),
-                            desired_state,
-                        })),
-                    };
-
-                    tracing::info!("Sending VM spec {} to node {}", id, node_id);
-                    self.send_spec_to_node(node_id, spec_event).await?;
-
-                    // Send the NIC spec to the same node so it can set up networking
-                    if !new.spec.nic_id.is_empty() {
-                        if let Ok(Some(nic)) = self.store.get_nic(&new.spec.nic_id).await {
-                            let nic_revision = self.next_revision().await;
-                            let nic_event = SpecEvent {
-                                revision: nic_revision,
-                                r#type: SpecEventType::Create as i32,
-                                spec: Some(spec_event::Spec::Nic(ProtoNicSpec {
-                                    meta: Some(ResourceMeta {
-                                        id: nic.id.clone(),
-                                        name: nic.name.clone().unwrap_or_default(),
-                                        project_id: nic.project_id.clone(),
-                                        node_id: Some(node_id.clone()),
-                                        labels: Default::default(),
-                                    }),
-                                    network_id: nic.network_id.clone(),
-                                    mac_address: nic.mac_address.clone(),
-                                    ipv4_address: nic.ipv4_address.clone(),
-                                    ipv6_address: nic.ipv6_address.clone(),
-                                    routed_ipv4_prefixes: nic.routed_ipv4_prefixes.clone(),
-                                    routed_ipv6_prefixes: nic.routed_ipv6_prefixes.clone(),
-                                    security_group_id: nic
-                                        .security_group_id
-                                        .clone()
-                                        .unwrap_or_default(),
-                                })),
-                            };
-
-                            tracing::info!("Sending NIC spec {} to node {}", nic.id, node_id);
-                            self.send_spec_to_node(node_id, nic_event).await?;
-                        }
-                    }
+                    self.push_manifest_to_node(node_id).await;
                 }
             }
-
-            // Network created - broadcast to all nodes (they'll create if needed)
-            Event::NetworkCreated(network) => {
-                let spec_event = SpecEvent {
-                    revision,
-                    r#type: SpecEventType::Create as i32,
-                    spec: Some(spec_event::Spec::Network(ProtoNetworkSpec {
-                        meta: Some(ResourceMeta {
-                            id: network.id.clone(),
-                            name: network.name.clone(),
-                            project_id: network.project_id.clone(),
-                            node_id: None,
-                            labels: Default::default(),
-                        }),
-                        ipv4_enabled: network.ipv4_enabled,
-                        ipv4_prefix: network.ipv4_prefix.clone().unwrap_or_default(),
-                        ipv6_enabled: network.ipv6_enabled,
-                        ipv6_prefix: network.ipv6_prefix.clone().unwrap_or_default(),
-                        dns_servers: network.dns_servers.clone(),
-                        ntp_servers: network.ntp_servers.clone(),
-                        is_public: network.is_public,
-                    })),
-                };
-
-                tracing::info!("Broadcasting network spec {}", network.id);
-                self.broadcast_spec(spec_event).await;
+            Event::VmCreated(vm) => {
+                if let Some(ref node_id) = vm.status.node_id {
+                    self.push_manifest_to_node(node_id).await;
+                }
+            }
+            Event::VmDeleted { .. } => {
+                // We don't know which node had the VM, push to all
+                self.push_manifest_to_all().await;
             }
 
-            // Network deleted - broadcast delete to all nodes
-            Event::NetworkDeleted { id } => {
-                let spec_event = SpecEvent {
-                    revision,
-                    r#type: SpecEventType::Delete as i32,
-                    spec: Some(spec_event::Spec::Network(ProtoNetworkSpec {
-                        meta: Some(ResourceMeta {
-                            id: id.clone(),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    })),
-                };
-
-                tracing::info!("Broadcasting network delete {}", id);
-                self.broadcast_spec(spec_event).await;
+            // Network events — global, push to all nodes
+            Event::NetworkCreated(_)
+            | Event::NetworkUpdated { .. }
+            | Event::NetworkDeleted { .. } => {
+                self.push_manifest_to_all().await;
             }
 
-            // NIC created - no broadcast; NIC is sent to the node when its VM is scheduled.
-            Event::NicCreated(_) => {}
-
-            // NIC deleted - broadcast delete so the node running the VM can clean up.
-            Event::NicDeleted { id, .. } => {
-                let spec_event = SpecEvent {
-                    revision,
-                    r#type: SpecEventType::Delete as i32,
-                    spec: Some(spec_event::Spec::Nic(ProtoNicSpec {
-                        meta: Some(ResourceMeta {
-                            id: id.clone(),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    })),
-                };
-
-                tracing::info!("Broadcasting NIC delete {}", id);
-                self.broadcast_spec(spec_event).await;
+            // NIC events — push to all (NIC's node depends on its VM)
+            Event::NicCreated(_) | Event::NicUpdated { .. } | Event::NicDeleted { .. } => {
+                self.push_manifest_to_all().await;
             }
 
-            // VM deleted
-            Event::VmDeleted { id } => {
-                let spec_event = SpecEvent {
-                    revision,
-                    r#type: SpecEventType::Delete as i32,
-                    spec: Some(spec_event::Spec::Vm(ProtoVmSpec {
-                        meta: Some(ResourceMeta {
-                            id: id.clone(),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    })),
-                };
-
-                tracing::info!("Broadcasting VM delete {}", id);
-                self.broadcast_spec(spec_event).await;
+            // Volume events — node-specific
+            Event::VolumeCreated(vol) => {
+                self.push_manifest_to_node(&vol.node_id).await;
+            }
+            Event::VolumeDeleted { node_id, .. } => {
+                self.push_manifest_to_node(&node_id).await;
             }
 
-            // Volume created - send to specific node
-            Event::VolumeCreated(volume) => {
-                let spec_event = SpecEvent {
-                    revision,
-                    r#type: SpecEventType::Create as i32,
-                    spec: Some(spec_event::Spec::Volume(ProtoVolumeSpec {
-                        meta: Some(ResourceMeta {
-                            id: volume.id.clone(),
-                            name: volume.name.clone(),
-                            project_id: volume.project_id.clone(),
-                            node_id: Some(volume.node_id.clone()),
-                            ..Default::default()
-                        }),
-                        size_bytes: volume.size_bytes,
-                        template_id: volume.template_id.clone(),
-                        attached_vm_id: None,
-                    })),
-                };
-
-                tracing::info!(
-                    "Sending volume spec {} to node {}",
-                    volume.id,
-                    volume.node_id
-                );
-                self.send_spec_to_node(&volume.node_id, spec_event).await?;
+            // Import job — broadcast to all nodes (templates are global)
+            Event::ImportJobCreated(_) => {
+                self.push_manifest_to_all().await;
             }
 
-            // Volume deleted - send to specific node
-            Event::VolumeDeleted { id, node_id } => {
-                let spec_event = SpecEvent {
-                    revision,
-                    r#type: SpecEventType::Delete as i32,
-                    spec: Some(spec_event::Spec::Volume(ProtoVolumeSpec {
-                        meta: Some(ResourceMeta {
-                            id: id.clone(),
-                            node_id: Some(node_id.clone()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    })),
-                };
-
-                tracing::info!("Sending volume delete {} to node {}", id, node_id);
-                self.send_spec_to_node(&node_id, spec_event).await?;
+            // Security group events — global
+            Event::SecurityGroupCreated { .. } | Event::SecurityGroupDeleted { .. } => {
+                self.push_manifest_to_all().await;
             }
 
-            // Import job created - broadcast TemplateSpec to all nodes
-            Event::ImportJobCreated(job) => {
-                let spec_event = SpecEvent {
-                    revision,
-                    r#type: SpecEventType::Create as i32,
-                    spec: Some(spec_event::Spec::Template(super::proto::TemplateSpec {
-                        meta: Some(ResourceMeta {
-                            id: job.id.clone(),
-                            name: job.template_name.clone(),
-                            project_id: job.project_id.clone(),
-                            node_id: None,
-                            labels: Default::default(),
-                        }),
-                        url: job.url.clone(),
-                        checksum: None,
-                    })),
-                };
-
-                tracing::info!("Broadcasting template spec {} (url: {})", job.id, job.url);
-                self.broadcast_spec(spec_event).await;
-            }
-
-            // Other events don't require spec distribution
-            _ => {}
+            // Node events — no manifest push needed
+            Event::NodeRegistered(_)
+            | Event::NodeUpdated { .. }
+            | Event::NodeDeregistered { .. } => {}
         }
-
-        Ok(())
     }
 }
 
 #[tonic::async_trait]
 impl NodeService for NodeServiceImpl {
-    /// Register a new node with the API server.
-    async fn register(
-        &self,
-        request: Request<RegisterRequest>,
-    ) -> Result<Response<RegisterResponse>, Status> {
-        let req = request.into_inner();
+    type SyncStream = Pin<Box<dyn Stream<Item = Result<ApiMessage, Status>> + Send + 'static>>;
 
-        // Generate node_id if not provided
-        let node_id = if req.node_id.is_empty() {
+    async fn sync(
+        &self,
+        request: Request<Streaming<NodeMessage>>,
+    ) -> Result<Response<Self::SyncStream>, Status> {
+        let mut inbound = request.into_inner();
+
+        // 1. Read first message — must be Register
+        let first_msg = inbound
+            .next()
+            .await
+            .ok_or_else(|| Status::invalid_argument("Stream closed before register"))?
+            .map_err(|e| Status::internal(format!("Stream error: {}", e)))?;
+
+        let register = match first_msg.payload {
+            Some(node_message::Payload::Register(r)) => r,
+            _ => return Err(Status::invalid_argument("First message must be Register")),
+        };
+
+        // 2. Register node in store
+        let node_id = if register.node_id.is_empty() {
             uuid::Uuid::new_v4().to_string()
         } else {
-            req.node_id.clone()
+            register.node_id.clone()
         };
 
         let store_req = RegisterNodeRequest {
-            name: req.name.clone(),
-            address: req.address,
-            resources: Self::from_proto_resources(req.resources),
-            labels: req.labels,
+            name: register.name.clone(),
+            address: register.address,
+            resources: Self::from_proto_resources(register.resources),
+            labels: register.labels,
         };
 
-        match self.store.register_node(store_req).await {
+        let registered_id = match self.store.register_node(store_req).await {
             Ok(node) => {
                 self.audit.hypervisor_node_registered(&node.id, &node.name);
-                let revision = *self.revision.read().await;
-                Ok(Response::new(RegisterResponse {
-                    node_id: node.id,
-                    success: true,
-                    message: String::new(),
-                    initial_revision: revision,
-                }))
+                node.id
             }
-            Err(StoreError::Conflict(msg)) => Ok(Response::new(RegisterResponse {
-                node_id,
-                success: false,
-                message: msg,
-                initial_revision: 0,
-            })),
-            Err(e) => Err(Status::internal(e.to_string())),
-        }
-    }
-
-    /// Handle heartbeat from a node.
-    async fn heartbeat(
-        &self,
-        request: Request<HeartbeatRequest>,
-    ) -> Result<Response<HeartbeatResponse>, Status> {
-        let req = request.into_inner();
-
-        let store_req = UpdateNodeStatusRequest {
-            status: CommandNodeStatus::Online,
-            resources: Some(Self::from_proto_resources(req.current_resources)),
+            Err(StoreError::Conflict(msg)) => {
+                // Send failure result and close
+                let (tx, rx) = mpsc::channel(1);
+                let fail_msg = ApiMessage {
+                    payload: Some(api_message::Payload::RegisterResult(RegisterResult {
+                        node_id,
+                        success: false,
+                        message: msg,
+                    })),
+                };
+                let _ = tx.send(Ok(fail_msg)).await;
+                drop(tx);
+                return Ok(Response::new(Box::pin(
+                    tokio_stream::wrappers::ReceiverStream::new(rx),
+                )));
+            }
+            Err(e) => return Err(Status::internal(e.to_string())),
         };
 
-        match self.store.update_node_status(&req.node_id, store_req).await {
-            Ok(_) => Ok(Response::new(HeartbeatResponse {
+        // 3. Create outbound channel
+        let (out_tx, out_rx) = mpsc::channel::<Result<ApiMessage, Status>>(256);
+        let (manifest_tx, mut manifest_rx) = mpsc::channel::<ApiMessage>(64);
+
+        // Send RegisterResult
+        let register_result = ApiMessage {
+            payload: Some(api_message::Payload::RegisterResult(RegisterResult {
+                node_id: registered_id.clone(),
                 success: true,
                 message: String::new(),
             })),
-            Err(StoreError::NotFound(msg)) => Ok(Response::new(HeartbeatResponse {
-                success: false,
-                message: msg,
-            })),
-            Err(e) => Err(Status::internal(e.to_string())),
-        }
-    }
+        };
+        let _ = out_tx.send(Ok(register_result)).await;
 
-    /// Deregister a node from the API server.
-    async fn deregister(
-        &self,
-        request: Request<DeregisterRequest>,
-    ) -> Result<Response<DeregisterResponse>, Status> {
-        let req = request.into_inner();
+        // 4. Build and send initial manifest
+        let revision = self.next_revision().await;
+        let initial_manifest = build_manifest(&self.store, &registered_id, revision).await;
+        let _ = out_tx
+            .send(Ok(ApiMessage {
+                payload: Some(api_message::Payload::Manifest(initial_manifest)),
+            }))
+            .await;
 
-        // Remove from spec senders
+        // 5. Register manifest sender
         {
-            let mut senders = self.spec_senders.write().await;
-            senders.remove(&req.node_id);
+            let mut senders = self.manifest_senders.write().await;
+            senders.insert(registered_id.clone(), manifest_tx);
         }
 
-        match self.store.deregister_node(&req.node_id).await {
-            Ok(()) => {
-                self.audit.hypervisor_node_deregistered(&req.node_id);
-                Ok(Response::new(DeregisterResponse {
-                    success: true,
-                    message: String::new(),
-                }))
-            }
-            Err(StoreError::NotFound(msg)) => Ok(Response::new(DeregisterResponse {
-                success: false,
-                message: msg,
-            })),
-            Err(e) => Err(Status::internal(e.to_string())),
-        }
-    }
+        tracing::info!("Node {} connected via Sync stream", registered_id);
 
-    type WatchSpecsStream = Pin<Box<dyn Stream<Item = Result<SpecEvent, Status>> + Send + 'static>>;
+        // 6. Spawn reader task for incoming messages
+        let store = self.store.clone();
+        let manifest_senders = self.manifest_senders.clone();
+        let node_id_clone = registered_id.clone();
 
-    /// Stream spec changes to a node for reconciliation.
-    async fn watch_specs(
-        &self,
-        request: Request<WatchSpecsRequest>,
-    ) -> Result<Response<Self::WatchSpecsStream>, Status> {
-        let req = request.into_inner();
-        let node_id = req.node_id.clone();
+        // Forward manifests from the manifest channel to the outbound stream
+        let out_tx_manifest = out_tx;
+        let node_id_for_manifest = registered_id.clone();
 
-        // Verify node exists
-        let node_exists = self
-            .store
-            .get_node(&node_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        if node_exists.is_none() {
-            return Err(Status::not_found(format!("Node {} not found", node_id)));
-        }
-
-        // Create a channel for this node's spec stream
-        let (tx, rx) = mpsc::channel::<Result<SpecEvent, Status>>(256);
-
-        // Register the sender
-        {
-            let mut senders = self.spec_senders.write().await;
-            senders.insert(node_id.clone(), tx);
-        }
-
-        // Convert the receiver into a stream
-        let stream = ReceiverStream::new(rx);
-
-        tracing::info!(
-            "Node {} started watching specs from revision {}",
-            node_id,
-            req.since_revision
-        );
-
-        Ok(Response::new(Box::pin(stream)))
-    }
-
-    /// Update the status of a resource from a node.
-    async fn update_resource_status(
-        &self,
-        request: Request<UpdateResourceStatusRequest>,
-    ) -> Result<Response<UpdateResourceStatusResponse>, Status> {
-        use super::proto::{ResourcePhase, update_resource_status_request};
-        use crate::store::CreateTemplateRequest;
-
-        let req = request.into_inner();
-
-        tracing::info!(
-            "Received status update from node {}: {:?}",
-            req.node_id,
-            req.status
-        );
-
-        match req.status {
-            Some(update_resource_status_request::Status::TemplateStatus(status)) => {
-                let phase =
-                    ResourcePhase::try_from(status.phase).unwrap_or(ResourcePhase::Unspecified);
-
-                if phase == ResourcePhase::Creating {
-                    // Template import in progress — mark job as running
-                    let _ = self
-                        .store
-                        .update_import_job(&status.id, 0, ImportJobState::Running, None)
-                        .await;
-                } else if phase == ResourcePhase::Failed {
-                    let msg = status.message.clone().unwrap_or_default();
-                    let _ = self
-                        .store
-                        .update_import_job(&status.id, 0, ImportJobState::Failed, Some(msg))
-                        .await;
-                } else if phase == ResourcePhase::Ready {
-                    // Template import completed on node — look up the import job to get project_id
-                    let import_job = self
-                        .store
-                        .get_import_job(&status.id)
-                        .await
-                        .map_err(|e| Status::internal(e.to_string()))?;
-
-                    if let Some(job) = import_job {
-                        match self
-                            .store
-                            .create_template(CreateTemplateRequest {
-                                project_id: job.project_id.clone(),
-                                node_id: req.node_id.clone(),
-                                name: job.template_name.clone(),
-                                size_bytes: status.size_bytes,
-                            })
-                            .await
-                        {
-                            Ok(tpl) => {
-                                tracing::info!(
-                                    "Template {} ({}) created from import job {}",
-                                    tpl.name,
-                                    tpl.id,
-                                    status.id
-                                );
-                                // Mark import job as completed
-                                if let Err(e) = self
-                                    .store
-                                    .update_import_job(
-                                        &status.id,
-                                        status.size_bytes,
-                                        ImportJobState::Completed,
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        "Failed to mark import job {} as completed: {}",
-                                        status.id,
-                                        e
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                // May already exist (duplicate report from another node)
-                                tracing::warn!(
-                                    "Failed to create template from import {}: {}",
-                                    status.id,
-                                    e
-                                );
-                                // Still mark import job as completed (template exists)
-                                let _ = self
-                                    .store
-                                    .update_import_job(
-                                        &status.id,
-                                        status.size_bytes,
-                                        ImportJobState::Completed,
-                                        None,
-                                    )
-                                    .await;
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            "Import job {} not found for template status update",
-                            status.id
-                        );
-                    }
+        tokio::spawn(async move {
+            while let Some(msg) = manifest_rx.recv().await {
+                if out_tx_manifest.send(Ok(msg)).await.is_err() {
+                    break;
                 }
             }
-            _ => {
-                tracing::debug!("Unhandled status update type from node {}", req.node_id);
+            tracing::info!(
+                "Manifest forwarder stopped for node {}",
+                node_id_for_manifest
+            );
+        });
+
+        // Spawn inbound message reader
+        tokio::spawn(async move {
+            while let Some(result) = inbound.next().await {
+                let msg = match result {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("Inbound stream error for node {}: {}", node_id_clone, e);
+                        break;
+                    }
+                };
+
+                match msg.payload {
+                    Some(node_message::Payload::Heartbeat(hb)) => {
+                        let store_req = UpdateNodeStatusRequest {
+                            status: CommandNodeStatus::Online,
+                            resources: Some(Self::from_proto_resources(hb.current_resources)),
+                        };
+                        if let Err(e) = store.update_node_status(&node_id_clone, store_req).await {
+                            tracing::warn!(
+                                "Failed to update heartbeat for node {}: {}",
+                                node_id_clone,
+                                e
+                            );
+                        }
+                    }
+                    Some(node_message::Payload::Status(status)) => {
+                        // Handle template status (import flow)
+                        Self::handle_status_static(&store, &node_id_clone, status).await;
+                    }
+                    Some(node_message::Payload::Register(_)) => {
+                        tracing::warn!("Unexpected Register message from node {}", node_id_clone);
+                    }
+                    None => {}
+                }
+            }
+
+            // Stream closed — clean up
+            tracing::info!("Node {} disconnected", node_id_clone);
+            {
+                let mut senders = manifest_senders.write().await;
+                senders.remove(&node_id_clone);
+            }
+
+            // Mark node offline
+            let _ = store
+                .update_node_status(
+                    &node_id_clone,
+                    UpdateNodeStatusRequest {
+                        status: CommandNodeStatus::Offline,
+                        resources: None,
+                    },
+                )
+                .await;
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(out_rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+impl NodeServiceImpl {
+    /// Static version of handle_status_update for use in spawned tasks.
+    async fn handle_status_static(
+        store: &Arc<dyn DataStore>,
+        node_id: &str,
+        status: super::proto::StatusUpdate,
+    ) {
+        use super::proto::ResourcePhase;
+        use crate::store::CreateTemplateRequest;
+
+        for ts in &status.templates {
+            let phase = ResourcePhase::try_from(ts.phase).unwrap_or(ResourcePhase::Unspecified);
+
+            if phase == ResourcePhase::Creating {
+                let _ = store
+                    .update_import_job(&ts.id, 0, ImportJobState::Running, None)
+                    .await;
+            } else if phase == ResourcePhase::Failed {
+                let msg = ts.message.clone().unwrap_or_default();
+                let _ = store
+                    .update_import_job(&ts.id, 0, ImportJobState::Failed, Some(msg))
+                    .await;
+            } else if phase == ResourcePhase::Ready {
+                let import_job = store.get_import_job(&ts.id).await.ok().flatten();
+
+                if let Some(job) = import_job {
+                    match store
+                        .create_template(CreateTemplateRequest {
+                            project_id: job.project_id.clone(),
+                            node_id: node_id.to_string(),
+                            name: job.template_name.clone(),
+                            size_bytes: ts.size_bytes,
+                        })
+                        .await
+                    {
+                        Ok(tpl) => {
+                            tracing::info!(
+                                "Template {} ({}) created from import job {}",
+                                tpl.name,
+                                tpl.id,
+                                ts.id
+                            );
+                            let _ = store
+                                .update_import_job(
+                                    &ts.id,
+                                    ts.size_bytes,
+                                    ImportJobState::Completed,
+                                    None,
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to create template from import {}: {}",
+                                ts.id,
+                                e
+                            );
+                            let _ = store
+                                .update_import_job(
+                                    &ts.id,
+                                    ts.size_bytes,
+                                    ImportJobState::Completed,
+                                    None,
+                                )
+                                .await;
+                        }
+                    }
+                } else {
+                    tracing::warn!("Import job {} not found for template status update", ts.id);
+                }
             }
         }
 
-        Ok(Response::new(UpdateResourceStatusResponse {
-            success: true,
-            message: String::new(),
-        }))
+        if !status.vms.is_empty() {
+            tracing::debug!(
+                "Received {} VM status updates from node {}",
+                status.vms.len(),
+                node_id
+            );
+        }
     }
 }

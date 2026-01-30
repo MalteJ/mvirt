@@ -762,6 +762,12 @@ impl TemplateStore for RaftStore {
         Ok(state.get_import_job(id).cloned())
     }
 
+    async fn list_import_jobs(&self, state: Option<ImportJobState>) -> Result<Vec<ImportJobData>> {
+        let node = self.node.read().await;
+        let st = node.get_state().await;
+        Ok(st.list_import_jobs(state).into_iter().cloned().collect())
+    }
+
     async fn update_import_job(
         &self,
         id: &str,
