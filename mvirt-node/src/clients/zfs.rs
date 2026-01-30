@@ -6,8 +6,8 @@ use tracing::debug;
 
 use crate::proto::zfs::{
     zfs_service_client::ZfsServiceClient, CloneFromTemplateRequest, CreateVolumeRequest,
-    DeleteTemplateRequest, DeleteVolumeRequest, GetVolumeRequest, ImportTemplateRequest,
-    ListTemplatesRequest,
+    DeleteTemplateRequest, DeleteVolumeRequest, GetImportJobRequest, GetVolumeRequest,
+    ImportTemplateRequest, ListTemplatesRequest,
 };
 
 pub use crate::proto::zfs::{ImportJob, Template, Volume};
@@ -109,6 +109,16 @@ impl ZfsClient {
             })
             .await
             .context("Failed to import template")?;
+        Ok(resp.into_inner())
+    }
+
+    /// Get import job status by ID.
+    pub async fn get_import_job(&mut self, id: &str) -> Result<ImportJob> {
+        let resp = self
+            .client
+            .get_import_job(GetImportJobRequest { id: id.to_string() })
+            .await
+            .context("Failed to get import job")?;
         Ok(resp.into_inner())
     }
 

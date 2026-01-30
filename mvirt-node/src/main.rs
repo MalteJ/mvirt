@@ -109,6 +109,33 @@ async fn main() -> Result<()> {
     let net_client = NetClient::connect(&args.net_endpoint).await?;
     info!("Connected to all local services");
 
+    // Auto-detect system resources if not specified
+    let cpu_cores = args.cpu_cores.unwrap_or_else(|| {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .map(|s| s.matches("processor\t:").count() as u32)
+            .unwrap_or(1)
+    });
+    let memory_mb = args.memory_mb.unwrap_or_else(|| {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("MemTotal:"))
+                    .and_then(|l| {
+                        l.split_whitespace()
+                            .nth(1)
+                            .and_then(|v| v.parse::<u64>().ok())
+                    })
+            })
+            .map(|kb| kb / 1024)
+            .unwrap_or(0)
+    });
+    let storage_gb = args.storage_gb.unwrap_or(0);
+    info!(
+        "Resources: {} CPUs, {} MB RAM, {} GB storage",
+        cpu_cores, memory_mb, storage_gb
+    );
+
     // Create the agent
     let agent = Arc::new(RwLock::new(NodeAgent::new(
         args.api_endpoint.clone(),
@@ -116,12 +143,12 @@ async fn main() -> Result<()> {
         args.node_id,
         Duration::from_secs(args.heartbeat_interval),
         agent::NodeResources {
-            cpu_cores: args.cpu_cores.unwrap_or(0),
-            memory_mb: args.memory_mb.unwrap_or(0),
-            storage_gb: args.storage_gb.unwrap_or(0),
-            available_cpu_cores: args.cpu_cores.unwrap_or(0),
-            available_memory_mb: args.memory_mb.unwrap_or(0),
-            available_storage_gb: args.storage_gb.unwrap_or(0),
+            cpu_cores,
+            memory_mb,
+            storage_gb,
+            available_cpu_cores: cpu_cores,
+            available_memory_mb: memory_mb,
+            available_storage_gb: storage_gb,
         },
         audit,
         vmm_client,

@@ -49,6 +49,17 @@ impl Reconciler for VolumeReconciler {
             None => {
                 // Volume doesn't exist, create it
                 let size_bytes = spec.size_bytes;
+                if size_bytes == 0 {
+                    error!("Volume {} has size_bytes=0, refusing to create", id);
+                    return Ok(VolumeStatus {
+                        id: id.to_string(),
+                        phase: ResourcePhase::Failed as i32,
+                        message: Some("size_bytes must be > 0".to_string()),
+                        zfs_path: String::new(),
+                        device_path: String::new(),
+                        used_bytes: 0,
+                    });
+                }
 
                 let result = if let Some(template_id) = &spec.template_id {
                     // Clone from template
@@ -57,18 +68,25 @@ impl Reconciler for VolumeReconciler {
                         .await
                 } else {
                     // Create empty volume
+                    info!(
+                        "Creating volume {} ({}) with size {}B",
+                        meta.name, id, size_bytes
+                    );
                     zfs.create_volume(&meta.name, size_bytes).await
                 };
 
                 match result {
-                    Ok(vol) => Ok(VolumeStatus {
-                        id: id.to_string(),
-                        phase: ResourcePhase::Ready as i32,
-                        message: None,
-                        zfs_path: vol.name.clone(),
-                        device_path: vol.path,
-                        used_bytes: vol.used_bytes,
-                    }),
+                    Ok(vol) => {
+                        info!("Volume {} ({}) created at {}", meta.name, id, vol.path);
+                        Ok(VolumeStatus {
+                            id: id.to_string(),
+                            phase: ResourcePhase::Ready as i32,
+                            message: None,
+                            zfs_path: vol.name.clone(),
+                            device_path: vol.path,
+                            used_bytes: vol.used_bytes,
+                        })
+                    }
                     Err(e) => {
                         error!("Failed to create volume {}: {:?}", id, e);
                         Ok(VolumeStatus {
