@@ -184,6 +184,7 @@ message VmSpec {
 
     // Storage
     string volume_id = 4;             // Reference to Volume
+    string volume_name = 10;          // Volume name for ZFS lookup
 
     // Network
     string nic_id = 5;
@@ -263,7 +264,7 @@ message TemplateStatus {
 message VolumeSpec {
     ResourceMeta meta = 1;            // node_id is set here!
 
-    uint64 size_gb = 2;
+    uint64 size_bytes = 2;
     optional string template_id = 3;  // Clone from this template (if set)
 
     // Optional: Attach to VM

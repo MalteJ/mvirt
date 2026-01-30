@@ -6,19 +6,21 @@ use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use super::Reconciler;
-use crate::clients::VmmClient;
+use crate::clients::{VmmClient, ZfsClient};
 use crate::proto::node::{VmDesiredState, VmPhase, VmSpec, VmStatus};
 use crate::proto::vmm::{BootMode, DiskConfig, NicConfig, VmConfig, VmState};
 
 /// VM reconciler that interacts with mvirt-vmm.
 pub struct VmReconciler {
     vmm: Mutex<VmmClient>,
+    zfs: Mutex<ZfsClient>,
 }
 
 impl VmReconciler {
-    pub fn new(vmm: VmmClient) -> Self {
+    pub fn new(vmm: VmmClient, zfs: ZfsClient) -> Self {
         Self {
             vmm: Mutex::new(vmm),
+            zfs: Mutex::new(zfs),
         }
     }
 }
@@ -41,6 +43,35 @@ impl Reconciler for VmReconciler {
             // VM doesn't exist, desired Running → create + start
             (None, VmDesiredState::Running) => {
                 info!("Creating VM {}", meta.name);
+
+                // Look up volume device path from ZFS by volume name
+                let disk_path = {
+                    let mut zfs = self.zfs.lock().await;
+                    match zfs.get_volume(&spec.volume_name).await {
+                        Ok(Some(vol)) => vol.path,
+                        Ok(None) => {
+                            error!("Volume '{}' not found in ZFS", spec.volume_name);
+                            return Ok(VmStatus {
+                                id: id.to_string(),
+                                phase: VmPhase::Failed as i32,
+                                message: Some(format!("Volume '{}' not found", spec.volume_name)),
+                                ip_address: None,
+                                pid: None,
+                            });
+                        }
+                        Err(e) => {
+                            error!("Failed to look up volume '{}': {:?}", spec.volume_name, e);
+                            return Ok(VmStatus {
+                                id: id.to_string(),
+                                phase: VmPhase::Failed as i32,
+                                message: Some(format!("Volume lookup failed: {}", e)),
+                                ip_address: None,
+                                pid: None,
+                            });
+                        }
+                    }
+                };
+
                 let config = VmConfig {
                     vcpus: spec.cpu_cores,
                     memory_mb: spec.memory_mb,
@@ -49,7 +80,7 @@ impl Reconciler for VmReconciler {
                     initramfs: None,
                     cmdline: None,
                     disks: vec![DiskConfig {
-                        path: format!("/dev/zvol/mvirt/volumes/{}", spec.volume_id),
+                        path: disk_path,
                         readonly: false,
                     }],
                     nics: vec![NicConfig {

@@ -4,6 +4,7 @@ import { LoginPage } from './features/auth/LoginPage'
 import { TermsPage } from './features/auth/TermsPage'
 import { DashboardPage } from './features/dashboard/DashboardPage'
 import { ClusterPage } from './features/cluster/ClusterPage'
+import { NodeDetailPage } from './features/cluster/NodeDetailPage'
 import { VmsPage } from './features/vms/VmsPage'
 import { VmDetailPage } from './features/vms/VmDetailPage'
 import { CreateVmPage } from './features/vms/CreateVmPage'
@@ -80,14 +81,16 @@ function App() {
             <Layout>
               <Routes>
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/dashboard" element={<DashboardPage />} />
+                <Route path="/dashboard" element={<ProjectRedirect path="/dashboard" />} />
                 <Route path="/cluster" element={<ClusterPage />} />
+                <Route path="/cluster/:id" element={<NodeDetailPage />} />
                 <Route path="/projects" element={<ProjectsPage />} />
 
                 {/* Project-scoped routes */}
                 <Route path="/p/:projectId/*" element={
                   <ProjectSync>
                     <Routes>
+                      <Route path="/dashboard" element={<DashboardPage />} />
                       <Route path="/vms" element={<VmsPage />} />
                       <Route path="/vms/new" element={<CreateVmPage />} />
                       <Route path="/vms/:id" element={<VmDetailPage />} />

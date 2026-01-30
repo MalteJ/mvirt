@@ -45,6 +45,9 @@ export function FirewallPage() {
   const createSecurityGroup = useCreateSecurityGroup(projectId)
   const deleteSecurityGroup = useDeleteSecurityGroup()
 
+  const [deleteSgId, setDeleteSgId] = useState<string | null>(null)
+  const deleteSgName = securityGroups?.find(sg => sg.id === deleteSgId)?.name
+
   // Create Security Group dialog
   const [sgDialogOpen, setSgDialogOpen] = useState(false)
   const [sgName, setSgName] = useState('')
@@ -58,10 +61,11 @@ export function FirewallPage() {
         description: sgDescription.trim() || undefined,
       },
       {
-        onSuccess: () => {
+        onSuccess: (sg) => {
           setSgDialogOpen(false)
           setSgName('')
           setSgDescription('')
+          navigate(`/p/${projectId}/firewall/${sg.id}`)
         },
       }
     )
@@ -132,9 +136,7 @@ export function FirewallPage() {
               className="text-destructive"
               onClick={(e) => {
                 e.stopPropagation()
-                if (confirm(`Delete security group "${row.original.name}"?`)) {
-                  deleteSecurityGroup.mutate(row.original.id)
-                }
+                setDeleteSgId(row.original.id)
               }}
             >
               <Trash2 className="mr-2 h-4 w-4" />
@@ -238,6 +240,34 @@ export function FirewallPage() {
           </p>
         </div>
       )}
+
+      <Dialog open={deleteSgId !== null} onOpenChange={(open) => { if (!open) setDeleteSgId(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Security Group</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete <span className="font-medium text-foreground">{deleteSgName}</span>? All associated firewall rules will be deleted. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteSgId(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteSecurityGroup.isPending}
+              onClick={() => {
+                if (!deleteSgId) return
+                deleteSecurityGroup.mutate(deleteSgId, {
+                  onSuccess: () => setDeleteSgId(null),
+                })
+              }}
+            >
+              {deleteSecurityGroup.isPending ? 'Deleting...' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

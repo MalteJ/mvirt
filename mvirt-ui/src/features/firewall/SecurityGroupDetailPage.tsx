@@ -57,6 +57,7 @@ export function SecurityGroupDetailPage() {
   const deleteRule = useDeleteSecurityGroupRule(projectId)
 
   const [ruleDialogOpen, setRuleDialogOpen] = useState(false)
+  const [deleteRuleId, setDeleteRuleId] = useState<string | null>(null)
   const [ruleDirection, setRuleDirection] = useState<RuleDirection>(RuleDirection.INGRESS)
   const [ruleProtocol, setRuleProtocol] = useState<RuleProtocol>(RuleProtocol.TCP)
   const [rulePortStart, setRulePortStart] = useState('')
@@ -77,7 +78,7 @@ export function SecurityGroupDetailPage() {
         protocol: ruleProtocol,
         portStart: showPorts && rulePortStart ? parseInt(rulePortStart) : undefined,
         portEnd: showPorts && rulePortEnd ? parseInt(rulePortEnd) : undefined,
-        cidr: ruleCidr.trim() || undefined,
+        cidr: ruleCidr.trim(),
         description: ruleDescription.trim() || undefined,
       },
       {
@@ -135,23 +136,10 @@ export function SecurityGroupDetailPage() {
   const ingressCount = rules.filter(r => r.direction === RuleDirection.INGRESS).length
   const egressCount = rules.filter(r => r.direction === RuleDirection.EGRESS).length
 
+  const ingressRules = rules.filter(r => r.direction === RuleDirection.INGRESS)
+  const egressRules = rules.filter(r => r.direction === RuleDirection.EGRESS)
+
   const columns: ColumnDef<SecurityGroupRule>[] = [
-    {
-      accessorKey: 'direction',
-      header: 'Direction',
-      cell: ({ row }) => (
-        <Badge variant={row.original.direction === RuleDirection.INGRESS ? 'running' : 'starting'}>
-          <span className="flex items-center gap-1">
-            {row.original.direction === RuleDirection.INGRESS ? (
-              <ArrowDownToLine className="h-3 w-3" />
-            ) : (
-              <ArrowUpFromLine className="h-3 w-3" />
-            )}
-            {row.original.direction}
-          </span>
-        </Badge>
-      ),
-    },
     {
       accessorKey: 'protocol',
       header: 'Protocol',
@@ -198,14 +186,7 @@ export function SecurityGroupDetailPage() {
         <Button
           variant="ghost"
           size="icon"
-          onClick={() => {
-            if (confirm('Delete this rule?')) {
-              deleteRule.mutate({
-                securityGroupId: id,
-                ruleId: row.original.id,
-              })
-            }
-          }}
+          onClick={() => setDeleteRuleId(row.original.id)}
         >
           <Trash2 className="h-4 w-4 text-destructive" />
         </Button>
@@ -326,16 +307,13 @@ export function SecurityGroupDetailPage() {
               )}
 
               <div className="grid gap-2">
-                <Label>CIDR (optional)</Label>
+                <Label>CIDR</Label>
                 <Input
-                  placeholder="0.0.0.0/0 or 10.0.0.0/8"
+                  placeholder="0.0.0.0/0, 10.0.0.0/8, fd00::/64"
                   className="font-mono"
                   value={ruleCidr}
                   onChange={(e) => setRuleCidr(e.target.value)}
                 />
-                <p className="text-xs text-muted-foreground">
-                  Leave empty to allow from/to any address
-                </p>
               </div>
 
               <div className="grid gap-2">
@@ -353,7 +331,7 @@ export function SecurityGroupDetailPage() {
               </Button>
               <Button
                 onClick={handleCreateRule}
-                disabled={createRule.isPending}
+                disabled={createRule.isPending || !ruleCidr.trim()}
               >
                 {createRule.isPending ? 'Adding...' : 'Add Rule'}
               </Button>
@@ -362,22 +340,66 @@ export function SecurityGroupDetailPage() {
         </Dialog>
       </div>
 
-      {rules.length > 0 ? (
-        <DataTable
-          columns={columns}
-          data={rules}
-          searchColumn="description"
-          searchPlaceholder="Filter rules..."
-        />
-      ) : (
-        <div className="flex flex-col items-center justify-center h-48 border border-dashed border-border rounded-lg">
-          <Shield className="h-10 w-10 text-muted-foreground mb-3" />
-          <p className="text-muted-foreground mb-1">No rules defined</p>
-          <p className="text-xs text-muted-foreground">
-            All inbound traffic is denied by default
-          </p>
+      <div className="space-y-6">
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium flex items-center gap-2">
+            <ArrowDownToLine className="h-4 w-4" />
+            Ingress Rules
+            <Badge variant="secondary">{ingressRules.length}</Badge>
+          </h4>
+          {ingressRules.length > 0 ? (
+            <DataTable columns={columns} data={ingressRules} />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-24 border border-dashed border-border rounded-lg">
+              <p className="text-sm text-muted-foreground">No ingress rules — all inbound traffic is denied</p>
+            </div>
+          )}
         </div>
-      )}
+
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium flex items-center gap-2">
+            <ArrowUpFromLine className="h-4 w-4" />
+            Egress Rules
+            <Badge variant="secondary">{egressRules.length}</Badge>
+          </h4>
+          {egressRules.length > 0 ? (
+            <DataTable columns={columns} data={egressRules} />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-24 border border-dashed border-border rounded-lg">
+              <p className="text-sm text-muted-foreground">No egress rules — all outbound traffic is denied</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <Dialog open={deleteRuleId !== null} onOpenChange={(open) => { if (!open) setDeleteRuleId(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Rule</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete this firewall rule? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteRuleId(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteRule.isPending}
+              onClick={() => {
+                if (!deleteRuleId) return
+                deleteRule.mutate(
+                  { securityGroupId: id, ruleId: deleteRuleId },
+                  { onSuccess: () => setDeleteRuleId(null) },
+                )
+              }}
+            >
+              {deleteRule.isPending ? 'Deleting...' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -1,4 +1,4 @@
-const API_BASE = '/v1'
+const API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:8080') + '/v1'
 
 export class ApiError extends Error {
   constructor(
@@ -14,6 +14,9 @@ async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const errorText = await response.text()
     throw new ApiError(response.status, errorText || response.statusText)
+  }
+  if (response.status === 204 || response.headers.get('content-length') === '0') {
+    return undefined as T
   }
   return response.json()
 }

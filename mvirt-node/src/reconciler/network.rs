@@ -60,7 +60,7 @@ impl Reconciler for NetworkReconciler {
             }
             Err(e) => {
                 // AlreadyExists is fine — network was already created
-                let msg = format!("{}", e);
+                let msg = format!("{:?}", e);
                 if msg.contains("already exists") || msg.contains("AlreadyExists") {
                     info!(
                         "Network {} ({}) already exists in mvirt-ebpf",

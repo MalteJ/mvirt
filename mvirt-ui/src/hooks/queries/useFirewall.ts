@@ -8,6 +8,7 @@ import {
   deleteSecurityGroupRule,
 } from '@/api/endpoints'
 import type { CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest } from '@/types'
+import { RuleDirection, RuleProtocol } from '@/types'
 
 export const firewallKeys = {
   all: ['firewall'] as const,
@@ -34,7 +35,25 @@ export function useSecurityGroup(id: string) {
 export function useCreateSecurityGroup(projectId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (request: CreateSecurityGroupRequest) => createSecurityGroup(projectId, request),
+    mutationFn: async (request: CreateSecurityGroupRequest) => {
+      const sg = await createSecurityGroup(projectId, request)
+      // Auto-create egress allow-all rules (IPv4 + IPv6)
+      await Promise.all([
+        createSecurityGroupRule({
+          securityGroupId: sg.id,
+          direction: RuleDirection.EGRESS,
+          protocol: RuleProtocol.ALL,
+          cidr: '0.0.0.0/0',
+        }),
+        createSecurityGroupRule({
+          securityGroupId: sg.id,
+          direction: RuleDirection.EGRESS,
+          protocol: RuleProtocol.ALL,
+          cidr: '::/0',
+        }),
+      ])
+      return sg
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: firewallKeys.securityGroups() })
     },

@@ -48,7 +48,7 @@ impl Reconciler for VolumeReconciler {
             }
             None => {
                 // Volume doesn't exist, create it
-                let size_bytes = spec.size_gb * 1024 * 1024 * 1024;
+                let size_bytes = spec.size_bytes;
 
                 let result = if let Some(template_id) = &spec.template_id {
                     // Clone from template
@@ -70,7 +70,7 @@ impl Reconciler for VolumeReconciler {
                         used_bytes: vol.used_bytes,
                     }),
                     Err(e) => {
-                        error!("Failed to create volume {}: {}", id, e);
+                        error!("Failed to create volume {}: {:?}", id, e);
                         Ok(VolumeStatus {
                             id: id.to_string(),
                             phase: ResourcePhase::Failed as i32,

@@ -166,6 +166,12 @@ impl NodeServiceImpl {
                             cpu_cores: new.spec.cpu_cores,
                             memory_mb: new.spec.memory_mb,
                             volume_id: new.spec.volume_id.clone(),
+                            volume_name: {
+                                match self.store.get_volume(&new.spec.volume_id).await {
+                                    Ok(Some(vol)) => vol.name,
+                                    _ => new.spec.volume_id.clone(), // fallback to ID
+                                }
+                            },
                             nic_id: new.spec.nic_id.clone(),
                             image: new.spec.image.clone(),
                             desired_state,
@@ -307,7 +313,7 @@ impl NodeServiceImpl {
                             node_id: Some(volume.node_id.clone()),
                             ..Default::default()
                         }),
-                        size_gb: volume.size_bytes / (1024 * 1024 * 1024),
+                        size_bytes: volume.size_bytes,
                         template_id: volume.template_id.clone(),
                         attached_vm_id: None,
                     })),

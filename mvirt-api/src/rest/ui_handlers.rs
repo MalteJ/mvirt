@@ -960,3 +960,83 @@ pub async fn mark_notification_read(
 pub async fn mark_all_notifications_read(State(_state): State<Arc<AppState>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
+
+// =============================================================================
+// Pod Handlers (stub - returns empty data / not implemented)
+// =============================================================================
+
+/// List pods (stub)
+#[utoipa::path(get, path = "/v1/pods", params(("projectId" = Option<String>, Query)), responses((status = 200, body = super::ui_types::PodListResponse)), tag = "pods")]
+pub async fn list_pods(
+    State(_state): State<Arc<AppState>>,
+    Query(_params): Query<ListPodsQuery>,
+) -> Json<super::ui_types::PodListResponse> {
+    Json(super::ui_types::PodListResponse { pods: vec![] })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListPodsQuery {
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// Get a pod by ID (stub)
+#[utoipa::path(get, path = "/v1/pods/{id}", params(("id" = String, Path)), responses((status = 404, body = ApiError)), tag = "pods")]
+pub async fn get_pod(
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
+) -> Result<Json<super::ui_types::UiPod>, ApiError> {
+    Err(ApiError {
+        code: 404,
+        error: "Pod not found".into(),
+    })
+}
+
+/// Create a pod (stub)
+#[utoipa::path(post, path = "/v1/pods", request_body = super::ui_types::UiCreatePodRequest, responses((status = 501)), tag = "pods")]
+pub async fn create_pod(
+    State(_state): State<Arc<AppState>>,
+    Json(_request): Json<super::ui_types::UiCreatePodRequest>,
+) -> Result<Json<super::ui_types::UiPod>, ApiError> {
+    Err(ApiError {
+        code: 501,
+        error: "Pod creation not yet implemented".into(),
+    })
+}
+
+/// Delete a pod (stub)
+#[utoipa::path(delete, path = "/v1/pods/{id}", params(("id" = String, Path)), responses((status = 404, body = ApiError)), tag = "pods")]
+pub async fn delete_pod(
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    Err(ApiError {
+        code: 404,
+        error: "Pod not found".into(),
+    })
+}
+
+/// Start a pod (stub)
+#[utoipa::path(post, path = "/v1/pods/{id}/start", params(("id" = String, Path)), responses((status = 404, body = ApiError)), tag = "pods")]
+pub async fn start_pod(
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
+) -> Result<Json<super::ui_types::UiPod>, ApiError> {
+    Err(ApiError {
+        code: 404,
+        error: "Pod not found".into(),
+    })
+}
+
+/// Stop a pod (stub)
+#[utoipa::path(post, path = "/v1/pods/{id}/stop", params(("id" = String, Path)), responses((status = 404, body = ApiError)), tag = "pods")]
+pub async fn stop_pod(
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
+) -> Result<Json<super::ui_types::UiPod>, ApiError> {
+    Err(ApiError {
+        code: 404,
+        error: "Pod not found".into(),
+    })
+}

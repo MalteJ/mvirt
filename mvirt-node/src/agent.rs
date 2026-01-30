@@ -138,7 +138,7 @@ impl NodeAgent {
             resources,
             audit,
             last_revision: 0,
-            vm_reconciler: VmReconciler::new(vmm_client),
+            vm_reconciler: VmReconciler::new(vmm_client, zfs_client.clone()),
             network_reconciler: NetworkReconciler::new(net_client.clone()),
             nic_reconciler: NicReconciler::new(net_client.clone()),
             template_reconciler: TemplateReconciler::new(zfs_client.clone()),

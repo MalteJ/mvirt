@@ -436,6 +436,7 @@ impl From<TemplateData> for UiTemplate {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiImportTemplateRequest {
+    #[serde(default)]
     pub node_id: String,
     pub name: String,
     pub url: String,
@@ -724,4 +725,97 @@ pub struct UiCreateSecurityGroupRuleRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SecurityGroupListResponse {
     pub security_groups: Vec<UiSecurityGroup>,
+}
+
+// =============================================================================
+// Pod / Container Types (stub)
+// =============================================================================
+
+/// Pod state
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub enum UiPodState {
+    CREATED,
+    STARTING,
+    RUNNING,
+    STOPPING,
+    STOPPED,
+    FAILED,
+}
+
+/// Container state
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub enum UiContainerState {
+    CREATING,
+    CREATED,
+    RUNNING,
+    STOPPED,
+    FAILED,
+}
+
+/// A container within a pod
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiContainer {
+    pub id: String,
+    pub name: String,
+    pub state: UiContainerState,
+    pub image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// A pod
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiPod {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub state: UiPodState,
+    pub network_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vm_id: Option<String>,
+    pub containers: Vec<UiContainer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Container spec for creating a pod
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiContainerSpec {
+    pub name: String,
+    pub image: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub working_dir: Option<String>,
+}
+
+/// Request to create a pod
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreatePodRequest {
+    pub name: String,
+    pub project_id: String,
+    pub network_id: String,
+    pub containers: Vec<UiContainerSpec>,
+}
+
+/// Response wrapper for pod list
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PodListResponse {
+    pub pods: Vec<UiPod>,
 }

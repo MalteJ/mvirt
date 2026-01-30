@@ -28,6 +28,7 @@ use super::ui_types;
         (name = "vms", description = "VM CRUD and lifecycle operations"),
         (name = "storage", description = "Volumes, templates, and storage pool"),
         (name = "security-groups", description = "Security group and firewall rule management"),
+        (name = "pods", description = "Pod and container management (stub)"),
         (name = "logs", description = "Audit log queries")
     ),
     paths(
@@ -85,6 +86,13 @@ use super::ui_types;
         ui_handlers::delete_security_group,
         ui_handlers::create_security_group_rule,
         ui_handlers::delete_security_group_rule,
+        // Pods (stub)
+        ui_handlers::list_pods,
+        ui_handlers::get_pod,
+        ui_handlers::create_pod,
+        ui_handlers::delete_pod,
+        ui_handlers::start_pod,
+        ui_handlers::stop_pod,
         // Logs
         ui_handlers::query_logs,
     ),
@@ -147,6 +155,14 @@ use super::ui_types;
         ui_types::UiCreateSecurityGroupRequest,
         ui_types::UiCreateSecurityGroupRuleRequest,
         ui_types::SecurityGroupListResponse,
+        // UI schemas - Pods
+        ui_types::UiPod,
+        ui_types::UiPodState,
+        ui_types::UiContainer,
+        ui_types::UiContainerState,
+        ui_types::UiContainerSpec,
+        ui_types::UiCreatePodRequest,
+        ui_types::PodListResponse,
         // UI schemas - Logs
         ui_handlers::UiLogEntry,
         ui_handlers::LogsResponse,
@@ -203,6 +219,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/notifications/read-all",
             post(ui_handlers::mark_all_notifications_read),
         )
+        // Pods (stub)
+        .route("/pods", get(ui_handlers::list_pods))
+        .route("/pods", post(ui_handlers::create_pod))
+        .route("/pods/{id}", get(ui_handlers::get_pod))
+        .route("/pods/{id}", delete(ui_handlers::delete_pod))
+        .route("/pods/{id}/start", post(ui_handlers::start_pod))
+        .route("/pods/{id}/stop", post(ui_handlers::stop_pod))
         // Resource by ID (globally unique IDs)
         // VMs
         .route("/vms/{id}", get(ui_handlers::get_vm))
@@ -273,4 +296,5 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest("/v1", global_routes)
         .nest("/v1/projects/{project_id}", project_routes)
         .with_state(state)
+        .layer(tower_http::cors::CorsLayer::permissive())
 }
