@@ -185,7 +185,10 @@
             self.nixosModules.mvirt
             ./nix/images/node.nix
           ];
-          services.mvirt.node.enable = true;
+          services.mvirt.node = {
+            enable = true;
+            apiEndpoint = "http://10.0.0.1:50056";
+          };
         };
 
         node-1 = { ... }: {
@@ -195,11 +198,6 @@
           };
           networking.hostName = "mvirt-node-1";
           networking.hostId = "a1b2c3d1";
-          services.mvirt.api = {
-            enable = true;
-            dev = true;
-            grpcListen = "[::]:50056";
-          };
         };
 
         node-2 = { ... }: {
@@ -209,7 +207,6 @@
           };
           networking.hostName = "mvirt-node-2";
           networking.hostId = "a1b2c3d2";
-          services.mvirt.node.apiEndpoint = "http://10.0.0.11:50056";
         };
 
         node-3 = { ... }: {
@@ -219,7 +216,6 @@
           };
           networking.hostName = "mvirt-node-3";
           networking.hostId = "a1b2c3d3";
-          services.mvirt.node.apiEndpoint = "http://10.0.0.11:50056";
         };
       };
 
