@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { ColumnDef } from '@tanstack/react-table'
 import { MoreHorizontal, Plus, Trash2, Copy, Download, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react'
-import { useVolumes, useTemplates, useDeleteVolume, usePoolStats, useImportTemplate, useImportJob, useCreateVolume } from '@/hooks/queries'
+import { useVolumes, useTemplates, useDeleteVolume, usePoolStats, useImportTemplate, useImportJob, useCreateVolume, useNodes } from '@/hooks/queries'
 import { DataTable } from '@/components/data-display/DataTable'
 import { StatCard } from '@/components/data-display/StatCard'
 import { Button } from '@/components/ui/button'
@@ -40,6 +40,7 @@ export function StoragePage() {
   const { data: volumes, isLoading: loadingVolumes } = useVolumes(projectId)
   const { data: templates, isLoading: loadingTemplates } = useTemplates(projectId)
   const { data: poolStats } = usePoolStats()
+  const { data: nodes } = useNodes()
   const deleteVolume = useDeleteVolume()
   const createVolume = useCreateVolume(projectId)
   const importTemplate = useImportTemplate(projectId)
@@ -47,6 +48,7 @@ export function StoragePage() {
 
   // Import dialog state
   const [importDialogOpen, setImportDialogOpen] = useState(false)
+  const [importNodeId, setImportNodeId] = useState('')
   const [templateName, setTemplateName] = useState('')
   const [templateUrl, setTemplateUrl] = useState('')
   const [importJobId, setImportJobId] = useState('')
@@ -65,9 +67,9 @@ export function StoragePage() {
   }, [importDone])
 
   const handleImport = () => {
-    if (!templateName.trim() || !templateUrl.trim()) return
+    if (!templateName.trim() || !templateUrl.trim() || !importNodeId) return
     importTemplate.mutate(
-      { name: templateName.trim(), url: templateUrl.trim() },
+      { nodeId: importNodeId, name: templateName.trim(), url: templateUrl.trim() },
       {
         onSuccess: (job) => {
           setImportJobId(job.id)
@@ -78,6 +80,7 @@ export function StoragePage() {
 
   const handleCloseImportDialog = () => {
     setImportDialogOpen(false)
+    setImportNodeId('')
     setTemplateName('')
     setTemplateUrl('')
     setImportJobId('')
@@ -89,18 +92,24 @@ export function StoragePage() {
 
   // Create volume dialog state
   const [volumeDialogOpen, setVolumeDialogOpen] = useState(false)
+  const [volumeNodeId, setVolumeNodeId] = useState('')
   const [volumeName, setVolumeName] = useState('')
   const [volumeSize, setVolumeSize] = useState('10')
   const [volumeSizeUnit, setVolumeSizeUnit] = useState('GB')
   const [volumeTemplateId, setVolumeTemplateId] = useState('')
 
+  // When a template is selected, lock node to the template's node
+  const selectedTemplate = templates?.find(t => t.id === volumeTemplateId)
+  const effectiveNodeId = selectedTemplate ? selectedTemplate.nodeId : volumeNodeId
+
   const handleCreateVolume = () => {
-    if (!volumeName.trim()) return
+    if (!volumeName.trim() || !effectiveNodeId) return
     const multiplier = volumeSizeUnit === 'TB' ? 1024 * 1024 * 1024 * 1024
       : volumeSizeUnit === 'GB' ? 1024 * 1024 * 1024
       : 1024 * 1024
     createVolume.mutate(
       {
+        nodeId: effectiveNodeId,
         name: volumeName.trim(),
         sizeBytes: parseInt(volumeSize) * multiplier,
         templateId: volumeTemplateId || undefined,
@@ -108,6 +117,7 @@ export function StoragePage() {
       {
         onSuccess: () => {
           setVolumeDialogOpen(false)
+          setVolumeNodeId('')
           setVolumeName('')
           setVolumeSize('10')
           setVolumeSizeUnit('GB')
@@ -131,9 +141,17 @@ export function StoragePage() {
       ),
     },
     {
-      accessorKey: 'volsizeBytes',
+      accessorKey: 'nodeId',
+      header: 'Node',
+      cell: ({ row }) => {
+        const node = nodes?.find(n => n.id === row.original.nodeId)
+        return node?.name ?? truncateId(row.original.nodeId)
+      },
+    },
+    {
+      accessorKey: 'sizeBytes',
       header: 'Size',
-      cell: ({ row }) => formatBytes(row.original.volsizeBytes),
+      cell: ({ row }) => formatBytes(row.original.sizeBytes),
     },
     {
       accessorKey: 'usedBytes',
@@ -195,6 +213,14 @@ export function StoragePage() {
       ),
     },
     {
+      accessorKey: 'nodeId',
+      header: 'Node',
+      cell: ({ row }) => {
+        const node = nodes?.find(n => n.id === row.original.nodeId)
+        return node?.name ?? truncateId(row.original.nodeId)
+      },
+    },
+    {
       accessorKey: 'sizeBytes',
       header: 'Size',
       cell: ({ row }) => formatBytes(row.original.sizeBytes),
@@ -247,6 +273,21 @@ export function StoragePage() {
                 <>
                   <div className="grid gap-4 py-4">
                     <div className="grid gap-2">
+                      <Label>Node</Label>
+                      <Select value={importNodeId} onValueChange={setImportNodeId}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select a node" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {nodes?.map((n) => (
+                            <SelectItem key={n.id} value={n.id}>
+                              {n.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid gap-2">
                       <Label htmlFor="template-name">Template Name</Label>
                       <Input
                         id="template-name"
@@ -275,7 +316,7 @@ export function StoragePage() {
                     </Button>
                     <Button
                       onClick={handleImport}
-                      disabled={!templateName.trim() || !templateUrl.trim() || importTemplate.isPending}
+                      disabled={!importNodeId || !templateName.trim() || !templateUrl.trim() || importTemplate.isPending}
                     >
                       {importTemplate.isPending ? 'Starting...' : 'Import'}
                     </Button>
@@ -350,6 +391,31 @@ export function StoragePage() {
               </DialogHeader>
               <div className="grid gap-4 py-4">
                 <div className="grid gap-2">
+                  <Label>Node</Label>
+                  <Select
+                    value={effectiveNodeId || 'none'}
+                    onValueChange={(v) => setVolumeNodeId(v === 'none' ? '' : v)}
+                    disabled={!!selectedTemplate}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a node" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {!selectedTemplate && <SelectItem value="none">Select a node</SelectItem>}
+                      {nodes?.map((n) => (
+                        <SelectItem key={n.id} value={n.id}>
+                          {n.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {selectedTemplate && (
+                    <p className="text-xs text-muted-foreground">
+                      Locked to template's node
+                    </p>
+                  )}
+                </div>
+                <div className="grid gap-2">
                   <Label htmlFor="volume-name">Name</Label>
                   <Input
                     id="volume-name"
@@ -409,7 +475,7 @@ export function StoragePage() {
                 </Button>
                 <Button
                   onClick={handleCreateVolume}
-                  disabled={!volumeName.trim() || !volumeSize || createVolume.isPending}
+                  disabled={!effectiveNodeId || !volumeName.trim() || !volumeSize || createVolume.isPending}
                 >
                   {createVolume.isPending ? 'Creating...' : 'Create'}
                 </Button>
@@ -432,7 +498,7 @@ export function StoragePage() {
           />
           <StatCard
             title="Free"
-            value={formatBytes(poolStats.freeBytes)}
+            value={formatBytes(poolStats.availableBytes)}
           />
         </div>
       )}
