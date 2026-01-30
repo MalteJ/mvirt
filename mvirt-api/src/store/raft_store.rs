@@ -19,11 +19,11 @@ use super::event::Event;
 use super::traits::{
     ControlplaneInfo, ControlplaneStore, CreateNetworkRequest, CreateNicRequest,
     CreateProjectRequest, CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest,
-    CreateSnapshotRequest, CreateVmRequest, CreateVolumeRequest, DataStore, DeleteNetworkResult,
-    ImportTemplateRequest, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore,
-    ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore, TemplateStore,
-    UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateVmSpecRequest,
-    UpdateVmStatusRequest, VmStore, VolumeStore,
+    CreateSnapshotRequest, CreateTemplateRequest, CreateVmRequest, CreateVolumeRequest, DataStore,
+    DeleteNetworkResult, ImportTemplateRequest, Membership, MembershipPeer, NetworkStore, NicStore,
+    NodeStore, ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore,
+    TemplateStore, UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest,
+    UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore, VolumeStore,
 };
 
 /// RaftStore wraps a RaftNode and implements the DataStore trait.
@@ -717,6 +717,24 @@ impl TemplateStore for RaftStore {
         let node = self.node.read().await;
         let state = node.get_state().await;
         Ok(state.get_template(id).cloned())
+    }
+
+    async fn create_template(&self, req: CreateTemplateRequest) -> Result<TemplateData> {
+        let cmd = Command::CreateTemplate {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            project_id: req.project_id,
+            node_id: req.node_id,
+            name: req.name,
+            size_bytes: req.size_bytes,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Template(data) => Ok(data),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
     }
 
     async fn import_template(&self, req: ImportTemplateRequest) -> Result<ImportJobData> {

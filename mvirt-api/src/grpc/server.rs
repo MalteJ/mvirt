@@ -10,7 +10,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::audit::ApiAuditLogger;
-use crate::command::{NodeResources as CommandNodeResources, NodeStatus as CommandNodeStatus};
+use crate::command::{
+    ImportJobState, NodeResources as CommandNodeResources, NodeStatus as CommandNodeStatus,
+};
 use crate::store::{DataStore, Event, RegisterNodeRequest, StoreError, UpdateNodeStatusRequest};
 
 use super::proto::{
@@ -520,15 +522,109 @@ impl NodeService for NodeServiceImpl {
         &self,
         request: Request<UpdateResourceStatusRequest>,
     ) -> Result<Response<UpdateResourceStatusResponse>, Status> {
+        use super::proto::{ResourcePhase, update_resource_status_request};
+        use crate::store::CreateTemplateRequest;
+
         let req = request.into_inner();
 
-        // TODO: Handle status updates and update the state machine
-        // For now, just acknowledge receipt
-        tracing::debug!(
+        tracing::info!(
             "Received status update from node {}: {:?}",
             req.node_id,
             req.status
         );
+
+        match req.status {
+            Some(update_resource_status_request::Status::TemplateStatus(status)) => {
+                let phase =
+                    ResourcePhase::try_from(status.phase).unwrap_or(ResourcePhase::Unspecified);
+
+                if phase == ResourcePhase::Creating {
+                    // Template import in progress — mark job as running
+                    let _ = self
+                        .store
+                        .update_import_job(&status.id, 0, ImportJobState::Running, None)
+                        .await;
+                } else if phase == ResourcePhase::Failed {
+                    let msg = status.message.clone().unwrap_or_default();
+                    let _ = self
+                        .store
+                        .update_import_job(&status.id, 0, ImportJobState::Failed, Some(msg))
+                        .await;
+                } else if phase == ResourcePhase::Ready {
+                    // Template import completed on node — look up the import job to get project_id
+                    let import_job = self
+                        .store
+                        .get_import_job(&status.id)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+
+                    if let Some(job) = import_job {
+                        match self
+                            .store
+                            .create_template(CreateTemplateRequest {
+                                project_id: job.project_id.clone(),
+                                node_id: req.node_id.clone(),
+                                name: job.template_name.clone(),
+                                size_bytes: status.size_bytes,
+                            })
+                            .await
+                        {
+                            Ok(tpl) => {
+                                tracing::info!(
+                                    "Template {} ({}) created from import job {}",
+                                    tpl.name,
+                                    tpl.id,
+                                    status.id
+                                );
+                                // Mark import job as completed
+                                if let Err(e) = self
+                                    .store
+                                    .update_import_job(
+                                        &status.id,
+                                        status.size_bytes,
+                                        ImportJobState::Completed,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to mark import job {} as completed: {}",
+                                        status.id,
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                // May already exist (duplicate report from another node)
+                                tracing::warn!(
+                                    "Failed to create template from import {}: {}",
+                                    status.id,
+                                    e
+                                );
+                                // Still mark import job as completed (template exists)
+                                let _ = self
+                                    .store
+                                    .update_import_job(
+                                        &status.id,
+                                        status.size_bytes,
+                                        ImportJobState::Completed,
+                                        None,
+                                    )
+                                    .await;
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Import job {} not found for template status update",
+                            status.id
+                        );
+                    }
+                }
+            }
+            _ => {
+                tracing::debug!("Unhandled status update type from node {}", req.node_id);
+            }
+        }
 
         Ok(Response::new(UpdateResourceStatusResponse {
             success: true,

@@ -163,6 +163,15 @@ pub struct ImportTemplateRequest {
     pub total_bytes: u64,
 }
 
+/// Request to create a template entry (after import completes).
+#[derive(Debug, Clone)]
+pub struct CreateTemplateRequest {
+    pub project_id: String,
+    pub node_id: String,
+    pub name: String,
+    pub size_bytes: u64,
+}
+
 // =============================================================================
 // Controlplane DTOs
 // =============================================================================
@@ -395,6 +404,9 @@ pub trait TemplateStore: Send + Sync {
 
     /// Import a template (starts an import job).
     async fn import_template(&self, req: ImportTemplateRequest) -> Result<ImportJobData>;
+
+    /// Create a template entry (called when import completes on a node).
+    async fn create_template(&self, req: CreateTemplateRequest) -> Result<TemplateData>;
 
     /// Get an import job by ID.
     async fn get_import_job(&self, id: &str) -> Result<Option<ImportJobData>>;
