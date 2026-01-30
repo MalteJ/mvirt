@@ -5,26 +5,12 @@ export enum VmState {
   STOPPING = 'STOPPING',
 }
 
-export interface DiskConfig {
-  path: string
-  readonly: boolean
-}
-
-export interface NicConfig {
-  macAddress: string
-  networkId: string
-}
-
 export interface VmConfig {
   vcpus: number
   memoryMb: number
-  kernelPath?: string
-  initrdPath?: string
-  cmdline?: string
-  bootDisk?: string
-  disks: DiskConfig[]
-  nics: NicConfig[]
-  userData?: string
+  volumeId: string
+  nicId: string
+  image: string
 }
 
 export interface Vm {
@@ -35,11 +21,22 @@ export interface Vm {
   config: VmConfig
   createdAt: string
   startedAt?: string
+  nodeId?: string
+  ipAddress?: string
+}
+
+export interface CreateVmConfig {
+  vcpus: number
+  memoryMb: number
+  volumeId: string
+  nicId: string
+  image: string
 }
 
 export interface CreateVmRequest {
   name: string
-  config: VmConfig
+  config: CreateVmConfig
+  nodeSelector?: string
 }
 
 export interface VmListResponse {

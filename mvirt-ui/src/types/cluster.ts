@@ -1,36 +1,41 @@
-export enum NodeState {
-  ONLINE = 'ONLINE',
-  OFFLINE = 'OFFLINE',
-  MAINTENANCE = 'MAINTENANCE',
-  JOINING = 'JOINING',
+export enum NodeStatus {
+  ONLINE = 'Online',
+  OFFLINE = 'Offline',
 }
 
-export enum NodeRole {
-  LEADER = 'LEADER',
-  FOLLOWER = 'FOLLOWER',
-  CANDIDATE = 'CANDIDATE',
+export interface NodeResources {
+  cpu_cores: number
+  memory_mb: number
+  storage_gb: number
+  available_cpu_cores: number
+  available_memory_mb: number
+  available_storage_gb: number
 }
 
 export interface Node {
   id: string
   name: string
   address: string
-  state: NodeState
-  role: NodeRole
-  version: string
-  cpuCount: number
-  memoryTotalBytes: number
-  memoryUsedBytes: number
-  vmCount: number
-  uptime: number
-  lastSeen: string
+  status: NodeStatus
+  resources: NodeResources
+  labels: Record<string, string>
+  last_heartbeat: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ControlplanePeer {
+  id: number
+  name: string
+  address: string
+  state: string
+  is_leader: boolean
 }
 
 export interface ClusterInfo {
-  id: string
-  name: string
-  nodeCount: number
-  leaderNodeId: string
-  term: number
-  createdAt: string
+  cluster_id: string
+  leader_id: number
+  current_term: number
+  commit_index: number
+  peers: ControlplanePeer[]
 }
