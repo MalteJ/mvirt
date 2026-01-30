@@ -61,10 +61,13 @@ impl Reconciler for VolumeReconciler {
                     });
                 }
 
-                let result = if let Some(template_id) = &spec.template_id {
-                    // Clone from template
-                    info!("Cloning volume {} from template {}", meta.name, template_id);
-                    zfs.clone_from_template(template_id, &meta.name, Some(size_bytes))
+                let result = if let Some(template_name) = &spec.template_name {
+                    // Clone from template (by name)
+                    info!(
+                        "Cloning volume {} from template {}",
+                        meta.name, template_name
+                    );
+                    zfs.clone_from_template(template_name, &meta.name, Some(size_bytes))
                         .await
                 } else {
                     // Create empty volume

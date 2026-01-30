@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::command::{ImportJobState, VmDesiredState as CmdVmDesiredState};
+use crate::command::{TemplatePhase, VmDesiredState as CmdVmDesiredState};
 use crate::store::DataStore;
 
 use super::proto::{
@@ -132,9 +132,19 @@ async fn build_volume_specs(store: &Arc<dyn DataStore>, node_id: &str) -> Vec<Pr
         }
     };
 
-    volumes
-        .iter()
-        .map(|vol| ProtoVolumeSpec {
+    let mut specs = Vec::with_capacity(volumes.len());
+    for vol in &volumes {
+        // Resolve template name if volume was cloned from a template
+        let template_name = if let Some(ref tpl_id) = vol.template_id {
+            match store.get_template(tpl_id).await {
+                Ok(Some(tpl)) => Some(tpl.name),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        specs.push(ProtoVolumeSpec {
             meta: Some(ResourceMeta {
                 id: vol.id.clone(),
                 name: vol.name.clone(),
@@ -145,17 +155,32 @@ async fn build_volume_specs(store: &Arc<dyn DataStore>, node_id: &str) -> Vec<Pr
             size_bytes: vol.size_bytes,
             template_id: vol.template_id.clone(),
             attached_vm_id: None,
-        })
-        .collect()
+            template_name,
+        });
+    }
+    specs
 }
 
 async fn build_template_specs(store: &Arc<dyn DataStore>, node_id: &str) -> Vec<ProtoTemplateSpec> {
-    let mut specs = Vec::new();
+    let templates = match store.list_templates(Some(node_id)).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to list templates for node {}: {}", node_id, e);
+            return vec![];
+        }
+    };
 
-    // 1. Completed templates on this node (persistent)
-    if let Ok(templates) = store.list_templates(Some(node_id)).await {
-        for tpl in &templates {
-            specs.push(ProtoTemplateSpec {
+    templates
+        .iter()
+        .map(|tpl| {
+            // Include URL only if still needs importing
+            let url = if tpl.source_url.is_some() && tpl.phase != TemplatePhase::Ready {
+                tpl.source_url.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            ProtoTemplateSpec {
                 meta: Some(ResourceMeta {
                     id: tpl.id.clone(),
                     name: tpl.name.clone(),
@@ -163,42 +188,11 @@ async fn build_template_specs(store: &Arc<dyn DataStore>, node_id: &str) -> Vec<
                     node_id: Some(tpl.node_id.clone()),
                     labels: Default::default(),
                 }),
-                url: String::new(),
+                url,
                 checksum: None,
-            });
-        }
-    }
-
-    // 2. Pending/running import jobs — these should be sent to the target node
-    if let Ok(jobs) = store.list_import_jobs(None).await {
-        for job in &jobs {
-            if job.state == ImportJobState::Completed || job.state == ImportJobState::Failed {
-                continue;
             }
-            // Import jobs with a specific node_id go only to that node;
-            // jobs with no node_id go to all nodes (broadcast).
-            if !job.node_id.is_empty() && job.node_id != node_id {
-                continue;
-            }
-            specs.push(ProtoTemplateSpec {
-                meta: Some(ResourceMeta {
-                    id: job.id.clone(),
-                    name: job.template_name.clone(),
-                    project_id: job.project_id.clone(),
-                    node_id: if job.node_id.is_empty() {
-                        None
-                    } else {
-                        Some(job.node_id.clone())
-                    },
-                    labels: Default::default(),
-                }),
-                url: job.url.clone(),
-                checksum: None,
-            });
-        }
-    }
-
-    specs
+        })
+        .collect()
 }
 
 async fn build_network_specs(store: &Arc<dyn DataStore>) -> Vec<ProtoNetworkSpec> {

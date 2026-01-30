@@ -177,25 +177,16 @@ pub enum Command {
         node_id: String,
         name: String,
         size_bytes: u64,
-    },
-
-    // Import job operations
-    CreateImportJob {
-        request_id: String,
-        id: String,
-        timestamp: String,
-        project_id: String,
-        node_id: String,
-        template_name: String,
-        url: String,
+        source_url: Option<String>,
         total_bytes: u64,
     },
-    UpdateImportJob {
+    UpdateTemplateStatus {
         request_id: String,
         id: String,
         timestamp: String,
+        phase: TemplatePhase,
         bytes_written: u64,
-        state: ImportJobState,
+        size_bytes: u64,
         error: Option<String>,
     },
 
@@ -256,8 +247,7 @@ impl Command {
             Command::ResizeVolume { request_id, .. } => request_id,
             Command::CreateSnapshot { request_id, .. } => request_id,
             Command::CreateTemplate { request_id, .. } => request_id,
-            Command::CreateImportJob { request_id, .. } => request_id,
-            Command::UpdateImportJob { request_id, .. } => request_id,
+            Command::UpdateTemplateStatus { request_id, .. } => request_id,
             Command::CreateSecurityGroup { request_id, .. } => request_id,
             Command::DeleteSecurityGroup { request_id, .. } => request_id,
             Command::CreateSecurityGroupRule { request_id, .. } => request_id,
@@ -495,18 +485,8 @@ pub struct TemplateData {
     pub name: String,
     pub size_bytes: u64,
     pub clone_count: u32,
-    pub created_at: String,
-}
-
-/// Import job data stored in the state machine
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportJobData {
-    pub id: String,
-    pub project_id: String,
-    pub node_id: String,
-    pub template_name: String,
-    pub url: String,
-    pub state: ImportJobState,
+    pub source_url: Option<String>,
+    pub phase: TemplatePhase,
     pub bytes_written: u64,
     pub total_bytes: u64,
     pub error: Option<String>,
@@ -514,13 +494,13 @@ pub struct ImportJobData {
     pub updated_at: String,
 }
 
-/// Import job state
+/// Template lifecycle phase
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub enum ImportJobState {
+pub enum TemplatePhase {
     #[default]
     Pending,
-    Running,
-    Completed,
+    Importing,
+    Ready,
     Failed,
 }
 
@@ -575,7 +555,6 @@ pub enum Response {
     Project(ProjectData),
     Volume(VolumeData),
     Template(TemplateData),
-    ImportJob(ImportJobData),
     SecurityGroup(SecurityGroupData),
     Deleted { id: String },
     DeletedWithCount { id: String, nics_deleted: u32 },

@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::command::{
-    ImportJobData, ImportJobState, NetworkData, NicData, NodeData, NodeResources, NodeStatus,
-    ProjectData, RuleDirection, SecurityGroupData, TemplateData, VmData, VmDesiredState, VmSpec,
-    VmStatus, VolumeData,
+    NetworkData, NicData, NodeData, NodeResources, NodeStatus, ProjectData, RuleDirection,
+    SecurityGroupData, TemplateData, TemplatePhase, VmData, VmDesiredState, VmSpec, VmStatus,
+    VolumeData,
 };
 use std::collections::HashMap;
 
@@ -153,23 +153,24 @@ pub struct CreateSnapshotRequest {
 // Template Request DTOs
 // =============================================================================
 
-/// Request to import a template.
-#[derive(Debug, Clone)]
-pub struct ImportTemplateRequest {
-    pub project_id: String,
-    pub node_id: String,
-    pub name: String,
-    pub url: String,
-    pub total_bytes: u64,
-}
-
-/// Request to create a template entry (after import completes).
+/// Request to create a template (optionally with source_url for import).
 #[derive(Debug, Clone)]
 pub struct CreateTemplateRequest {
     pub project_id: String,
     pub node_id: String,
     pub name: String,
     pub size_bytes: u64,
+    pub source_url: Option<String>,
+    pub total_bytes: u64,
+}
+
+/// Request to update template import status.
+#[derive(Debug, Clone)]
+pub struct UpdateTemplateStatusRequest {
+    pub phase: TemplatePhase,
+    pub bytes_written: u64,
+    pub size_bytes: u64,
+    pub error: Option<String>,
 }
 
 // =============================================================================
@@ -402,26 +403,15 @@ pub trait TemplateStore: Send + Sync {
     /// Get a template by ID.
     async fn get_template(&self, id: &str) -> Result<Option<TemplateData>>;
 
-    /// Import a template (starts an import job).
-    async fn import_template(&self, req: ImportTemplateRequest) -> Result<ImportJobData>;
-
-    /// Create a template entry (called when import completes on a node).
+    /// Create a template (with optional source_url for import).
     async fn create_template(&self, req: CreateTemplateRequest) -> Result<TemplateData>;
 
-    /// Get an import job by ID.
-    async fn get_import_job(&self, id: &str) -> Result<Option<ImportJobData>>;
-
-    /// List import jobs, optionally filtered by state.
-    async fn list_import_jobs(&self, state: Option<ImportJobState>) -> Result<Vec<ImportJobData>>;
-
-    /// Update an import job's progress.
-    async fn update_import_job(
+    /// Update a template's import status.
+    async fn update_template_status(
         &self,
         id: &str,
-        bytes_written: u64,
-        state: ImportJobState,
-        error: Option<String>,
-    ) -> Result<ImportJobData>;
+        req: UpdateTemplateStatusRequest,
+    ) -> Result<TemplateData>;
 }
 
 // =============================================================================

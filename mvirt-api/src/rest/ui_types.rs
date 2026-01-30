@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::command::{
-    ImportJobData, ImportJobState, NetworkData, NicData, ProjectData, SnapshotData, TemplateData,
-    VmData, VmDesiredState, VmPhase, VolumeData,
+    NetworkData, NicData, ProjectData, SnapshotData, TemplateData, TemplatePhase, VmData,
+    VmDesiredState, VmPhase, VolumeData,
 };
 
 // =============================================================================
@@ -468,18 +468,18 @@ pub enum UiImportJobState {
     Failed,
 }
 
-impl From<ImportJobState> for UiImportJobState {
-    fn from(state: ImportJobState) -> Self {
-        match state {
-            ImportJobState::Pending => UiImportJobState::Pending,
-            ImportJobState::Running => UiImportJobState::Running,
-            ImportJobState::Completed => UiImportJobState::Completed,
-            ImportJobState::Failed => UiImportJobState::Failed,
+impl From<TemplatePhase> for UiImportJobState {
+    fn from(phase: TemplatePhase) -> Self {
+        match phase {
+            TemplatePhase::Pending => UiImportJobState::Pending,
+            TemplatePhase::Importing => UiImportJobState::Running,
+            TemplatePhase::Ready => UiImportJobState::Completed,
+            TemplatePhase::Failed => UiImportJobState::Failed,
         }
     }
 }
 
-/// UI-compatible import job representation
+/// UI-compatible import job representation (backed by TemplateData)
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiImportJob {
@@ -495,14 +495,14 @@ pub struct UiImportJob {
     pub created_at: String,
 }
 
-impl From<ImportJobData> for UiImportJob {
-    fn from(data: ImportJobData) -> Self {
+impl From<TemplateData> for UiImportJob {
+    fn from(data: TemplateData) -> Self {
         Self {
             id: data.id,
             node_id: data.node_id,
-            template_name: data.template_name,
-            url: data.url,
-            state: data.state.into(),
+            template_name: data.name,
+            url: data.source_url.unwrap_or_default(),
+            state: data.phase.into(),
             bytes_written: data.bytes_written,
             total_bytes: data.total_bytes,
             error: data.error,

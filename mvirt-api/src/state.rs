@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use crate::command::{
-    Command, ImportJobData, ImportJobState, NetworkData, NicData, NicStateData, NodeData,
-    NodeStatus, ProjectData, Response, SecurityGroupData, SecurityGroupRuleData, SnapshotData,
-    TemplateData, VmData, VmPhase, VmStatus, VolumeData,
+    Command, NetworkData, NicData, NicStateData, NodeData, NodeStatus, ProjectData, Response,
+    SecurityGroupData, SecurityGroupRuleData, SnapshotData, TemplateData, TemplatePhase, VmData,
+    VmPhase, VmStatus, VolumeData,
 };
 use crate::store::Event;
 
@@ -23,7 +23,6 @@ pub struct ApiState {
     pub projects: HashMap<String, ProjectData>,
     pub volumes: HashMap<String, VolumeData>,
     pub templates: HashMap<String, TemplateData>,
-    pub import_jobs: HashMap<String, ImportJobData>,
     pub security_groups: HashMap<String, SecurityGroupData>,
     /// Idempotency cache for request deduplication
     #[serde(skip)]
@@ -40,7 +39,6 @@ impl Default for ApiState {
             projects: HashMap::new(),
             volumes: HashMap::new(),
             templates: HashMap::new(),
-            import_jobs: HashMap::new(),
             security_groups: HashMap::new(),
             applied_requests: Some(LruCache::new(NonZeroUsize::new(1000).unwrap())),
         }
@@ -256,23 +254,6 @@ impl ApiState {
             .values()
             .filter(|t| t.project_id == project_id)
             .collect()
-    }
-
-    // =========================================================================
-    // Import job queries
-    // =========================================================================
-
-    /// Get an import job by ID
-    pub fn get_import_job(&self, id: &str) -> Option<&ImportJobData> {
-        self.import_jobs.get(id)
-    }
-
-    /// List import jobs, optionally filtered by state
-    pub fn list_import_jobs(&self, state: Option<ImportJobState>) -> Vec<&ImportJobData> {
-        match state {
-            Some(s) => self.import_jobs.values().filter(|j| j.state == s).collect(),
-            None => self.import_jobs.values().collect(),
-        }
     }
 
     // =========================================================================
@@ -1151,10 +1132,16 @@ impl StateMachine<Command, Response> for ApiState {
                 node_id,
                 name,
                 size_bytes,
+                source_url,
+                total_bytes,
                 ..
             } => {
-                // Check for duplicate name
-                if self.templates.values().any(|t| t.name == name) {
+                // Check for duplicate name (only among Ready templates)
+                if self
+                    .templates
+                    .values()
+                    .any(|t| t.name == name && t.phase == TemplatePhase::Ready)
+                {
                     return (
                         Response::Error {
                             code: 409,
@@ -1172,6 +1159,12 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
+                let phase = if source_url.is_some() {
+                    TemplatePhase::Pending
+                } else {
+                    TemplatePhase::Ready
+                };
+
                 let template = TemplateData {
                     id: id.clone(),
                     project_id,
@@ -1179,41 +1172,8 @@ impl StateMachine<Command, Response> for ApiState {
                     name,
                     size_bytes,
                     clone_count: 0,
-                    created_at: timestamp,
-                };
-
-                self.templates.insert(id, template.clone());
-                (Response::Template(template), vec![])
-            }
-
-            // =================================================================
-            // Import Job Commands
-            // =================================================================
-            Command::CreateImportJob {
-                id,
-                timestamp,
-                project_id,
-                node_id,
-                template_name,
-                url,
-                total_bytes,
-                ..
-            } => {
-                // Check for duplicate ID (idempotency)
-                if self.import_jobs.contains_key(&id) {
-                    return (
-                        Response::ImportJob(self.import_jobs.get(&id).unwrap().clone()),
-                        vec![],
-                    );
-                }
-
-                let job = ImportJobData {
-                    id: id.clone(),
-                    project_id,
-                    node_id,
-                    template_name,
-                    url,
-                    state: ImportJobState::Pending,
+                    source_url,
+                    phase,
                     bytes_written: 0,
                     total_bytes,
                     error: None,
@@ -1221,32 +1181,39 @@ impl StateMachine<Command, Response> for ApiState {
                     updated_at: timestamp,
                 };
 
-                self.import_jobs.insert(id, job.clone());
+                self.templates.insert(id, template.clone());
                 (
-                    Response::ImportJob(job.clone()),
-                    vec![Event::ImportJobCreated(job)],
+                    Response::Template(template.clone()),
+                    vec![Event::TemplateCreated(template)],
                 )
             }
 
-            Command::UpdateImportJob {
+            Command::UpdateTemplateStatus {
                 id,
                 timestamp,
+                phase,
                 bytes_written,
-                state,
+                size_bytes,
                 error,
                 ..
-            } => match self.import_jobs.get_mut(&id) {
-                Some(job) => {
-                    job.bytes_written = bytes_written;
-                    job.state = state;
-                    job.error = error;
-                    job.updated_at = timestamp;
-                    (Response::ImportJob(job.clone()), vec![])
+            } => match self.templates.get_mut(&id) {
+                Some(tpl) => {
+                    let old = tpl.clone();
+                    tpl.phase = phase;
+                    tpl.bytes_written = bytes_written;
+                    tpl.size_bytes = size_bytes;
+                    tpl.error = error;
+                    tpl.updated_at = timestamp;
+                    let new = tpl.clone();
+                    (
+                        Response::Template(new.clone()),
+                        vec![Event::TemplateUpdated { id, old, new }],
+                    )
                 }
                 None => (
                     Response::Error {
                         code: 404,
-                        message: format!("Import job '{}' not found", id),
+                        message: format!("Template '{}' not found", id),
                     },
                     vec![],
                 ),
@@ -2276,6 +2243,8 @@ mod tests {
             node_id: node_id.to_string(),
             name: name.to_string(),
             size_bytes: 1_000_000_000,
+            source_url: None,
+            total_bytes: 0,
         }
     }
 
@@ -2415,71 +2384,76 @@ mod tests {
     }
 
     // =========================================================================
-    // Import Job Tests
+    // Template Import Tests
     // =========================================================================
 
     #[test]
-    fn test_create_import_job() {
+    fn test_create_template_with_source_url() {
         let mut state = ApiState::default();
 
-        let cmd = Command::CreateImportJob {
+        let cmd = Command::CreateTemplate {
             request_id: "req-1".to_string(),
-            id: "job-1".to_string(),
+            id: "tmpl-1".to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
             project_id: "test-project".to_string(),
             node_id: "node-1".to_string(),
-            template_name: "ubuntu-22.04".to_string(),
-            url: "https://example.com/ubuntu.qcow2".to_string(),
+            name: "ubuntu-22.04".to_string(),
+            size_bytes: 0,
+            source_url: Some("https://example.com/ubuntu.qcow2".to_string()),
             total_bytes: 2_000_000_000,
         };
         let response = apply(&mut state, cmd);
 
         match response {
-            Response::ImportJob(data) => {
-                assert_eq!(data.id, "job-1");
-                assert_eq!(data.state, ImportJobState::Pending);
+            Response::Template(data) => {
+                assert_eq!(data.id, "tmpl-1");
+                assert_eq!(data.phase, TemplatePhase::Pending);
                 assert_eq!(data.bytes_written, 0);
                 assert_eq!(data.total_bytes, 2_000_000_000);
+                assert_eq!(
+                    data.source_url,
+                    Some("https://example.com/ubuntu.qcow2".to_string())
+                );
             }
             other => panic!("Unexpected response: {:?}", other),
         }
 
-        assert!(state.get_import_job("job-1").is_some());
+        assert!(state.get_template("tmpl-1").is_some());
     }
 
     #[test]
-    fn test_update_import_job_progress() {
+    fn test_update_template_status_importing() {
         let mut state = ApiState::default();
 
-        // Create import job
         apply(
             &mut state,
-            Command::CreateImportJob {
+            Command::CreateTemplate {
                 request_id: "req-1".to_string(),
-                id: "job-1".to_string(),
+                id: "tmpl-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
                 project_id: "test-project".to_string(),
                 node_id: "node-1".to_string(),
-                template_name: "ubuntu".to_string(),
-                url: "https://example.com/ubuntu.qcow2".to_string(),
+                name: "ubuntu".to_string(),
+                size_bytes: 0,
+                source_url: Some("https://example.com/ubuntu.qcow2".to_string()),
                 total_bytes: 1000,
             },
         );
 
-        // Update to running with progress
-        let update_cmd = Command::UpdateImportJob {
+        let update_cmd = Command::UpdateTemplateStatus {
             request_id: "req-2".to_string(),
-            id: "job-1".to_string(),
+            id: "tmpl-1".to_string(),
             timestamp: "2024-01-01T00:00:01Z".to_string(),
+            phase: TemplatePhase::Importing,
             bytes_written: 500,
-            state: ImportJobState::Running,
+            size_bytes: 1000,
             error: None,
         };
         let response = apply(&mut state, update_cmd);
 
         match response {
-            Response::ImportJob(data) => {
-                assert_eq!(data.state, ImportJobState::Running);
+            Response::Template(data) => {
+                assert_eq!(data.phase, TemplatePhase::Importing);
                 assert_eq!(data.bytes_written, 500);
             }
             other => panic!("Unexpected response: {:?}", other),
@@ -2487,37 +2461,38 @@ mod tests {
     }
 
     #[test]
-    fn test_update_import_job_completed() {
+    fn test_update_template_status_ready() {
         let mut state = ApiState::default();
 
         apply(
             &mut state,
-            Command::CreateImportJob {
+            Command::CreateTemplate {
                 request_id: "req-1".to_string(),
-                id: "job-1".to_string(),
+                id: "tmpl-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
                 project_id: "test-project".to_string(),
                 node_id: "node-1".to_string(),
-                template_name: "ubuntu".to_string(),
-                url: "https://example.com/ubuntu.qcow2".to_string(),
+                name: "ubuntu".to_string(),
+                size_bytes: 0,
+                source_url: Some("https://example.com/ubuntu.qcow2".to_string()),
                 total_bytes: 1000,
             },
         );
 
-        // Complete the job
-        let update_cmd = Command::UpdateImportJob {
+        let update_cmd = Command::UpdateTemplateStatus {
             request_id: "req-2".to_string(),
-            id: "job-1".to_string(),
+            id: "tmpl-1".to_string(),
             timestamp: "2024-01-01T00:00:01Z".to_string(),
+            phase: TemplatePhase::Ready,
             bytes_written: 1000,
-            state: ImportJobState::Completed,
+            size_bytes: 1000,
             error: None,
         };
         let response = apply(&mut state, update_cmd);
 
         match response {
-            Response::ImportJob(data) => {
-                assert_eq!(data.state, ImportJobState::Completed);
+            Response::Template(data) => {
+                assert_eq!(data.phase, TemplatePhase::Ready);
                 assert_eq!(data.bytes_written, 1000);
             }
             other => panic!("Unexpected response: {:?}", other),
@@ -2525,37 +2500,38 @@ mod tests {
     }
 
     #[test]
-    fn test_update_import_job_failed() {
+    fn test_update_template_status_failed() {
         let mut state = ApiState::default();
 
         apply(
             &mut state,
-            Command::CreateImportJob {
+            Command::CreateTemplate {
                 request_id: "req-1".to_string(),
-                id: "job-1".to_string(),
+                id: "tmpl-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
                 project_id: "test-project".to_string(),
                 node_id: "node-1".to_string(),
-                template_name: "ubuntu".to_string(),
-                url: "https://example.com/ubuntu.qcow2".to_string(),
+                name: "ubuntu".to_string(),
+                size_bytes: 0,
+                source_url: Some("https://example.com/ubuntu.qcow2".to_string()),
                 total_bytes: 1000,
             },
         );
 
-        // Fail the job
-        let update_cmd = Command::UpdateImportJob {
+        let update_cmd = Command::UpdateTemplateStatus {
             request_id: "req-2".to_string(),
-            id: "job-1".to_string(),
+            id: "tmpl-1".to_string(),
             timestamp: "2024-01-01T00:00:01Z".to_string(),
+            phase: TemplatePhase::Failed,
             bytes_written: 100,
-            state: ImportJobState::Failed,
+            size_bytes: 1000,
             error: Some("Download failed: connection reset".to_string()),
         };
         let response = apply(&mut state, update_cmd);
 
         match response {
-            Response::ImportJob(data) => {
-                assert_eq!(data.state, ImportJobState::Failed);
+            Response::Template(data) => {
+                assert_eq!(data.phase, TemplatePhase::Failed);
                 assert_eq!(
                     data.error,
                     Some("Download failed: connection reset".to_string())
@@ -2566,15 +2542,16 @@ mod tests {
     }
 
     #[test]
-    fn test_update_import_job_not_found() {
+    fn test_update_template_status_not_found() {
         let mut state = ApiState::default();
 
-        let update_cmd = Command::UpdateImportJob {
+        let update_cmd = Command::UpdateTemplateStatus {
             request_id: "req-1".to_string(),
             id: "non-existent".to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
+            phase: TemplatePhase::Importing,
             bytes_written: 0,
-            state: ImportJobState::Running,
+            size_bytes: 0,
             error: None,
         };
         let response = apply(&mut state, update_cmd);
