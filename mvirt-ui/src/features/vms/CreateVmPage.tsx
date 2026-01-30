@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
-import { useCreateVm } from '@/hooks/queries'
-import { useTemplates } from '@/hooks/queries/useStorage'
+import { useCreateVm, useVolumes, useNics, useTemplates } from '@/hooks/queries'
 import { useProjectId } from '@/hooks/useProjectId'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -15,34 +14,40 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { formatBytes } from '@/lib/utils'
 
 export function CreateVmPage() {
   const navigate = useNavigate()
   const projectId = useProjectId()
   const createVm = useCreateVm(projectId)
+  const { data: volumes } = useVolumes(projectId)
+  const { data: nics } = useNics(projectId)
   const { data: templates } = useTemplates(projectId)
 
   const [name, setName] = useState('')
   const [vcpus, setVcpus] = useState('2')
   const [memoryMb, setMemoryMb] = useState('2048')
-  const [templateId, setTemplateId] = useState('')
+  const [volumeId, setVolumeId] = useState('')
+  const [nicId, setNicId] = useState('')
+  const [image, setImage] = useState('')
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    if (!name || !volumeId || !nicId || !image) return
     createVm.mutate(
       {
         name,
         config: {
           vcpus: parseInt(vcpus),
           memoryMb: parseInt(memoryMb),
-          bootDisk: templateId || undefined,
-          disks: [],
-          nics: [],
+          volumeId,
+          nicId,
+          image,
         },
       },
       {
         onSuccess: (vm) => {
-          navigate(`/vms/${vm.id}`)
+          navigate(`../vms/${vm.id}`)
         },
       }
     )
@@ -51,7 +56,7 @@ export function CreateVmPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate('/vms')}>
+        <Button variant="ghost" size="icon" onClick={() => navigate('../vms')}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
         <div>
@@ -79,7 +84,7 @@ export function CreateVmPage() {
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="vcpus">vCPUs</Label>
+                <Label>vCPUs</Label>
                 <Select value={vcpus} onValueChange={setVcpus}>
                   <SelectTrigger>
                     <SelectValue />
@@ -94,7 +99,7 @@ export function CreateVmPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="memory">Memory</Label>
+                <Label>Memory</Label>
                 <Select value={memoryMb} onValueChange={setMemoryMb}>
                   <SelectTrigger>
                     <SelectValue />
@@ -111,27 +116,67 @@ export function CreateVmPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="template">Boot Image (optional)</Label>
-              <Select value={templateId || 'none'} onValueChange={(v) => setTemplateId(v === 'none' ? '' : v)}>
+              <Label>Volume</Label>
+              <Select value={volumeId || 'none'} onValueChange={(v) => setVolumeId(v === 'none' ? '' : v)}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Select a template..." />
+                  <SelectValue placeholder="Select a volume..." />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  {templates?.map((template) => (
-                    <SelectItem key={template.id} value={template.id}>
-                      {template.name}
+                  <SelectItem value="none">Select a volume</SelectItem>
+                  {volumes?.map((vol) => (
+                    <SelectItem key={vol.id} value={vol.id}>
+                      {vol.name} ({formatBytes(vol.sizeBytes)})
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
 
+            <div className="space-y-2">
+              <Label>NIC</Label>
+              <Select value={nicId || 'none'} onValueChange={(v) => setNicId(v === 'none' ? '' : v)}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a NIC..." />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Select a NIC</SelectItem>
+                  {nics?.map((nic) => (
+                    <SelectItem key={nic.id} value={nic.id}>
+                      {nic.name || nic.macAddress}{nic.ipv4Address ? ` (${nic.ipv4Address})` : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Image</Label>
+              <Select value={image || 'none'} onValueChange={(v) => setImage(v === 'none' ? '' : v)}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select an image..." />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Select an image</SelectItem>
+                  {templates?.map((t) => (
+                    <SelectItem key={t.id} value={t.name}>
+                      {t.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Template name used as the boot image identifier
+              </p>
+            </div>
+
             <div className="flex gap-2 pt-4">
-              <Button type="submit" disabled={createVm.isPending || !name}>
+              <Button
+                type="submit"
+                disabled={createVm.isPending || !name || !volumeId || !nicId || !image}
+              >
                 {createVm.isPending ? 'Creating...' : 'Create VM'}
               </Button>
-              <Button type="button" variant="outline" onClick={() => navigate('/vms')}>
+              <Button type="button" variant="outline" onClick={() => navigate('../vms')}>
                 Cancel
               </Button>
             </div>

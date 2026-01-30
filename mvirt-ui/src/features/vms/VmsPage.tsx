@@ -126,7 +126,7 @@ export function VmsPage() {
             Manage your virtual machines
           </p>
         </div>
-        <Button onClick={() => navigate('/vms/new')}>
+        <Button onClick={() => navigate('new')}>
           <Plus className="mr-2 h-4 w-4" />
           Create VM
         </Button>
@@ -136,7 +136,7 @@ export function VmsPage() {
         data={vms || []}
         searchColumn="name"
         searchPlaceholder="Filter VMs..."
-        onRowClick={(vm) => navigate(`/vms/${vm.id}`)}
+        onRowClick={(vm) => navigate(vm.id)}
       />
     </div>
   )

@@ -12,14 +12,24 @@ import { VmState } from '@/types'
 export function VmDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { data: vm, isLoading } = useVm(id!)
+  const { data: vm, isLoading, isError, error } = useVm(id!)
   const startVm = useStartVm()
   const stopVm = useStopVm()
 
-  if (isLoading || !vm) {
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-muted-foreground">Loading...</div>
+      </div>
+    )
+  }
+
+  if (isError || !vm) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-destructive">
+          {error ? `Failed to load VM: ${error.message}` : 'VM not found'}
+        </div>
       </div>
     )
   }
@@ -30,7 +40,7 @@ export function VmDetailPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate('/vms')}>
+        <Button variant="ghost" size="icon" onClick={() => navigate('../vms')}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
         <div className="flex-1">
@@ -88,11 +98,11 @@ export function VmDetailPage() {
             </Card>
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">NICs</CardTitle>
+                <CardTitle className="text-sm font-medium">NIC</CardTitle>
                 <Network className="h-4 w-4 text-muted-foreground" />
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">{vm.config.nics.length}</div>
+                <div className="font-mono text-xs">{truncateId(vm.config.nicId)}</div>
               </CardContent>
             </Card>
           </div>
@@ -117,10 +127,20 @@ export function VmDetailPage() {
                     <dd>{new Date(vm.startedAt).toLocaleString()}</dd>
                   </div>
                 )}
-                {vm.config.bootDisk && (
+                <div>
+                  <dt className="text-muted-foreground">Image</dt>
+                  <dd>{vm.config.image}</dd>
+                </div>
+                {vm.nodeId && (
                   <div>
-                    <dt className="text-muted-foreground">Boot Disk</dt>
-                    <dd className="font-mono text-xs">{truncateId(vm.config.bootDisk, 16)}</dd>
+                    <dt className="text-muted-foreground">Node</dt>
+                    <dd className="font-mono text-xs">{truncateId(vm.nodeId)}</dd>
+                  </div>
+                )}
+                {vm.ipAddress && (
+                  <div>
+                    <dt className="text-muted-foreground">IP Address</dt>
+                    <dd className="font-mono">{vm.ipAddress}</dd>
                   </div>
                 )}
               </dl>
@@ -135,45 +155,39 @@ export function VmDetailPage() {
         <TabsContent value="hardware" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Disks</CardTitle>
+              <CardTitle>Storage</CardTitle>
             </CardHeader>
             <CardContent>
-              {vm.config.disks.length === 0 ? (
-                <p className="text-muted-foreground text-sm">No disks attached</p>
-              ) : (
-                <ul className="space-y-2">
-                  {vm.config.disks.map((disk, i) => (
-                    <li key={i} className="flex items-center justify-between text-sm">
-                      <span className="font-mono">{disk.path}</span>
-                      <span className="text-muted-foreground">
-                        {disk.readonly ? 'Read-only' : 'Read-write'}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <dl className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <dt className="text-muted-foreground">Volume ID</dt>
+                  <dd className="font-mono text-xs">{truncateId(vm.config.volumeId)}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Image</dt>
+                  <dd>{vm.config.image}</dd>
+                </div>
+              </dl>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle>Network Interfaces</CardTitle>
+              <CardTitle>Network</CardTitle>
             </CardHeader>
             <CardContent>
-              {vm.config.nics.length === 0 ? (
-                <p className="text-muted-foreground text-sm">No NICs attached</p>
-              ) : (
-                <ul className="space-y-2">
-                  {vm.config.nics.map((nic, i) => (
-                    <li key={i} className="flex items-center justify-between text-sm">
-                      <span className="font-mono">{nic.macAddress}</span>
-                      <span className="text-muted-foreground">
-                        Network: {truncateId(nic.networkId)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <dl className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <dt className="text-muted-foreground">NIC ID</dt>
+                  <dd className="font-mono text-xs">{truncateId(vm.config.nicId)}</dd>
+                </div>
+                {vm.ipAddress && (
+                  <div>
+                    <dt className="text-muted-foreground">IP Address</dt>
+                    <dd className="font-mono">{vm.ipAddress}</dd>
+                  </div>
+                )}
+              </dl>
             </CardContent>
           </Card>
         </TabsContent>
