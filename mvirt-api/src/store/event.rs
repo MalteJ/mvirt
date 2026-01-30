@@ -1,6 +1,6 @@
 //! Events emitted by state machine changes.
 
-use crate::command::{ImportJobData, NetworkData, NicData, NodeData, VmData, VolumeData};
+use crate::command::{NetworkData, NicData, NodeData, TemplateData, VmData, VolumeData};
 
 /// Events emitted when state changes occur.
 ///
@@ -68,9 +68,15 @@ pub enum Event {
     /// A volume was deleted.
     VolumeDeleted { id: String, node_id: String },
 
-    // Import Job events
-    /// An import job was created (template download).
-    ImportJobCreated(ImportJobData),
+    // Template events
+    /// A template was created.
+    TemplateCreated(TemplateData),
+    /// A template was updated (status change).
+    TemplateUpdated {
+        id: String,
+        old: TemplateData,
+        new: TemplateData,
+    },
 
     // Security Group events
     /// A security group was created.
@@ -95,7 +101,7 @@ impl Event {
             | Event::VmStatusUpdated { .. }
             | Event::VmDeleted { .. } => "vm",
             Event::VolumeCreated(_) | Event::VolumeDeleted { .. } => "volume",
-            Event::ImportJobCreated(_) => "import_job",
+            Event::TemplateCreated(_) | Event::TemplateUpdated { .. } => "template",
             Event::SecurityGroupCreated { .. } | Event::SecurityGroupDeleted { .. } => {
                 "security_group"
             }
@@ -120,7 +126,8 @@ impl Event {
             Event::VmDeleted { id } => id,
             Event::VolumeCreated(v) => &v.id,
             Event::VolumeDeleted { id, .. } => id,
-            Event::ImportJobCreated(j) => &j.id,
+            Event::TemplateCreated(t) => &t.id,
+            Event::TemplateUpdated { id, .. } => id,
             Event::SecurityGroupCreated { id } | Event::SecurityGroupDeleted { id } => id,
         }
     }

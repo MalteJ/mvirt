@@ -10,7 +10,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::audit::ApiAuditLogger;
 use crate::command::{
-    ImportJobState, NodeResources as CommandNodeResources, NodeStatus as CommandNodeStatus,
+    NodeResources as CommandNodeResources, NodeStatus as CommandNodeStatus, TemplatePhase,
 };
 use crate::store::{DataStore, Event, RegisterNodeRequest, StoreError, UpdateNodeStatusRequest};
 
@@ -145,9 +145,12 @@ impl NodeServiceImpl {
                 self.push_manifest_to_node(&node_id).await;
             }
 
-            // Import job — broadcast to all nodes (templates are global)
-            Event::ImportJobCreated(_) => {
-                self.push_manifest_to_all().await;
+            // Template events — push to the node the template is on
+            Event::TemplateCreated(tpl) => {
+                self.push_manifest_to_node(&tpl.node_id).await;
+            }
+            Event::TemplateUpdated { new, .. } => {
+                self.push_manifest_to_node(&new.node_id).await;
             }
 
             // Security group events — global
@@ -339,72 +342,37 @@ impl NodeServiceImpl {
     /// Static version of handle_status_update for use in spawned tasks.
     async fn handle_status_static(
         store: &Arc<dyn DataStore>,
-        node_id: &str,
+        _node_id: &str,
         status: super::proto::StatusUpdate,
     ) {
         use super::proto::ResourcePhase;
-        use crate::store::CreateTemplateRequest;
+        use crate::store::UpdateTemplateStatusRequest;
 
         for ts in &status.templates {
             let phase = ResourcePhase::try_from(ts.phase).unwrap_or(ResourcePhase::Unspecified);
 
-            if phase == ResourcePhase::Creating {
-                let _ = store
-                    .update_import_job(&ts.id, 0, ImportJobState::Running, None)
-                    .await;
-            } else if phase == ResourcePhase::Failed {
-                let msg = ts.message.clone().unwrap_or_default();
-                let _ = store
-                    .update_import_job(&ts.id, 0, ImportJobState::Failed, Some(msg))
-                    .await;
-            } else if phase == ResourcePhase::Ready {
-                let import_job = store.get_import_job(&ts.id).await.ok().flatten();
+            let template_phase = match phase {
+                ResourcePhase::Creating => TemplatePhase::Importing,
+                ResourcePhase::Ready => TemplatePhase::Ready,
+                ResourcePhase::Failed => TemplatePhase::Failed,
+                _ => continue,
+            };
 
-                if let Some(job) = import_job {
-                    match store
-                        .create_template(CreateTemplateRequest {
-                            project_id: job.project_id.clone(),
-                            node_id: node_id.to_string(),
-                            name: job.template_name.clone(),
-                            size_bytes: ts.size_bytes,
-                        })
-                        .await
-                    {
-                        Ok(tpl) => {
-                            tracing::info!(
-                                "Template {} ({}) created from import job {}",
-                                tpl.name,
-                                tpl.id,
-                                ts.id
-                            );
-                            let _ = store
-                                .update_import_job(
-                                    &ts.id,
-                                    ts.size_bytes,
-                                    ImportJobState::Completed,
-                                    None,
-                                )
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to create template from import {}: {}",
-                                ts.id,
-                                e
-                            );
-                            let _ = store
-                                .update_import_job(
-                                    &ts.id,
-                                    ts.size_bytes,
-                                    ImportJobState::Completed,
-                                    None,
-                                )
-                                .await;
-                        }
-                    }
-                } else {
-                    tracing::warn!("Import job {} not found for template status update", ts.id);
-                }
+            let error = if template_phase == TemplatePhase::Failed {
+                ts.message.clone()
+            } else {
+                None
+            };
+
+            let req = UpdateTemplateStatusRequest {
+                phase: template_phase,
+                bytes_written: ts.size_bytes, // best available
+                size_bytes: ts.size_bytes,
+                error,
+            };
+
+            if let Err(e) = store.update_template_status(&ts.id, req).await {
+                tracing::warn!("Failed to update template status for {}: {}", ts.id, e);
             }
         }
 
@@ -412,7 +380,7 @@ impl NodeServiceImpl {
             tracing::debug!(
                 "Received {} VM status updates from node {}",
                 status.vms.len(),
-                node_id
+                _node_id
             );
         }
     }

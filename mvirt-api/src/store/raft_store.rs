@@ -8,8 +8,8 @@ use mraft::RaftNode;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::command::{
-    Command, ImportJobData, ImportJobState, NetworkData, NicData, NodeData, ProjectData, Response,
-    TemplateData, VmData, VmPhase, VmStatus, VolumeData,
+    Command, NetworkData, NicData, NodeData, ProjectData, Response, TemplateData, VmData, VmPhase,
+    VmStatus, VolumeData,
 };
 use crate::scheduler::Scheduler;
 use crate::state::ApiState;
@@ -20,9 +20,9 @@ use super::traits::{
     ControlplaneInfo, ControlplaneStore, CreateNetworkRequest, CreateNicRequest,
     CreateProjectRequest, CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest,
     CreateSnapshotRequest, CreateTemplateRequest, CreateVmRequest, CreateVolumeRequest, DataStore,
-    DeleteNetworkResult, ImportTemplateRequest, Membership, MembershipPeer, NetworkStore, NicStore,
-    NodeStore, ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore,
-    TemplateStore, UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest,
+    DeleteNetworkResult, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore,
+    ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore, TemplateStore,
+    UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateTemplateStatusRequest,
     UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore, VolumeStore,
 };
 
@@ -728,64 +728,35 @@ impl TemplateStore for RaftStore {
             node_id: req.node_id,
             name: req.name,
             size_bytes: req.size_bytes,
-        };
-
-        match self.write_command(cmd).await? {
-            Response::Template(data) => Ok(data),
-            Response::Error { message, .. } => Err(StoreError::Internal(message)),
-            _ => Err(StoreError::Internal("unexpected response".into())),
-        }
-    }
-
-    async fn import_template(&self, req: ImportTemplateRequest) -> Result<ImportJobData> {
-        let cmd = Command::CreateImportJob {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Utc::now().to_rfc3339(),
-            project_id: req.project_id,
-            node_id: req.node_id,
-            template_name: req.name,
-            url: req.url,
+            source_url: req.source_url,
             total_bytes: req.total_bytes,
         };
 
         match self.write_command(cmd).await? {
-            Response::ImportJob(data) => Ok(data),
+            Response::Template(data) => Ok(data),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
             Response::Error { message, .. } => Err(StoreError::Internal(message)),
             _ => Err(StoreError::Internal("unexpected response".into())),
         }
     }
 
-    async fn get_import_job(&self, id: &str) -> Result<Option<ImportJobData>> {
-        let node = self.node.read().await;
-        let state = node.get_state().await;
-        Ok(state.get_import_job(id).cloned())
-    }
-
-    async fn list_import_jobs(&self, state: Option<ImportJobState>) -> Result<Vec<ImportJobData>> {
-        let node = self.node.read().await;
-        let st = node.get_state().await;
-        Ok(st.list_import_jobs(state).into_iter().cloned().collect())
-    }
-
-    async fn update_import_job(
+    async fn update_template_status(
         &self,
         id: &str,
-        bytes_written: u64,
-        state: ImportJobState,
-        error: Option<String>,
-    ) -> Result<ImportJobData> {
-        let cmd = Command::UpdateImportJob {
+        req: UpdateTemplateStatusRequest,
+    ) -> Result<TemplateData> {
+        let cmd = Command::UpdateTemplateStatus {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: id.to_string(),
             timestamp: Utc::now().to_rfc3339(),
-            bytes_written,
-            state,
-            error,
+            phase: req.phase,
+            bytes_written: req.bytes_written,
+            size_bytes: req.size_bytes,
+            error: req.error,
         };
 
         match self.write_command(cmd).await? {
-            Response::ImportJob(data) => Ok(data),
+            Response::Template(data) => Ok(data),
             Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
             Response::Error { message, .. } => Err(StoreError::Internal(message)),
             _ => Err(StoreError::Internal("unexpected response".into())),

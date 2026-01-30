@@ -203,6 +203,7 @@ message VolumeSpec {
     uint64 size_bytes = 2;
     optional string template_id = 3;
     optional string attached_vm_id = 4;
+    optional string template_name = 5;
 }
 
 message VolumeStatus {

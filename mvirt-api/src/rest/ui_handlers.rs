@@ -19,9 +19,9 @@ use crate::command::{VmDesiredState, VmPhase, VmSpec, VmStatus};
 use crate::store::{
     CreateNetworkRequest as StoreCreateNetworkRequest, CreateNicRequest as StoreCreateNicRequest,
     CreateProjectRequest as StoreCreateProjectRequest,
-    CreateSnapshotRequest as StoreCreateSnapshotRequest, CreateVmRequest as StoreCreateVmRequest,
+    CreateSnapshotRequest as StoreCreateSnapshotRequest,
+    CreateTemplateRequest as StoreCreateTemplateRequest, CreateVmRequest as StoreCreateVmRequest,
     CreateVolumeRequest as StoreCreateVolumeRequest,
-    ImportTemplateRequest as StoreImportTemplateRequest,
     ResizeVolumeRequest as StoreResizeVolumeRequest,
     UpdateVmSpecRequest as StoreUpdateVmSpecRequest,
     UpdateVmStatusRequest as StoreUpdateVmStatusRequest,
@@ -621,15 +621,16 @@ pub async fn import_template(
     Path(project_id): Path<String>,
     Json(req): Json<UiImportTemplateRequest>,
 ) -> Result<Json<UiImportJob>, ApiError> {
-    let store_req = StoreImportTemplateRequest {
+    let store_req = StoreCreateTemplateRequest {
         project_id,
         node_id: req.node_id,
         name: req.name,
-        url: req.url,
+        size_bytes: 0,
+        source_url: Some(req.url),
         total_bytes: req.total_bytes,
     };
 
-    let data = state.store.import_template(store_req).await?;
+    let data = state.store.create_template(store_req).await?;
     state.audit.template_import_started(&data.id);
     Ok(Json(UiImportJob::from(data)))
 }
@@ -640,7 +641,7 @@ pub async fn get_import_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<UiImportJob>, ApiError> {
-    match state.store.get_import_job(&id).await? {
+    match state.store.get_template(&id).await? {
         Some(data) => Ok(Json(UiImportJob::from(data))),
         None => Err(ApiError {
             error: "Import job not found".to_string(),
