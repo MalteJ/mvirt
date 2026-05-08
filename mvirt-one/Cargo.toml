@@ -20,8 +20,9 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", 
 tokio-vsock = "0.5"
 
 # gRPC
-tonic = "0.12"
-prost = "0.13"
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
 
 # System
 nix = { version = "0.29", features = ["mount", "net", "socket", "ioctl", "signal", "fs", "sched", "process"] }
@@ -61,10 +62,10 @@ tokio-stream = "0.1"
 async-stream = "0.3"
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
-tonic = "0.12"
+tonic = "0.14"
 nix = { version = "0.29", features = ["user", "process", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

@@ -1,25 +1,9 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Compile proto files for all services mvirt-node connects to:
-    // - node.proto: API server (registration, heartbeat, spec streaming, status reporting)
-    // - mvirt.proto: mvirt-vmm (VM management)
-    // - zfs.proto: mvirt-zfs (volume/template management)
-    // - net.proto: mvirt-net (network/NIC/security group management)
-    tonic_build::configure()
+    // Only node.proto is compiled here (the agent↔api wire format).
+    // Daemon-side protos (vmm/zfs/net) come from the shared mvirt-daemon-protos crate.
+    tonic_prost_build::configure()
         .build_server(false) // Client only
         .build_client(true)
-        .compile_protos(
-            &[
-                "../mvirt-api/proto/node.proto",
-                "../mvirt-vmm/proto/mvirt.proto",
-                "../mvirt-zfs/proto/zfs.proto",
-                "../mvirt-net/proto/net.proto",
-            ],
-            &[
-                "../mvirt-api/proto",
-                "../mvirt-vmm/proto",
-                "../mvirt-zfs/proto",
-                "../mvirt-net/proto",
-            ],
-        )?;
+        .compile_protos(&["../mvirt-api/proto/node.proto"], &["../mvirt-api/proto"])?;
     Ok(())
 }

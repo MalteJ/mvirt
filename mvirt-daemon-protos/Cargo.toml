@@ -1,0 +1,14 @@
+[package]
+name = "mvirt-daemon-protos"
+version = "0.1.0"
+edition = "2024"
+description = "Generated gRPC client/server bindings for mvirt-vmm, mvirt-zfs, and mvirt-ebpf/mvirt-net daemons. Compiled in one place so api and node consume the same types."
+
+[dependencies]
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+
+[build-dependencies]
+tonic-prost-build = "0.14"

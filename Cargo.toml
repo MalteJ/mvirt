@@ -11,6 +11,7 @@ members = [
     "mvirt-node",
     "mvirt-ebpf",
     "mvirt-shipper",
+    "mvirt-daemon-protos",
 ]
 # Note: mvirt-ebpf/programs is excluded - requires nightly + bpfel target
 
