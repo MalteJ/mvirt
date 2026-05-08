@@ -136,6 +136,7 @@ async fn test_e2e_nginx() {
             dns_servers: vec!["1.1.1.1".into()],
             ntp_servers: vec![],
             is_public: true, // Enable internet access for pulling nginx image
+            id: String::new(),
         })
         .await
         .expect("Failed to create network")
@@ -320,6 +321,7 @@ async fn test_dhcp_network_info() {
             dns_servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             ntp_servers: vec![],
             is_public: false, // No internet needed for this test
+            id: String::new(),
         })
         .await
         .expect("Failed to create network")

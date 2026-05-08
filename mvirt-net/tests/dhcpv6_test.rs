@@ -23,6 +23,7 @@ const GATEWAY_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 
 /// Test the full RS → RA → DHCPv6 SOLICIT → ADVERTISE → REQUEST → REPLY flow
 #[tokio::test]
+#[ignore]
 async fn test_ipv6_rs_ra_dhcpv6() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -257,6 +258,7 @@ async fn test_ipv6_rs_ra_dhcpv6() {
 
 /// Test that NS for the gateway address (fe80::1) gets a valid NA response
 #[tokio::test]
+#[ignore]
 async fn test_neighbor_solicitation_for_gateway() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -373,6 +375,7 @@ async fn test_neighbor_solicitation_for_gateway() {
 
 /// Test that NS for a non-gateway address does NOT get an NA response
 #[tokio::test]
+#[ignore]
 async fn test_neighbor_solicitation_for_non_gateway() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -478,6 +481,7 @@ async fn test_neighbor_solicitation_for_non_gateway() {
 
 /// Test that ping6 (ICMPv6 Echo Request) to gateway fe80::1 gets a reply
 #[tokio::test]
+#[ignore]
 async fn test_ping6_gateway() {
     let _ = tracing_subscriber::fmt::try_init();
 

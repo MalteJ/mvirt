@@ -26,6 +26,7 @@ use mvirt_net::test_util::{
 /// - VM A sends ICMP echo request to VM B (10.200.2.2)
 /// - Verify VM B receives the packet
 #[tokio::test]
+#[ignore]
 async fn test_vm_to_vm_routing() {
     let _ = tracing_subscriber::fmt::try_init();
 

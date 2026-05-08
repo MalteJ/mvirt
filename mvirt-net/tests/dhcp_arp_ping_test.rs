@@ -22,7 +22,11 @@ const GATEWAY_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 const GATEWAY_IPV4_LINK_LOCAL: [u8; 4] = [169, 254, 0, 1];
 
 /// Test the full DHCP + ARP + Ping flow
+///
+/// Requires root privileges to create network devices.
+/// Run with: cargo test --package mvirt-net --test dhcp_arp_ping_test -- --ignored --nocapture
 #[tokio::test]
+#[ignore]
 async fn test_dhcp_arp_ping() {
     let _ = tracing_subscriber::fmt::try_init();
 
