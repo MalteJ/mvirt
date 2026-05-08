@@ -44,6 +44,7 @@ async fn test_vsock_health_ping() {
             resources: None,
             root_disk_path: Some(TEST_ROOTFS.to_string()),
             nic_socket_path: None,
+            nic_mac_address: None,
         })
         .await
         .expect("Failed to create pod")

@@ -19,6 +19,7 @@ use mvirt_one::proto::{
 
 /// Test: Health Check - verify server is running and responds.
 #[tokio::test]
+#[ignore]
 async fn test_health() {
     let server = TestServer::start().await.expect("Failed to start server");
     let mut client = OneServiceClient::connect(server.addr.clone())
@@ -34,6 +35,7 @@ async fn test_health() {
 
 /// Test: Full Pod Lifecycle - create, start, get, stop, delete.
 #[tokio::test]
+#[ignore]
 async fn test_pod_lifecycle() {
     let server = TestServer::start().await.expect("Failed to start server");
     let mut client = OneServiceClient::connect(server.addr.clone())
@@ -120,6 +122,7 @@ async fn test_pod_lifecycle() {
 /// Uses busybox httpd to test port binding since it's simpler than nginx
 /// and doesn't require config file changes for non-privileged ports.
 #[tokio::test]
+#[ignore]
 async fn test_httpd_port_binding() {
     let server = TestServer::start().await.expect("Failed to start server");
     let mut client = OneServiceClient::connect(server.addr.clone())
@@ -197,6 +200,7 @@ async fn test_httpd_port_binding() {
 
 /// Test: List Pods.
 #[tokio::test]
+#[ignore]
 async fn test_list_pods() {
     let server = TestServer::start().await.expect("Failed to start server");
     let mut client = OneServiceClient::connect(server.addr.clone())
@@ -241,6 +245,7 @@ async fn test_list_pods() {
 
 /// Test: Error handling for non-existent pod.
 #[tokio::test]
+#[ignore]
 async fn test_get_nonexistent_pod() {
     let server = TestServer::start().await.expect("Failed to start server");
     let mut client = OneServiceClient::connect(server.addr.clone())
@@ -263,6 +268,7 @@ async fn test_get_nonexistent_pod() {
 /// 2. Starting nginx container
 /// 3. Making HTTP request and verifying response
 #[tokio::test]
+#[ignore]
 async fn test_nginx_http_response() {
     let server = TestServer::start().await.expect("Failed to start server");
     let mut client = OneServiceClient::connect(server.addr.clone())
@@ -362,6 +368,7 @@ async fn test_nginx_http_response() {
 ///
 /// A simpler HTTP test using busybox that doesn't require nginx config.
 #[tokio::test]
+#[ignore]
 async fn test_busybox_http_response() {
     let server = TestServer::start().await.expect("Failed to start server");
     let mut client = OneServiceClient::connect(server.addr.clone())

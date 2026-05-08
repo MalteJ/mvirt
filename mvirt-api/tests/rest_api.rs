@@ -32,14 +32,14 @@ async fn test_get_version() {
 async fn test_get_cluster_info() {
     let server = common::TestServer::spawn().await;
 
-    let response = server.get("/cluster").await;
+    let response = server.get("/controlplane").await;
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();
     assert!(body["cluster_id"].is_string());
     assert!(body["leader_id"].is_number());
     assert!(body["current_term"].is_number());
-    assert!(body["nodes"].is_array());
+    assert!(body["peers"].is_array());
 
     server.shutdown().await;
 }
@@ -48,13 +48,13 @@ async fn test_get_cluster_info() {
 async fn test_get_membership() {
     let server = common::TestServer::spawn().await;
 
-    let response = server.get("/cluster/membership").await;
+    let response = server.get("/controlplane/membership").await;
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();
     assert!(body["voters"].is_array());
     assert!(body["learners"].is_array());
-    assert!(body["nodes"].is_array());
+    assert!(body["peers"].is_array());
 
     // Single node should be a voter
     let voters = body["voters"].as_array().unwrap();
@@ -69,9 +69,9 @@ async fn test_create_join_token() {
 
     let response = server
         .post_json(
-            "/cluster/join-token",
+            "/controlplane/join-token",
             &json!({
-                "node_id": 2,
+                "peer_id": 2,
                 "valid_for_secs": 60
             }),
         )
@@ -80,7 +80,7 @@ async fn test_create_join_token() {
 
     let body: Value = response.json().await.unwrap();
     assert!(body["token"].is_string());
-    assert_eq!(body["node_id"].as_u64().unwrap(), 2);
+    assert_eq!(body["peer_id"].as_u64().unwrap(), 2);
     assert_eq!(body["valid_for_secs"].as_u64().unwrap(), 60);
 
     server.shutdown().await;
@@ -90,7 +90,7 @@ async fn test_create_join_token() {
 async fn test_remove_node_not_found() {
     let server = common::TestServer::spawn().await;
 
-    let response = server.delete("/cluster/nodes/99").await;
+    let response = server.delete("/controlplane/peers/99").await;
     // Node removal returns 404 if not found, or may return other codes if not leader
     let status = response.status();
     let body: Value = response.json().await.unwrap();

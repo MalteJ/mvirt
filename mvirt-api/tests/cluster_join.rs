@@ -212,9 +212,9 @@ async fn test_e2e_single_node_join() {
     // 2. Create join token via REST API
     let token_resp = node1
         .post_json(
-            "/cluster/join-token",
+            "/controlplane/join-token",
             &json!({
-                "node_id": 2,
+                "peer_id": 2,
                 "valid_for_secs": 300
             }),
         )
@@ -228,7 +228,7 @@ async fn test_e2e_single_node_join() {
     let node2 = TestCluster::spawn_joining_node(2, &node1.raft_addr, token).await;
 
     // 4. Verify membership via REST
-    let membership_resp = node1.get("/cluster/membership").await;
+    let membership_resp = node1.get("/controlplane/membership").await;
     assert_eq!(membership_resp.status(), 200);
 
     let membership: Value = membership_resp.json().await.unwrap();
@@ -238,7 +238,7 @@ async fn test_e2e_single_node_join() {
     assert!(voters.iter().any(|v| v.as_u64() == Some(2)));
 
     // Also verify from node2's perspective
-    let node2_membership_resp = node2.get("/cluster/membership").await;
+    let node2_membership_resp = node2.get("/controlplane/membership").await;
     let node2_membership: Value = node2_membership_resp.json().await.unwrap();
     let node2_voters = node2_membership["voters"].as_array().unwrap();
     assert_eq!(node2_voters.len(), 2);
@@ -272,9 +272,9 @@ async fn test_e2e_joined_node_receives_data() {
     // Create join token
     let token_resp = node1
         .post_json(
-            "/cluster/join-token",
+            "/controlplane/join-token",
             &json!({
-                "node_id": 2
+                "peer_id": 2
             }),
         )
         .await;
@@ -310,9 +310,9 @@ async fn test_e2e_write_via_joined_node() {
     // Create join token and join node2
     let token_resp = node1
         .post_json(
-            "/cluster/join-token",
+            "/controlplane/join-token",
             &json!({
-                "node_id": 2
+                "peer_id": 2
             }),
         )
         .await;
@@ -368,9 +368,9 @@ async fn test_e2e_three_node_cluster_join() {
     // Create token for node2
     let token2_resp = node1
         .post_json(
-            "/cluster/join-token",
+            "/controlplane/join-token",
             &json!({
-                "node_id": 2
+                "peer_id": 2
             }),
         )
         .await;
@@ -384,9 +384,9 @@ async fn test_e2e_three_node_cluster_join() {
     // Create token for node3
     let token3_resp = node1
         .post_json(
-            "/cluster/join-token",
+            "/controlplane/join-token",
             &json!({
-                "node_id": 3
+                "peer_id": 3
             }),
         )
         .await;
@@ -401,7 +401,7 @@ async fn test_e2e_three_node_cluster_join() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Verify 3-node membership
-    let membership_resp = node1.get("/cluster/membership").await;
+    let membership_resp = node1.get("/controlplane/membership").await;
     let membership: Value = membership_resp.json().await.unwrap();
     let voters = membership["voters"].as_array().unwrap();
     assert_eq!(voters.len(), 3);
@@ -456,9 +456,9 @@ async fn test_e2e_cluster_survives_leader_death() {
     // Join nodes 2 and 3
     let token2_resp = node1
         .post_json(
-            "/cluster/join-token",
+            "/controlplane/join-token",
             &json!({
-                "node_id": 2
+                "peer_id": 2
             }),
         )
         .await;
@@ -469,9 +469,9 @@ async fn test_e2e_cluster_survives_leader_death() {
 
     let token3_resp = node1
         .post_json(
-            "/cluster/join-token",
+            "/controlplane/join-token",
             &json!({
-                "node_id": 3
+                "peer_id": 3
             }),
         )
         .await;
@@ -495,7 +495,7 @@ async fn test_e2e_cluster_survives_leader_death() {
     assert_eq!(pre_create.status(), 200);
 
     // Get cluster info to find leader
-    let cluster_resp = node1.get("/cluster").await;
+    let cluster_resp = node1.get("/controlplane").await;
     let cluster: Value = cluster_resp.json().await.unwrap();
     let leader_id = cluster["leader_id"].as_u64().unwrap();
 

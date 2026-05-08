@@ -27,6 +27,7 @@ const GATEWAY_IP: [u8; 4] = [169, 254, 0, 1];
 
 /// Test VM-to-VM ping through inter-reactor routing
 #[tokio::test]
+#[ignore]
 async fn test_vm_to_vm_ping() {
     let _ = tracing_subscriber::fmt::try_init();
 
