@@ -10,7 +10,7 @@ use super::Ctx;
 use crate::state::ApiState;
 
 pub fn list_ids(state: &ApiState) -> Vec<String> {
-    state.security_groups.keys().cloned().collect()
+    state.security_group_ids()
 }
 
 pub async fn reconcile(_ctx: &Ctx, id: &str) -> Result<()> {

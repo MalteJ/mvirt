@@ -11,7 +11,7 @@ use super::Ctx;
 use crate::state::ApiState;
 
 pub fn list_ids(state: &ApiState) -> Vec<String> {
-    state.templates.keys().cloned().collect()
+    state.template_ids()
 }
 
 pub async fn reconcile(_ctx: &Ctx, id: &str) -> Result<()> {

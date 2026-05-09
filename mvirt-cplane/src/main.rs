@@ -132,8 +132,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         raft_config: Some(config_with_snapshot_threshold(1000)),
     };
 
-    let mut node: RaftNode<Command, Response, ApiState> =
-        RaftNode::new(config, ApiState::default()).await?;
+    let api_state = if args.dev {
+        ApiState::default()
+    } else {
+        ApiState::open(&args.data_dir.join("state.redb"))?
+    };
+
+    let mut node: RaftNode<Command, Response, ApiState> = RaftNode::new(config, api_state).await?;
     node.start().await?;
 
     if let Some(leader_addr) = &args.join {

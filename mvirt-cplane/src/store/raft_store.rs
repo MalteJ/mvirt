@@ -81,25 +81,25 @@ impl NodeStore for RaftStore {
     async fn list_nodes(&self) -> Result<Vec<NodeData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_nodes().into_iter().cloned().collect())
+        Ok(state.list_nodes())
     }
 
     async fn list_online_nodes(&self) -> Result<Vec<NodeData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_online_nodes().into_iter().cloned().collect())
+        Ok(state.list_online_nodes())
     }
 
     async fn get_node(&self, id: &str) -> Result<Option<NodeData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_node(id).cloned())
+        Ok(state.get_node(id))
     }
 
     async fn get_node_by_name(&self, name: &str) -> Result<Option<NodeData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_node_by_name(name).cloned())
+        Ok(state.get_node_by_name(name))
     }
 
     async fn register_node(&self, req: RegisterNodeRequest) -> Result<NodeData> {
@@ -158,29 +158,25 @@ impl NetworkStore for RaftStore {
     async fn list_networks(&self) -> Result<Vec<NetworkData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_networks().into_iter().cloned().collect())
+        Ok(state.list_networks())
     }
 
     async fn list_networks_by_project(&self, project_id: &str) -> Result<Vec<NetworkData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state
-            .list_networks_by_project(project_id)
-            .into_iter()
-            .cloned()
-            .collect())
+        Ok(state.list_networks_by_project(project_id))
     }
 
     async fn get_network(&self, id: &str) -> Result<Option<NetworkData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_network(id).cloned())
+        Ok(state.get_network(id))
     }
 
     async fn get_network_by_name(&self, name: &str) -> Result<Option<NetworkData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_network_by_name(name).cloned())
+        Ok(state.get_network_by_name(name))
     }
 
     async fn create_network(&self, req: CreateNetworkRequest) -> Result<NetworkData> {
@@ -249,29 +245,25 @@ impl NicStore for RaftStore {
     async fn list_nics(&self, network_id: Option<&str>) -> Result<Vec<NicData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_nics(network_id).into_iter().cloned().collect())
+        Ok(state.list_nics(network_id))
     }
 
     async fn list_nics_by_project(&self, project_id: &str) -> Result<Vec<NicData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state
-            .list_nics_by_project(project_id)
-            .into_iter()
-            .cloned()
-            .collect())
+        Ok(state.list_nics_by_project(project_id))
     }
 
     async fn get_nic(&self, id: &str) -> Result<Option<NicData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_nic(id).cloned())
+        Ok(state.get_nic(id))
     }
 
     async fn get_nic_by_name(&self, name: &str) -> Result<Option<NicData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_nic_by_name(name).cloned())
+        Ok(state.get_nic_by_name(name))
     }
 
     async fn create_nic(&self, req: CreateNicRequest) -> Result<NicData> {
@@ -366,35 +358,31 @@ impl VmStore for RaftStore {
     async fn list_vms(&self) -> Result<Vec<VmData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_vms(None).into_iter().cloned().collect())
+        Ok(state.list_vms(None))
     }
 
     async fn list_vms_by_project(&self, project_id: &str) -> Result<Vec<VmData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state
-            .list_vms_by_project(project_id)
-            .into_iter()
-            .cloned()
-            .collect())
+        Ok(state.list_vms_by_project(project_id))
     }
 
     async fn list_vms_by_node(&self, node_id: &str) -> Result<Vec<VmData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_vms(Some(node_id)).into_iter().cloned().collect())
+        Ok(state.list_vms(Some(node_id)))
     }
 
     async fn get_vm(&self, id: &str) -> Result<Option<VmData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_vm(id).cloned())
+        Ok(state.get_vm(id))
     }
 
     async fn get_vm_by_name(&self, name: &str) -> Result<Option<VmData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_vm_by_name(name).cloned())
+        Ok(state.get_vm_by_name(name))
     }
 
     async fn create_vm(&self, req: CreateVmRequest) -> Result<VmData> {
@@ -563,19 +551,19 @@ impl ProjectStore for RaftStore {
     async fn list_projects(&self) -> Result<Vec<ProjectData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_projects().into_iter().cloned().collect())
+        Ok(state.list_projects())
     }
 
     async fn get_project(&self, id: &str) -> Result<Option<ProjectData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_project(id).cloned())
+        Ok(state.get_project(id))
     }
 
     async fn get_project_by_name(&self, name: &str) -> Result<Option<ProjectData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_project_by_name(name).cloned())
+        Ok(state.get_project_by_name(name))
     }
 
     async fn create_project(&self, req: CreateProjectRequest) -> Result<ProjectData> {
@@ -619,17 +607,13 @@ impl VolumeStore for RaftStore {
     ) -> Result<Vec<VolumeData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state
-            .list_volumes(project_id, node_id)
-            .into_iter()
-            .cloned()
-            .collect())
+        Ok(state.list_volumes(project_id, node_id))
     }
 
     async fn get_volume(&self, id: &str) -> Result<Option<VolumeData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_volume(id).cloned())
+        Ok(state.get_volume(id))
     }
 
     async fn create_volume(&self, req: CreateVolumeRequest) -> Result<VolumeData> {
@@ -712,23 +696,19 @@ impl TemplateStore for RaftStore {
     async fn list_templates(&self, node_id: Option<&str>) -> Result<Vec<TemplateData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_templates(node_id).into_iter().cloned().collect())
+        Ok(state.list_templates(node_id))
     }
 
     async fn list_templates_by_project(&self, project_id: &str) -> Result<Vec<TemplateData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state
-            .list_templates_by_project(project_id)
-            .into_iter()
-            .cloned()
-            .collect())
+        Ok(state.list_templates_by_project(project_id))
     }
 
     async fn get_template(&self, id: &str) -> Result<Option<TemplateData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_template(id).cloned())
+        Ok(state.get_template(id))
     }
 
     async fn create_template(&self, req: CreateTemplateRequest) -> Result<TemplateData> {
@@ -785,12 +765,8 @@ impl SecurityGroupStore for RaftStore {
         let node = self.node.read().await;
         let state = node.get_state().await;
         match project_id {
-            Some(pid) => Ok(state
-                .list_security_groups_by_project(pid)
-                .into_iter()
-                .cloned()
-                .collect()),
-            None => Ok(state.list_security_groups().into_iter().cloned().collect()),
+            Some(pid) => Ok(state.list_security_groups_by_project(pid)),
+            None => Ok(state.list_security_groups()),
         }
     }
 
@@ -800,7 +776,7 @@ impl SecurityGroupStore for RaftStore {
     ) -> Result<Option<crate::command::SecurityGroupData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_security_group(id).cloned())
+        Ok(state.get_security_group(id))
     }
 
     async fn create_security_group(

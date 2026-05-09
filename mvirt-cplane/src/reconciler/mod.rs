@@ -128,12 +128,12 @@ impl Controller {
     async fn resync_all(&self) {
         let state = self.ctx.store.snapshot().await;
         debug!(
-            volumes = state.volumes.len(),
-            vms = state.vms.len(),
-            nics = state.nics.len(),
-            networks = state.networks.len(),
-            templates = state.templates.len(),
-            security_groups = state.security_groups.len(),
+            volumes = state.volume_count(),
+            vms = state.vm_count(),
+            nics = state.nic_count(),
+            networks = state.network_count(),
+            templates = state.template_count(),
+            security_groups = state.security_group_count(),
             "resync"
         );
         let ctx = &self.ctx;

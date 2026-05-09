@@ -2,9 +2,15 @@
 
 use lru::LruCache;
 use mraft::StateMachine;
+use redb::{
+    ReadTransaction, ReadableTable, ReadableTableMetadata, TableDefinition, WriteTransaction,
+};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::path::Path;
+use std::sync::Arc;
 
 #[cfg(test)]
 use crate::command::VolumePhase;
@@ -15,210 +21,392 @@ use crate::command::{
 };
 use crate::store::Event;
 
-/// API Server state - replicated across all nodes via Raft.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiState {
-    pub nodes: HashMap<String, NodeData>,
-    pub networks: HashMap<String, NetworkData>,
-    pub nics: HashMap<String, NicData>,
-    pub vms: HashMap<String, VmData>,
-    pub projects: HashMap<String, ProjectData>,
-    pub volumes: HashMap<String, VolumeData>,
-    pub templates: HashMap<String, TemplateData>,
-    pub security_groups: HashMap<String, SecurityGroupData>,
-    /// Idempotency cache for request deduplication
-    #[serde(skip)]
-    applied_requests: Option<LruCache<String, Response>>,
+// =============================================================================
+// redb schema
+// =============================================================================
+
+const NODES: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
+const NETWORKS: TableDefinition<&str, &[u8]> = TableDefinition::new("networks");
+const NICS: TableDefinition<&str, &[u8]> = TableDefinition::new("nics");
+const VMS: TableDefinition<&str, &[u8]> = TableDefinition::new("vms");
+const PROJECTS: TableDefinition<&str, &[u8]> = TableDefinition::new("projects");
+const VOLUMES: TableDefinition<&str, &[u8]> = TableDefinition::new("volumes");
+const TEMPLATES: TableDefinition<&str, &[u8]> = TableDefinition::new("templates");
+const SECURITY_GROUPS: TableDefinition<&str, &[u8]> = TableDefinition::new("security_groups");
+
+const ALL_TABLES: &[TableDefinition<&str, &[u8]>] = &[
+    NODES,
+    NETWORKS,
+    NICS,
+    VMS,
+    PROJECTS,
+    VOLUMES,
+    TEMPLATES,
+    SECURITY_GROUPS,
+];
+
+// =============================================================================
+// redb helpers (bincode-encoded values)
+//
+// All `expect`s fire only on programmer error (table not registered, corrupt
+// bincode payload). Operational errors (disk full, etc.) are rare enough that
+// failing fast is preferable to silently dropping commands.
+// =============================================================================
+
+fn read_get<V: DeserializeOwned>(
+    txn: &ReadTransaction,
+    table: TableDefinition<&str, &[u8]>,
+    key: &str,
+) -> Option<V> {
+    let t = txn.open_table(table).expect("open_table");
+    let g = t.get(key).expect("get")?;
+    Some(bincode::deserialize(g.value()).expect("decode"))
 }
 
-impl Default for ApiState {
-    fn default() -> Self {
+fn read_list<V: DeserializeOwned>(
+    txn: &ReadTransaction,
+    table: TableDefinition<&str, &[u8]>,
+) -> Vec<V> {
+    let t = txn.open_table(table).expect("open_table");
+    t.iter()
+        .expect("iter")
+        .map(|r| {
+            let (_, v) = r.expect("row");
+            bincode::deserialize(v.value()).expect("decode")
+        })
+        .collect()
+}
+
+fn read_list_with_keys<V: DeserializeOwned>(
+    txn: &ReadTransaction,
+    table: TableDefinition<&str, &[u8]>,
+) -> HashMap<String, V> {
+    let t = txn.open_table(table).expect("open_table");
+    t.iter()
+        .expect("iter")
+        .map(|r| {
+            let (k, v) = r.expect("row");
+            (
+                k.value().to_string(),
+                bincode::deserialize(v.value()).expect("decode"),
+            )
+        })
+        .collect()
+}
+
+fn read_keys(txn: &ReadTransaction, table: TableDefinition<&str, &[u8]>) -> Vec<String> {
+    let t = txn.open_table(table).expect("open_table");
+    t.iter()
+        .expect("iter")
+        .map(|r| {
+            let (k, _) = r.expect("row");
+            k.value().to_string()
+        })
+        .collect()
+}
+
+fn read_count(txn: &ReadTransaction, table: TableDefinition<&str, &[u8]>) -> usize {
+    let t = txn.open_table(table).expect("open_table");
+    t.len().expect("len") as usize
+}
+
+fn txn_get<V: DeserializeOwned>(
+    txn: &WriteTransaction,
+    table: TableDefinition<&str, &[u8]>,
+    key: &str,
+) -> Option<V> {
+    let t = txn.open_table(table).expect("open_table");
+    let g = t.get(key).expect("get")?;
+    Some(bincode::deserialize(g.value()).expect("decode"))
+}
+
+fn txn_has(txn: &WriteTransaction, table: TableDefinition<&str, &[u8]>, key: &str) -> bool {
+    let t = txn.open_table(table).expect("open_table");
+    t.get(key).expect("get").is_some()
+}
+
+fn txn_list<V: DeserializeOwned>(
+    txn: &WriteTransaction,
+    table: TableDefinition<&str, &[u8]>,
+) -> Vec<V> {
+    let t = txn.open_table(table).expect("open_table");
+    t.iter()
+        .expect("iter")
+        .map(|r| {
+            let (_, v) = r.expect("row");
+            bincode::deserialize(v.value()).expect("decode")
+        })
+        .collect()
+}
+
+fn txn_put<V: Serialize>(
+    txn: &WriteTransaction,
+    table: TableDefinition<&str, &[u8]>,
+    key: &str,
+    val: &V,
+) {
+    let bytes = bincode::serialize(val).expect("encode");
+    let mut t = txn.open_table(table).expect("open_table");
+    t.insert(key, bytes.as_slice()).expect("insert");
+}
+
+fn txn_delete(txn: &WriteTransaction, table: TableDefinition<&str, &[u8]>, key: &str) {
+    let mut t = txn.open_table(table).expect("open_table");
+    t.remove(key).expect("remove");
+}
+
+/// API Server state - replicated across all nodes via Raft.
+///
+/// Storage: redb tables. Reads open short read transactions; writes happen
+/// inside the apply path. `Default` opens an in-memory database (used by tests
+/// and dev mode); `open(path)` opens a file-backed one for production.
+pub struct ApiState {
+    db: Arc<redb::Database>,
+    applied_requests: Arc<parking_lot::Mutex<LruCache<String, Response>>>,
+}
+
+impl std::fmt::Debug for ApiState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiState").finish_non_exhaustive()
+    }
+}
+
+impl Clone for ApiState {
+    fn clone(&self) -> Self {
         Self {
-            nodes: HashMap::new(),
-            networks: HashMap::new(),
-            nics: HashMap::new(),
-            vms: HashMap::new(),
-            projects: HashMap::new(),
-            volumes: HashMap::new(),
-            templates: HashMap::new(),
-            security_groups: HashMap::new(),
-            applied_requests: Some(LruCache::new(NonZeroUsize::new(1000).unwrap())),
+            db: Arc::clone(&self.db),
+            applied_requests: Arc::clone(&self.applied_requests),
         }
     }
 }
 
+impl Default for ApiState {
+    fn default() -> Self {
+        let db = redb::Builder::new()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .expect("create in-memory redb");
+        Self::with_db(db)
+    }
+}
+
 impl ApiState {
+    /// Open a file-backed redb database for production use.
+    pub fn open(path: &Path) -> Result<Self, redb::DatabaseError> {
+        let db = redb::Database::create(path)?;
+        Ok(Self::with_db(db))
+    }
+
+    fn with_db(db: redb::Database) -> Self {
+        let s = Self {
+            db: Arc::new(db),
+            applied_requests: Arc::new(parking_lot::Mutex::new(LruCache::new(
+                NonZeroUsize::new(1000).unwrap(),
+            ))),
+        };
+        s.init_tables();
+        s
+    }
+
+    fn init_tables(&self) {
+        let txn = self.db.begin_write().expect("begin_write init");
+        for table in ALL_TABLES {
+            txn.open_table(*table).expect("open_table init");
+        }
+        txn.commit().expect("commit init");
+    }
+
+    fn read_txn(&self) -> ReadTransaction {
+        self.db.begin_read().expect("begin_read")
+    }
+
     // =========================================================================
     // Node queries
     // =========================================================================
 
-    /// Get a node by ID
-    pub fn get_node(&self, id: &str) -> Option<&NodeData> {
-        self.nodes.get(id)
+    pub fn get_node(&self, id: &str) -> Option<NodeData> {
+        read_get(&self.read_txn(), NODES, id)
     }
 
-    /// Get a node by name
-    pub fn get_node_by_name(&self, name: &str) -> Option<&NodeData> {
-        self.nodes.values().find(|n| n.name == name)
+    pub fn get_node_by_name(&self, name: &str) -> Option<NodeData> {
+        read_list::<NodeData>(&self.read_txn(), NODES)
+            .into_iter()
+            .find(|n| n.name == name)
     }
 
-    /// List all nodes
-    pub fn list_nodes(&self) -> Vec<&NodeData> {
-        self.nodes.values().collect()
+    pub fn list_nodes(&self) -> Vec<NodeData> {
+        read_list(&self.read_txn(), NODES)
     }
 
-    /// List online nodes only
-    pub fn list_online_nodes(&self) -> Vec<&NodeData> {
-        self.nodes
-            .values()
+    pub fn list_online_nodes(&self) -> Vec<NodeData> {
+        read_list::<NodeData>(&self.read_txn(), NODES)
+            .into_iter()
             .filter(|n| n.status == NodeStatus::Online)
             .collect()
+    }
+
+    pub fn node_count(&self) -> usize {
+        read_count(&self.read_txn(), NODES)
+    }
+
+    pub fn node_ids(&self) -> Vec<String> {
+        read_keys(&self.read_txn(), NODES)
     }
 
     // =========================================================================
     // Network queries
     // =========================================================================
 
-    /// Get a network by ID
-    pub fn get_network(&self, id: &str) -> Option<&NetworkData> {
-        self.networks.get(id)
+    pub fn get_network(&self, id: &str) -> Option<NetworkData> {
+        read_get(&self.read_txn(), NETWORKS, id)
     }
 
-    /// Get a network by name
-    pub fn get_network_by_name(&self, name: &str) -> Option<&NetworkData> {
-        self.networks.values().find(|n| n.name == name)
+    pub fn get_network_by_name(&self, name: &str) -> Option<NetworkData> {
+        read_list::<NetworkData>(&self.read_txn(), NETWORKS)
+            .into_iter()
+            .find(|n| n.name == name)
     }
 
-    /// List all networks
-    pub fn list_networks(&self) -> Vec<&NetworkData> {
-        self.networks.values().collect()
+    pub fn list_networks(&self) -> Vec<NetworkData> {
+        read_list(&self.read_txn(), NETWORKS)
     }
 
-    /// List networks by project
-    pub fn list_networks_by_project(&self, project_id: &str) -> Vec<&NetworkData> {
-        self.networks
-            .values()
+    pub fn list_networks_by_project(&self, project_id: &str) -> Vec<NetworkData> {
+        read_list::<NetworkData>(&self.read_txn(), NETWORKS)
+            .into_iter()
             .filter(|n| n.project_id == project_id)
             .collect()
     }
 
-    /// Get a NIC by ID
-    pub fn get_nic(&self, id: &str) -> Option<&NicData> {
-        self.nics.get(id)
+    pub fn network_count(&self) -> usize {
+        read_count(&self.read_txn(), NETWORKS)
     }
 
-    /// Get a NIC by name
-    pub fn get_nic_by_name(&self, name: &str) -> Option<&NicData> {
-        self.nics
-            .values()
+    pub fn network_ids(&self) -> Vec<String> {
+        read_keys(&self.read_txn(), NETWORKS)
+    }
+
+    // =========================================================================
+    // NIC queries
+    // =========================================================================
+
+    pub fn get_nic(&self, id: &str) -> Option<NicData> {
+        read_get(&self.read_txn(), NICS, id)
+    }
+
+    pub fn get_nic_by_name(&self, name: &str) -> Option<NicData> {
+        read_list::<NicData>(&self.read_txn(), NICS)
+            .into_iter()
             .find(|n| n.spec.name.as_deref() == Some(name))
     }
 
-    /// List all NICs, optionally filtered by network
-    pub fn list_nics(&self, network_id: Option<&str>) -> Vec<&NicData> {
+    pub fn list_nics(&self, network_id: Option<&str>) -> Vec<NicData> {
+        let all = read_list::<NicData>(&self.read_txn(), NICS);
         match network_id {
-            Some(net_id) => self
-                .nics
-                .values()
+            Some(net_id) => all
+                .into_iter()
                 .filter(|n| n.spec.network_id == net_id)
                 .collect(),
-            None => self.nics.values().collect(),
+            None => all,
         }
     }
 
-    /// List NICs by project
-    pub fn list_nics_by_project(&self, project_id: &str) -> Vec<&NicData> {
-        self.nics
-            .values()
+    pub fn list_nics_by_project(&self, project_id: &str) -> Vec<NicData> {
+        read_list::<NicData>(&self.read_txn(), NICS)
+            .into_iter()
             .filter(|n| n.spec.project_id == project_id)
             .collect()
+    }
+
+    pub fn nic_count(&self) -> usize {
+        read_count(&self.read_txn(), NICS)
+    }
+
+    pub fn nic_ids(&self) -> Vec<String> {
+        read_keys(&self.read_txn(), NICS)
     }
 
     // =========================================================================
     // VM queries
     // =========================================================================
 
-    /// Get a VM by ID
-    pub fn get_vm(&self, id: &str) -> Option<&VmData> {
-        self.vms.get(id)
+    pub fn get_vm(&self, id: &str) -> Option<VmData> {
+        read_get(&self.read_txn(), VMS, id)
     }
 
-    /// Get a VM by name
-    pub fn get_vm_by_name(&self, name: &str) -> Option<&VmData> {
-        self.vms.values().find(|v| v.spec.name == name)
+    pub fn get_vm_by_name(&self, name: &str) -> Option<VmData> {
+        read_list::<VmData>(&self.read_txn(), VMS)
+            .into_iter()
+            .find(|v| v.spec.name == name)
     }
 
-    /// List all VMs, optionally filtered by node
-    pub fn list_vms(&self, node_id: Option<&str>) -> Vec<&VmData> {
+    pub fn list_vms(&self, node_id: Option<&str>) -> Vec<VmData> {
+        let all = read_list::<VmData>(&self.read_txn(), VMS);
         match node_id {
-            Some(nid) => self
-                .vms
-                .values()
+            Some(nid) => all
+                .into_iter()
                 .filter(|v| v.status.node_id.as_deref() == Some(nid))
                 .collect(),
-            None => self.vms.values().collect(),
+            None => all,
         }
     }
 
-    /// List VMs by phase
-    pub fn list_vms_by_phase(&self, phase: VmPhase) -> Vec<&VmData> {
-        self.vms
-            .values()
+    pub fn list_vms_by_phase(&self, phase: VmPhase) -> Vec<VmData> {
+        read_list::<VmData>(&self.read_txn(), VMS)
+            .into_iter()
             .filter(|v| v.status.phase == phase)
             .collect()
     }
 
-    /// List VMs by project
-    pub fn list_vms_by_project(&self, project_id: &str) -> Vec<&VmData> {
-        self.vms
-            .values()
+    pub fn list_vms_by_project(&self, project_id: &str) -> Vec<VmData> {
+        read_list::<VmData>(&self.read_txn(), VMS)
+            .into_iter()
             .filter(|v| v.spec.project_id == project_id)
             .collect()
+    }
+
+    pub fn vm_count(&self) -> usize {
+        read_count(&self.read_txn(), VMS)
+    }
+
+    pub fn vm_ids(&self) -> Vec<String> {
+        read_keys(&self.read_txn(), VMS)
     }
 
     // =========================================================================
     // Project queries
     // =========================================================================
 
-    /// Get a project by ID
-    pub fn get_project(&self, id: &str) -> Option<&ProjectData> {
-        self.projects.get(id)
+    pub fn get_project(&self, id: &str) -> Option<ProjectData> {
+        read_get(&self.read_txn(), PROJECTS, id)
     }
 
-    /// Get a project by name
-    pub fn get_project_by_name(&self, name: &str) -> Option<&ProjectData> {
-        self.projects.values().find(|p| p.name == name)
+    pub fn get_project_by_name(&self, name: &str) -> Option<ProjectData> {
+        read_list::<ProjectData>(&self.read_txn(), PROJECTS)
+            .into_iter()
+            .find(|p| p.name == name)
     }
 
-    /// List all projects
-    pub fn list_projects(&self) -> Vec<&ProjectData> {
-        self.projects.values().collect()
+    pub fn list_projects(&self) -> Vec<ProjectData> {
+        read_list(&self.read_txn(), PROJECTS)
     }
 
     // =========================================================================
     // Volume queries
     // =========================================================================
 
-    /// Get a volume by ID
-    pub fn get_volume(&self, id: &str) -> Option<&VolumeData> {
-        self.volumes.get(id)
+    pub fn get_volume(&self, id: &str) -> Option<VolumeData> {
+        read_get(&self.read_txn(), VOLUMES, id)
     }
 
-    /// Get a volume by name within a project
-    pub fn get_volume_by_name(&self, project_id: &str, name: &str) -> Option<&VolumeData> {
-        self.volumes
-            .values()
+    pub fn get_volume_by_name(&self, project_id: &str, name: &str) -> Option<VolumeData> {
+        read_list::<VolumeData>(&self.read_txn(), VOLUMES)
+            .into_iter()
             .find(|v| v.spec.project_id == project_id && v.spec.name == name)
     }
 
-    /// List all volumes, optionally filtered by project or node
-    pub fn list_volumes(
-        &self,
-        project_id: Option<&str>,
-        node_id: Option<&str>,
-    ) -> Vec<&VolumeData> {
-        self.volumes
-            .values()
+    pub fn list_volumes(&self, project_id: Option<&str>, node_id: Option<&str>) -> Vec<VolumeData> {
+        read_list::<VolumeData>(&self.read_txn(), VOLUMES)
+            .into_iter()
             .filter(|v| {
                 project_id.is_none_or(|pid| v.spec.project_id == pid)
                     && node_id.is_none_or(|nid| v.spec.node_id == nid)
@@ -226,64 +414,76 @@ impl ApiState {
             .collect()
     }
 
+    pub fn volume_count(&self) -> usize {
+        read_count(&self.read_txn(), VOLUMES)
+    }
+
+    pub fn volume_ids(&self) -> Vec<String> {
+        read_keys(&self.read_txn(), VOLUMES)
+    }
+
     // =========================================================================
     // Template queries
     // =========================================================================
 
-    /// Get a template by ID
-    pub fn get_template(&self, id: &str) -> Option<&TemplateData> {
-        self.templates.get(id)
+    pub fn get_template(&self, id: &str) -> Option<TemplateData> {
+        read_get(&self.read_txn(), TEMPLATES, id)
     }
 
-    /// Get a template by name
-    pub fn get_template_by_name(&self, name: &str) -> Option<&TemplateData> {
-        self.templates.values().find(|t| t.spec.name == name)
+    pub fn get_template_by_name(&self, name: &str) -> Option<TemplateData> {
+        read_list::<TemplateData>(&self.read_txn(), TEMPLATES)
+            .into_iter()
+            .find(|t| t.spec.name == name)
     }
 
-    /// List all templates, optionally filtered by node
-    pub fn list_templates(&self, node_id: Option<&str>) -> Vec<&TemplateData> {
+    pub fn list_templates(&self, node_id: Option<&str>) -> Vec<TemplateData> {
+        let all = read_list::<TemplateData>(&self.read_txn(), TEMPLATES);
         match node_id {
-            Some(nid) => self
-                .templates
-                .values()
-                .filter(|t| t.spec.node_id == nid)
-                .collect(),
-            None => self.templates.values().collect(),
+            Some(nid) => all.into_iter().filter(|t| t.spec.node_id == nid).collect(),
+            None => all,
         }
     }
 
-    /// List templates by project
-    pub fn list_templates_by_project(&self, project_id: &str) -> Vec<&TemplateData> {
-        self.templates
-            .values()
+    pub fn list_templates_by_project(&self, project_id: &str) -> Vec<TemplateData> {
+        read_list::<TemplateData>(&self.read_txn(), TEMPLATES)
+            .into_iter()
             .filter(|t| t.spec.project_id == project_id)
             .collect()
+    }
+
+    pub fn template_count(&self) -> usize {
+        read_count(&self.read_txn(), TEMPLATES)
+    }
+
+    pub fn template_ids(&self) -> Vec<String> {
+        read_keys(&self.read_txn(), TEMPLATES)
     }
 
     // =========================================================================
     // Security Group queries
     // =========================================================================
 
-    pub fn get_security_group(&self, id: &str) -> Option<&SecurityGroupData> {
-        self.security_groups.get(id)
+    pub fn get_security_group(&self, id: &str) -> Option<SecurityGroupData> {
+        read_get(&self.read_txn(), SECURITY_GROUPS, id)
     }
 
-    pub fn list_security_groups(&self) -> Vec<&SecurityGroupData> {
-        self.security_groups.values().collect()
+    pub fn list_security_groups(&self) -> Vec<SecurityGroupData> {
+        read_list(&self.read_txn(), SECURITY_GROUPS)
     }
 
-    pub fn list_security_groups_by_project(&self, project_id: &str) -> Vec<&SecurityGroupData> {
-        self.security_groups
-            .values()
+    pub fn list_security_groups_by_project(&self, project_id: &str) -> Vec<SecurityGroupData> {
+        read_list::<SecurityGroupData>(&self.read_txn(), SECURITY_GROUPS)
+            .into_iter()
             .filter(|sg| sg.project_id == project_id)
             .collect()
     }
 
-    /// Ensure the idempotency cache is initialized (after deserialization)
-    fn ensure_cache(&mut self) {
-        if self.applied_requests.is_none() {
-            self.applied_requests = Some(LruCache::new(NonZeroUsize::new(1000).unwrap()));
-        }
+    pub fn security_group_count(&self) -> usize {
+        read_count(&self.read_txn(), SECURITY_GROUPS)
+    }
+
+    pub fn security_group_ids(&self) -> Vec<String> {
+        read_keys(&self.read_txn(), SECURITY_GROUPS)
     }
 }
 
@@ -291,13 +491,9 @@ impl StateMachine<Command, Response> for ApiState {
     type Event = Event;
 
     fn apply(&mut self, cmd: Command) -> (Response, Vec<Self::Event>) {
-        self.ensure_cache();
-
         // Check idempotency cache
-        if let Some(cache) = &self.applied_requests
-            && let Some(response) = cache.peek(cmd.request_id())
-        {
-            return (response.clone(), vec![]);
+        if let Some(response) = self.applied_requests.lock().peek(cmd.request_id()).cloned() {
+            return (response, vec![]);
         }
 
         let (response, events) = match cmd.clone() {
@@ -313,8 +509,11 @@ impl StateMachine<Command, Response> for ApiState {
                 labels,
                 ..
             } => {
-                // Check for duplicate name
-                if self.nodes.values().any(|n| n.name == name) {
+                let txn = self.db.begin_write().expect("begin");
+                if txn_list::<NodeData>(&txn, NODES)
+                    .iter()
+                    .any(|n| n.name == name)
+                {
                     return (
                         Response::Error {
                             code: 409,
@@ -324,9 +523,8 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                // Check for duplicate ID (idempotency)
-                if self.nodes.contains_key(&id) {
-                    return (Response::Node(self.nodes.get(&id).unwrap().clone()), vec![]);
+                if let Some(existing) = txn_get::<NodeData>(&txn, NODES, &id) {
+                    return (Response::Node(existing), vec![]);
                 }
 
                 let node = NodeData {
@@ -341,7 +539,8 @@ impl StateMachine<Command, Response> for ApiState {
                     updated_at: timestamp,
                 };
 
-                self.nodes.insert(id, node.clone());
+                txn_put(&txn, NODES, &id, &node);
+                txn.commit().expect("commit");
                 (
                     Response::Node(node.clone()),
                     vec![Event::NodeRegistered(node)],
@@ -354,49 +553,56 @@ impl StateMachine<Command, Response> for ApiState {
                 status,
                 resources,
                 ..
-            } => match self.nodes.get(&node_id).cloned() {
-                Some(old_node) => {
-                    let node = self.nodes.get_mut(&node_id).unwrap();
-                    node.status = status;
-                    if let Some(res) = resources {
-                        node.resources = res;
-                    }
-                    node.last_heartbeat = timestamp.clone();
-                    node.updated_at = timestamp;
-                    let new_node = node.clone();
-                    (
-                        Response::Node(new_node.clone()),
-                        vec![Event::NodeUpdated {
-                            id: node_id,
-                            old: old_node,
-                            new: new_node,
-                        }],
-                    )
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(old_node) = txn_get::<NodeData>(&txn, NODES, &node_id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Node '{}' not found", node_id),
+                        },
+                        vec![],
+                    );
+                };
+                let mut new_node = old_node.clone();
+                new_node.status = status;
+                if let Some(res) = resources {
+                    new_node.resources = res;
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Node '{}' not found", node_id),
-                    },
-                    vec![],
-                ),
-            },
+                new_node.last_heartbeat = timestamp.clone();
+                new_node.updated_at = timestamp;
+                txn_put(&txn, NODES, &node_id, &new_node);
+                txn.commit().expect("commit");
+                (
+                    Response::Node(new_node.clone()),
+                    vec![Event::NodeUpdated {
+                        id: node_id,
+                        old: old_node,
+                        new: new_node,
+                    }],
+                )
+            }
 
-            Command::DeregisterNode { node_id, .. } => match self.nodes.remove(&node_id) {
-                Some(_) => (
+            Command::DeregisterNode { node_id, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                if !txn_has(&txn, NODES, &node_id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Node '{}' not found", node_id),
+                        },
+                        vec![],
+                    );
+                }
+                txn_delete(&txn, NODES, &node_id);
+                txn.commit().expect("commit");
+                (
                     Response::Deleted {
                         id: node_id.clone(),
                     },
                     vec![Event::NodeDeregistered { id: node_id }],
-                ),
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Node '{}' not found", node_id),
-                    },
-                    vec![],
-                ),
-            },
+                )
+            }
 
             // =================================================================
             // Network Commands
@@ -415,8 +621,11 @@ impl StateMachine<Command, Response> for ApiState {
                 is_public,
                 ..
             } => {
-                // Check for duplicate name
-                if self.networks.values().any(|n| n.name == name) {
+                let txn = self.db.begin_write().expect("begin");
+                if txn_list::<NetworkData>(&txn, NETWORKS)
+                    .iter()
+                    .any(|n| n.name == name)
+                {
                     return (
                         Response::Error {
                             code: 409,
@@ -426,15 +635,10 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                // Check for duplicate ID (idempotency)
-                if self.networks.contains_key(&id) {
-                    return (
-                        Response::Network(self.networks.get(&id).unwrap().clone()),
-                        vec![],
-                    );
+                if let Some(existing) = txn_get::<NetworkData>(&txn, NETWORKS, &id) {
+                    return (Response::Network(existing), vec![]);
                 }
 
-                // Use timestamp from command (set before Raft replication for determinism)
                 let network = NetworkData {
                     id: id.clone(),
                     project_id,
@@ -451,7 +655,8 @@ impl StateMachine<Command, Response> for ApiState {
                     updated_at: timestamp,
                 };
 
-                self.networks.insert(id, network.clone());
+                txn_put(&txn, NETWORKS, &id, &network);
+                txn.commit().expect("commit");
                 (
                     Response::Network(network.clone()),
                     vec![Event::NetworkCreated(network)],
@@ -464,38 +669,38 @@ impl StateMachine<Command, Response> for ApiState {
                 dns_servers,
                 ntp_servers,
                 ..
-            } => match self.networks.get(&id).cloned() {
-                Some(old_network) => {
-                    let network = self.networks.get_mut(&id).unwrap();
-                    network.dns_servers = dns_servers;
-                    network.ntp_servers = ntp_servers;
-                    network.updated_at = timestamp; // Use timestamp from command for determinism
-                    let new_network = network.clone();
-                    (
-                        Response::Network(new_network.clone()),
-                        vec![Event::NetworkUpdated {
-                            id,
-                            old: old_network,
-                            new: new_network,
-                        }],
-                    )
-                }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Network '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(old_network) = txn_get::<NetworkData>(&txn, NETWORKS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Network '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                let mut new_network = old_network.clone();
+                new_network.dns_servers = dns_servers;
+                new_network.ntp_servers = ntp_servers;
+                new_network.updated_at = timestamp;
+                txn_put(&txn, NETWORKS, &id, &new_network);
+                txn.commit().expect("commit");
+                (
+                    Response::Network(new_network.clone()),
+                    vec![Event::NetworkUpdated {
+                        id,
+                        old: old_network,
+                        new: new_network,
+                    }],
+                )
+            }
 
             Command::DeleteNetwork { id, force, .. } => {
-                // Count NICs in this network
-                let nics_in_network: Vec<String> = self
-                    .nics
-                    .iter()
-                    .filter(|(_, n)| n.spec.network_id == id)
-                    .map(|(id, _)| id.clone())
+                let txn = self.db.begin_write().expect("begin");
+                let nics_in_network: Vec<NicData> = txn_list::<NicData>(&txn, NICS)
+                    .into_iter()
+                    .filter(|n| n.spec.network_id == id)
                     .collect();
 
                 if !nics_in_network.is_empty() && !force {
@@ -511,31 +716,29 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                // Delete NICs if force
-                let nics_deleted = nics_in_network.len() as u32;
-                let mut events = Vec::new();
-                for nic_id in nics_in_network {
-                    if let Some(nic) = self.nics.remove(&nic_id) {
-                        events.push(Event::NicDeleted {
-                            id: nic_id,
-                            network_id: nic.spec.network_id,
-                        });
-                    }
-                }
-
-                match self.networks.remove(&id) {
-                    Some(_) => {
-                        events.push(Event::NetworkDeleted { id: id.clone() });
-                        (Response::DeletedWithCount { id, nics_deleted }, events)
-                    }
-                    None => (
+                if !txn_has(&txn, NETWORKS, &id) {
+                    return (
                         Response::Error {
                             code: 404,
                             message: format!("Network '{}' not found", id),
                         },
                         vec![],
-                    ),
+                    );
                 }
+
+                let nics_deleted = nics_in_network.len() as u32;
+                let mut events = Vec::new();
+                for nic in nics_in_network {
+                    txn_delete(&txn, NICS, &nic.id);
+                    events.push(Event::NicDeleted {
+                        id: nic.id,
+                        network_id: nic.spec.network_id,
+                    });
+                }
+                txn_delete(&txn, NETWORKS, &id);
+                txn.commit().expect("commit");
+                events.push(Event::NetworkDeleted { id: id.clone() });
+                (Response::DeletedWithCount { id, nics_deleted }, events)
             }
 
             Command::CreateNic {
@@ -552,8 +755,9 @@ impl StateMachine<Command, Response> for ApiState {
                 security_group_id,
                 ..
             } => {
-                // Check network exists
-                if !self.networks.contains_key(&network_id) {
+                let txn = self.db.begin_write().expect("begin");
+
+                let Some(mut network) = txn_get::<NetworkData>(&txn, NETWORKS, &network_id) else {
                     return (
                         Response::Error {
                             code: 404,
@@ -561,30 +765,30 @@ impl StateMachine<Command, Response> for ApiState {
                         },
                         vec![],
                     );
+                };
+
+                let mut sg_to_update: Option<SecurityGroupData> = None;
+                if let Some(ref sg_id) = security_group_id {
+                    match txn_get::<SecurityGroupData>(&txn, SECURITY_GROUPS, sg_id) {
+                        Some(sg) => sg_to_update = Some(sg),
+                        None => {
+                            return (
+                                Response::Error {
+                                    code: 404,
+                                    message: format!("Security group '{}' not found", sg_id),
+                                },
+                                vec![],
+                            );
+                        }
+                    }
                 }
 
-                // Check security group exists (if referenced)
-                if let Some(ref sg_id) = security_group_id
-                    && !self.security_groups.contains_key(sg_id)
-                {
-                    return (
-                        Response::Error {
-                            code: 404,
-                            message: format!("Security group '{}' not found", sg_id),
-                        },
-                        vec![],
-                    );
+                if let Some(existing) = txn_get::<NicData>(&txn, NICS, &id) {
+                    return (Response::Nic(existing), vec![]);
                 }
 
-                // Check for duplicate ID (idempotency)
-                if self.nics.contains_key(&id) {
-                    return (Response::Nic(self.nics.get(&id).unwrap().clone()), vec![]);
-                }
-
-                // Generate MAC if not provided - use id as seed for determinism
                 let mac = mac_address.unwrap_or_else(|| generate_mac_from_id(&id));
 
-                // Use timestamp from command for determinism
                 let nic = NicData {
                     id: id.clone(),
                     spec: NicSpec {
@@ -607,20 +811,18 @@ impl StateMachine<Command, Response> for ApiState {
                     updated_at: timestamp,
                 };
 
-                self.nics.insert(id, nic.clone());
+                txn_put(&txn, NICS, &id, &nic);
 
-                // Update network NIC count
-                if let Some(network) = self.networks.get_mut(&network_id) {
-                    network.nic_count += 1;
-                }
+                network.nic_count += 1;
+                txn_put(&txn, NETWORKS, &network_id, &network);
 
-                // Update security group NIC count
-                if let Some(ref sg_id) = nic.spec.security_group_id
-                    && let Some(sg) = self.security_groups.get_mut(sg_id)
-                {
+                if let Some(mut sg) = sg_to_update {
                     sg.nic_count += 1;
+                    let sg_id = sg.id.clone();
+                    txn_put(&txn, SECURITY_GROUPS, &sg_id, &sg);
                 }
 
+                txn.commit().expect("commit");
                 (Response::Nic(nic.clone()), vec![Event::NicCreated(nic)])
             }
 
@@ -630,129 +832,142 @@ impl StateMachine<Command, Response> for ApiState {
                 routed_ipv4_prefixes,
                 routed_ipv6_prefixes,
                 ..
-            } => match self.nics.get(&id).cloned() {
-                Some(old_nic) => {
-                    let nic = self.nics.get_mut(&id).unwrap();
-                    nic.spec.routed_ipv4_prefixes = routed_ipv4_prefixes;
-                    nic.spec.routed_ipv6_prefixes = routed_ipv6_prefixes;
-                    nic.updated_at = timestamp; // Use timestamp from command for determinism
-                    let new_nic = nic.clone();
-                    (
-                        Response::Nic(new_nic.clone()),
-                        vec![Event::NicUpdated {
-                            id,
-                            old: old_nic,
-                            new: new_nic,
-                        }],
-                    )
-                }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("NIC '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(old_nic) = txn_get::<NicData>(&txn, NICS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("NIC '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                let mut new_nic = old_nic.clone();
+                new_nic.spec.routed_ipv4_prefixes = routed_ipv4_prefixes;
+                new_nic.spec.routed_ipv6_prefixes = routed_ipv6_prefixes;
+                new_nic.updated_at = timestamp;
+                txn_put(&txn, NICS, &id, &new_nic);
+                txn.commit().expect("commit");
+                (
+                    Response::Nic(new_nic.clone()),
+                    vec![Event::NicUpdated {
+                        id,
+                        old: old_nic,
+                        new: new_nic,
+                    }],
+                )
+            }
 
-            Command::DeleteNic { id, .. } => match self.nics.remove(&id) {
-                Some(nic) => {
-                    // Update network NIC count
-                    if let Some(network) = self.networks.get_mut(&nic.spec.network_id) {
-                        network.nic_count = network.nic_count.saturating_sub(1);
-                    }
-                    // Update security group NIC count
-                    if let Some(ref sg_id) = nic.spec.security_group_id
-                        && let Some(sg) = self.security_groups.get_mut(sg_id)
-                    {
-                        sg.nic_count = sg.nic_count.saturating_sub(1);
-                    }
-                    let network_id = nic.spec.network_id.clone();
-                    (
-                        Response::Deleted { id: id.clone() },
-                        vec![Event::NicDeleted { id, network_id }],
-                    )
+            Command::DeleteNic { id, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(nic) = txn_get::<NicData>(&txn, NICS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("NIC '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                txn_delete(&txn, NICS, &id);
+
+                if let Some(mut network) =
+                    txn_get::<NetworkData>(&txn, NETWORKS, &nic.spec.network_id)
+                {
+                    network.nic_count = network.nic_count.saturating_sub(1);
+                    txn_put(&txn, NETWORKS, &nic.spec.network_id, &network);
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("NIC '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+
+                if let Some(ref sg_id) = nic.spec.security_group_id
+                    && let Some(mut sg) = txn_get::<SecurityGroupData>(&txn, SECURITY_GROUPS, sg_id)
+                {
+                    sg.nic_count = sg.nic_count.saturating_sub(1);
+                    txn_put(&txn, SECURITY_GROUPS, sg_id, &sg);
+                }
+
+                txn.commit().expect("commit");
+                let network_id = nic.spec.network_id.clone();
+                (
+                    Response::Deleted { id: id.clone() },
+                    vec![Event::NicDeleted { id, network_id }],
+                )
+            }
 
             Command::AttachNic {
                 id,
                 timestamp,
                 vm_id,
                 ..
-            } => match self.nics.get(&id).cloned() {
-                Some(old_nic) => {
-                    if old_nic.spec.vm_id.is_some() {
-                        return (
-                            Response::Error {
-                                code: 409,
-                                message: format!("NIC '{}' is already attached to a VM", id),
-                            },
-                            vec![],
-                        );
-                    }
-                    // Verify VM exists
-                    if !self.vms.contains_key(&vm_id) {
-                        return (
-                            Response::Error {
-                                code: 404,
-                                message: format!("VM '{}' not found", vm_id),
-                            },
-                            vec![],
-                        );
-                    }
-                    let nic = self.nics.get_mut(&id).unwrap();
-                    nic.spec.vm_id = Some(vm_id);
-                    nic.updated_at = timestamp;
-                    let new_nic = nic.clone();
-                    (
-                        Response::Nic(new_nic.clone()),
-                        vec![Event::NicUpdated {
-                            id,
-                            old: old_nic,
-                            new: new_nic,
-                        }],
-                    )
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(old_nic) = txn_get::<NicData>(&txn, NICS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("NIC '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                if old_nic.spec.vm_id.is_some() {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("NIC '{}' is already attached to a VM", id),
+                        },
+                        vec![],
+                    );
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("NIC '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+                if !txn_has(&txn, VMS, &vm_id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("VM '{}' not found", vm_id),
+                        },
+                        vec![],
+                    );
+                }
+                let mut new_nic = old_nic.clone();
+                new_nic.spec.vm_id = Some(vm_id);
+                new_nic.updated_at = timestamp;
+                txn_put(&txn, NICS, &id, &new_nic);
+                txn.commit().expect("commit");
+                (
+                    Response::Nic(new_nic.clone()),
+                    vec![Event::NicUpdated {
+                        id,
+                        old: old_nic,
+                        new: new_nic,
+                    }],
+                )
+            }
 
-            Command::DetachNic { id, timestamp, .. } => match self.nics.get(&id).cloned() {
-                Some(old_nic) => {
-                    let nic = self.nics.get_mut(&id).unwrap();
-                    nic.spec.vm_id = None;
-                    nic.updated_at = timestamp;
-                    let new_nic = nic.clone();
-                    (
-                        Response::Nic(new_nic.clone()),
-                        vec![Event::NicUpdated {
-                            id,
-                            old: old_nic,
-                            new: new_nic,
-                        }],
-                    )
-                }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("NIC '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+            Command::DetachNic { id, timestamp, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(old_nic) = txn_get::<NicData>(&txn, NICS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("NIC '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                let mut new_nic = old_nic.clone();
+                new_nic.spec.vm_id = None;
+                new_nic.updated_at = timestamp;
+                txn_put(&txn, NICS, &id, &new_nic);
+                txn.commit().expect("commit");
+                (
+                    Response::Nic(new_nic.clone()),
+                    vec![Event::NicUpdated {
+                        id,
+                        old: old_nic,
+                        new: new_nic,
+                    }],
+                )
+            }
 
             Command::UpdateNicStatus {
                 id,
@@ -761,24 +976,28 @@ impl StateMachine<Command, Response> for ApiState {
                 socket_path,
                 message,
                 ..
-            } => match self.nics.get_mut(&id) {
-                Some(nic) => {
-                    nic.status.phase = phase;
-                    if !socket_path.is_empty() {
-                        nic.status.socket_path = socket_path;
-                    }
-                    nic.status.message = message;
-                    nic.updated_at = timestamp;
-                    (Response::Nic(nic.clone()), vec![])
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(old_nic) = txn_get::<NicData>(&txn, NICS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("NIC '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                let mut nic = old_nic;
+                nic.status.phase = phase;
+                if !socket_path.is_empty() {
+                    nic.status.socket_path = socket_path;
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("NIC '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+                nic.status.message = message;
+                nic.updated_at = timestamp;
+                txn_put(&txn, NICS, &id, &nic);
+                txn.commit().expect("commit");
+                (Response::Nic(nic), vec![])
+            }
 
             // =================================================================
             // VM Commands
@@ -789,8 +1008,11 @@ impl StateMachine<Command, Response> for ApiState {
                 spec,
                 ..
             } => {
-                // Check for duplicate name
-                if self.vms.values().any(|v| v.spec.name == spec.name) {
+                let txn = self.db.begin_write().expect("begin");
+                if txn_list::<VmData>(&txn, VMS)
+                    .iter()
+                    .any(|v| v.spec.name == spec.name)
+                {
                     return (
                         Response::Error {
                             code: 409,
@@ -800,13 +1022,11 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                // Check for duplicate ID (idempotency)
-                if self.vms.contains_key(&id) {
-                    return (Response::Vm(self.vms.get(&id).unwrap().clone()), vec![]);
+                if let Some(existing) = txn_get::<VmData>(&txn, VMS, &id) {
+                    return (Response::Vm(existing), vec![]);
                 }
 
-                // Check NIC exists
-                if !self.nics.contains_key(&spec.nic_id) {
+                if !txn_has(&txn, NICS, &spec.nic_id) {
                     return (
                         Response::Error {
                             code: 404,
@@ -827,7 +1047,8 @@ impl StateMachine<Command, Response> for ApiState {
                     updated_at: timestamp,
                 };
 
-                self.vms.insert(id, vm.clone());
+                txn_put(&txn, VMS, &id, &vm);
+                txn.commit().expect("commit");
                 (Response::Vm(vm.clone()), vec![Event::VmCreated(vm)])
             }
 
@@ -836,72 +1057,81 @@ impl StateMachine<Command, Response> for ApiState {
                 timestamp,
                 desired_state,
                 ..
-            } => match self.vms.get(&id).cloned() {
-                Some(old_vm) => {
-                    let vm = self.vms.get_mut(&id).unwrap();
-                    vm.spec.desired_state = desired_state;
-                    vm.updated_at = timestamp;
-                    let new_vm = vm.clone();
-                    (
-                        Response::Vm(new_vm.clone()),
-                        vec![Event::VmUpdated {
-                            id,
-                            old: old_vm,
-                            new: new_vm,
-                        }],
-                    )
-                }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("VM '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(old_vm) = txn_get::<VmData>(&txn, VMS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("VM '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                let mut new_vm = old_vm.clone();
+                new_vm.spec.desired_state = desired_state;
+                new_vm.updated_at = timestamp;
+                txn_put(&txn, VMS, &id, &new_vm);
+                txn.commit().expect("commit");
+                (
+                    Response::Vm(new_vm.clone()),
+                    vec![Event::VmUpdated {
+                        id,
+                        old: old_vm,
+                        new: new_vm,
+                    }],
+                )
+            }
 
             Command::UpdateVmStatus {
                 id,
                 timestamp,
                 status,
                 ..
-            } => match self.vms.get(&id).cloned() {
-                Some(old_vm) => {
-                    let vm = self.vms.get_mut(&id).unwrap();
-                    vm.status = status;
-                    vm.updated_at = timestamp;
-                    let new_vm = vm.clone();
-                    (
-                        Response::Vm(new_vm.clone()),
-                        vec![Event::VmStatusUpdated {
-                            id,
-                            old: old_vm,
-                            new: new_vm,
-                        }],
-                    )
-                }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("VM '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(old_vm) = txn_get::<VmData>(&txn, VMS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("VM '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                let mut new_vm = old_vm.clone();
+                new_vm.status = status;
+                new_vm.updated_at = timestamp;
+                txn_put(&txn, VMS, &id, &new_vm);
+                txn.commit().expect("commit");
+                (
+                    Response::Vm(new_vm.clone()),
+                    vec![Event::VmStatusUpdated {
+                        id,
+                        old: old_vm,
+                        new: new_vm,
+                    }],
+                )
+            }
 
-            Command::DeleteVm { id, .. } => match self.vms.remove(&id) {
-                Some(_) => (
+            Command::DeleteVm { id, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                if !txn_has(&txn, VMS, &id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("VM '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                }
+                txn_delete(&txn, VMS, &id);
+                txn.commit().expect("commit");
+                (
                     Response::Deleted { id: id.clone() },
                     vec![Event::VmDeleted { id }],
-                ),
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("VM '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+                )
+            }
 
             // =================================================================
             // Project Commands
@@ -913,8 +1143,11 @@ impl StateMachine<Command, Response> for ApiState {
                 description,
                 ..
             } => {
-                // Check for duplicate name
-                if self.projects.values().any(|p| p.name == name) {
+                let txn = self.db.begin_write().expect("begin");
+                if txn_list::<ProjectData>(&txn, PROJECTS)
+                    .iter()
+                    .any(|p| p.name == name)
+                {
                     return (
                         Response::Error {
                             code: 409,
@@ -924,12 +1157,8 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                // Check for duplicate ID (idempotency)
-                if self.projects.contains_key(&id) {
-                    return (
-                        Response::Project(self.projects.get(&id).unwrap().clone()),
-                        vec![],
-                    );
+                if let Some(existing) = txn_get::<ProjectData>(&txn, PROJECTS, &id) {
+                    return (Response::Project(existing), vec![]);
                 }
 
                 let project = ProjectData {
@@ -939,20 +1168,26 @@ impl StateMachine<Command, Response> for ApiState {
                     created_at: timestamp,
                 };
 
-                self.projects.insert(id, project.clone());
+                txn_put(&txn, PROJECTS, &id, &project);
+                txn.commit().expect("commit");
                 (Response::Project(project), vec![])
             }
 
-            Command::DeleteProject { id, .. } => match self.projects.remove(&id) {
-                Some(_) => (Response::Deleted { id }, vec![]),
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Project '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+            Command::DeleteProject { id, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                if !txn_has(&txn, PROJECTS, &id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Project '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                }
+                txn_delete(&txn, PROJECTS, &id);
+                txn.commit().expect("commit");
+                (Response::Deleted { id }, vec![])
+            }
 
             // =================================================================
             // Volume Commands
@@ -967,8 +1202,9 @@ impl StateMachine<Command, Response> for ApiState {
                 template_id,
                 ..
             } => {
-                // Check project exists
-                if !self.projects.contains_key(&project_id) {
+                let txn = self.db.begin_write().expect("begin");
+
+                if !txn_has(&txn, PROJECTS, &project_id) {
                     return (
                         Response::Error {
                             code: 404,
@@ -978,18 +1214,12 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                // Check for duplicate ID (idempotency)
-                if self.volumes.contains_key(&id) {
-                    return (
-                        Response::Volume(self.volumes.get(&id).unwrap().clone()),
-                        vec![],
-                    );
+                if let Some(existing) = txn_get::<VolumeData>(&txn, VOLUMES, &id) {
+                    return (Response::Volume(existing), vec![]);
                 }
 
-                // Check for duplicate name within project
-                if self
-                    .volumes
-                    .values()
+                if txn_list::<VolumeData>(&txn, VOLUMES)
+                    .iter()
                     .any(|v| v.spec.project_id == project_id && v.spec.name == name)
                 {
                     return (
@@ -1004,9 +1234,9 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                // If cloning from template, verify template exists on same node
+                let mut template_to_update: Option<TemplateData> = None;
                 if let Some(ref tid) = template_id {
-                    match self.templates.get(tid) {
+                    match txn_get::<TemplateData>(&txn, TEMPLATES, tid) {
                         Some(template) => {
                             if template.spec.node_id != node_id {
                                 return (
@@ -1020,6 +1250,7 @@ impl StateMachine<Command, Response> for ApiState {
                                     vec![],
                                 );
                             }
+                            template_to_update = Some(template);
                         }
                         None => {
                             return (
@@ -1050,42 +1281,47 @@ impl StateMachine<Command, Response> for ApiState {
                     updated_at: timestamp,
                 };
 
-                // Increment template clone count if cloning
-                if let Some(tid) = &volume.spec.template_id
-                    && let Some(template) = self.templates.get_mut(tid)
-                {
+                if let Some(mut template) = template_to_update {
                     template.status.clone_count += 1;
+                    let tid = template.id.clone();
+                    txn_put(&txn, TEMPLATES, &tid, &template);
                 }
 
-                self.volumes.insert(id, volume.clone());
+                txn_put(&txn, VOLUMES, &id, &volume);
+                txn.commit().expect("commit");
                 (
                     Response::Volume(volume.clone()),
                     vec![Event::VolumeCreated(volume)],
                 )
             }
 
-            Command::DeleteVolume { id, .. } => match self.volumes.remove(&id) {
-                Some(vol) => {
-                    // Decrement template clone count if was cloned
-                    if let Some(tid) = &vol.spec.template_id
-                        && let Some(template) = self.templates.get_mut(tid)
-                    {
-                        template.status.clone_count = template.status.clone_count.saturating_sub(1);
-                    }
-                    let node_id = vol.spec.node_id.clone();
-                    (
-                        Response::Deleted { id: id.clone() },
-                        vec![Event::VolumeDeleted { id, node_id }],
-                    )
+            Command::DeleteVolume { id, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(vol) = txn_get::<VolumeData>(&txn, VOLUMES, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Volume '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                txn_delete(&txn, VOLUMES, &id);
+
+                if let Some(tid) = &vol.spec.template_id
+                    && let Some(mut template) = txn_get::<TemplateData>(&txn, TEMPLATES, tid)
+                {
+                    template.status.clone_count = template.status.clone_count.saturating_sub(1);
+                    txn_put(&txn, TEMPLATES, tid, &template);
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Volume '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+
+                txn.commit().expect("commit");
+                let node_id = vol.spec.node_id.clone();
+                (
+                    Response::Deleted { id: id.clone() },
+                    vec![Event::VolumeDeleted { id, node_id }],
+                )
+            }
 
             Command::UpdateVolumeStatus {
                 id,
@@ -1095,55 +1331,60 @@ impl StateMachine<Command, Response> for ApiState {
                 used_bytes,
                 error,
                 ..
-            } => match self.volumes.get_mut(&id) {
-                Some(vol) => {
-                    vol.status.phase = phase;
-                    if let Some(p) = path {
-                        vol.status.path = p;
-                    }
-                    vol.status.used_bytes = used_bytes;
-                    vol.status.error = error;
-                    vol.updated_at = timestamp;
-                    (Response::Volume(vol.clone()), vec![])
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut vol) = txn_get::<VolumeData>(&txn, VOLUMES, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Volume '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                vol.status.phase = phase;
+                if let Some(p) = path {
+                    vol.status.path = p;
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Volume '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+                vol.status.used_bytes = used_bytes;
+                vol.status.error = error;
+                vol.updated_at = timestamp;
+                txn_put(&txn, VOLUMES, &id, &vol);
+                txn.commit().expect("commit");
+                (Response::Volume(vol), vec![])
+            }
 
             Command::ResizeVolume {
                 id,
                 timestamp,
                 size_bytes,
                 ..
-            } => match self.volumes.get_mut(&id) {
-                Some(vol) => {
-                    // Only allow growing, not shrinking
-                    if size_bytes < vol.spec.size_bytes {
-                        return (
-                            Response::Error {
-                                code: 400,
-                                message: "Cannot shrink volume".to_string(),
-                            },
-                            vec![],
-                        );
-                    }
-                    vol.spec.size_bytes = size_bytes;
-                    vol.updated_at = timestamp;
-                    (Response::Volume(vol.clone()), vec![])
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut vol) = txn_get::<VolumeData>(&txn, VOLUMES, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Volume '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                if size_bytes < vol.spec.size_bytes {
+                    return (
+                        Response::Error {
+                            code: 400,
+                            message: "Cannot shrink volume".to_string(),
+                        },
+                        vec![],
+                    );
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Volume '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+                vol.spec.size_bytes = size_bytes;
+                vol.updated_at = timestamp;
+                txn_put(&txn, VOLUMES, &id, &vol);
+                txn.commit().expect("commit");
+                (Response::Volume(vol), vec![])
+            }
 
             Command::CreateSnapshot {
                 id,
@@ -1151,40 +1392,42 @@ impl StateMachine<Command, Response> for ApiState {
                 volume_id,
                 name,
                 ..
-            } => match self.volumes.get_mut(&volume_id) {
-                Some(vol) => {
-                    // Check for duplicate snapshot name
-                    if vol.status.snapshots.iter().any(|s| s.name == name) {
-                        return (
-                            Response::Error {
-                                code: 409,
-                                message: format!(
-                                    "Snapshot with name '{}' already exists on volume",
-                                    name
-                                ),
-                            },
-                            vec![],
-                        );
-                    }
-
-                    let snapshot = SnapshotData {
-                        id,
-                        name,
-                        created_at: timestamp.clone(),
-                        used_bytes: 0,
-                    };
-                    vol.status.snapshots.push(snapshot);
-                    vol.updated_at = timestamp;
-                    (Response::Volume(vol.clone()), vec![])
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut vol) = txn_get::<VolumeData>(&txn, VOLUMES, &volume_id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Volume '{}' not found", volume_id),
+                        },
+                        vec![],
+                    );
+                };
+                if vol.status.snapshots.iter().any(|s| s.name == name) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!(
+                                "Snapshot with name '{}' already exists on volume",
+                                name
+                            ),
+                        },
+                        vec![],
+                    );
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Volume '{}' not found", volume_id),
-                    },
-                    vec![],
-                ),
-            },
+
+                let snapshot = SnapshotData {
+                    id,
+                    name,
+                    created_at: timestamp.clone(),
+                    used_bytes: 0,
+                };
+                vol.status.snapshots.push(snapshot);
+                vol.updated_at = timestamp;
+                txn_put(&txn, VOLUMES, &volume_id, &vol);
+                txn.commit().expect("commit");
+                (Response::Volume(vol), vec![])
+            }
 
             // =================================================================
             // Template Commands
@@ -1200,10 +1443,9 @@ impl StateMachine<Command, Response> for ApiState {
                 total_bytes,
                 ..
             } => {
-                // Check for duplicate name (only among Ready templates)
-                if self
-                    .templates
-                    .values()
+                let txn = self.db.begin_write().expect("begin");
+                if txn_list::<TemplateData>(&txn, TEMPLATES)
+                    .iter()
                     .any(|t| t.spec.name == name && t.status.phase == TemplatePhase::Ready)
                 {
                     return (
@@ -1215,12 +1457,8 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                // Check for duplicate ID (idempotency)
-                if self.templates.contains_key(&id) {
-                    return (
-                        Response::Template(self.templates.get(&id).unwrap().clone()),
-                        vec![],
-                    );
+                if let Some(existing) = txn_get::<TemplateData>(&txn, TEMPLATES, &id) {
+                    return (Response::Template(existing), vec![]);
                 }
 
                 let phase = if source_url.is_some() {
@@ -1249,7 +1487,8 @@ impl StateMachine<Command, Response> for ApiState {
                     updated_at: timestamp,
                 };
 
-                self.templates.insert(id, template.clone());
+                txn_put(&txn, TEMPLATES, &id, &template);
+                txn.commit().expect("commit");
                 (
                     Response::Template(template.clone()),
                     vec![Event::TemplateCreated(template)],
@@ -1264,28 +1503,30 @@ impl StateMachine<Command, Response> for ApiState {
                 size_bytes,
                 error,
                 ..
-            } => match self.templates.get_mut(&id) {
-                Some(tpl) => {
-                    let old = tpl.clone();
-                    tpl.status.phase = phase;
-                    tpl.status.bytes_written = bytes_written;
-                    tpl.status.size_bytes = size_bytes;
-                    tpl.status.error = error;
-                    tpl.updated_at = timestamp;
-                    let new = tpl.clone();
-                    (
-                        Response::Template(new.clone()),
-                        vec![Event::TemplateUpdated { id, old, new }],
-                    )
-                }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Template '{}' not found", id),
-                    },
-                    vec![],
-                ),
-            },
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(old) = txn_get::<TemplateData>(&txn, TEMPLATES, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Template '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                let mut new = old.clone();
+                new.status.phase = phase;
+                new.status.bytes_written = bytes_written;
+                new.status.size_bytes = size_bytes;
+                new.status.error = error;
+                new.updated_at = timestamp;
+                txn_put(&txn, TEMPLATES, &id, &new);
+                txn.commit().expect("commit");
+                (
+                    Response::Template(new.clone()),
+                    vec![Event::TemplateUpdated { id, old, new }],
+                )
+            }
 
             // =================================================================
             // Security Group Commands
@@ -1298,15 +1539,14 @@ impl StateMachine<Command, Response> for ApiState {
                 description,
                 ..
             } => {
-                // Idempotent: return existing if same ID
-                if let Some(existing) = self.security_groups.get(&id) {
-                    return (Response::SecurityGroup(existing.clone()), vec![]);
+                let txn = self.db.begin_write().expect("begin");
+
+                if let Some(existing) = txn_get::<SecurityGroupData>(&txn, SECURITY_GROUPS, &id) {
+                    return (Response::SecurityGroup(existing), vec![]);
                 }
 
-                // Duplicate name check within project
-                if self
-                    .security_groups
-                    .values()
+                if txn_list::<SecurityGroupData>(&txn, SECURITY_GROUPS)
+                    .iter()
                     .any(|sg| sg.project_id == project_id && sg.name == name)
                 {
                     return (
@@ -1318,8 +1558,7 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                // FK: project must exist
-                if !self.projects.contains_key(&project_id) {
+                if !txn_has(&txn, PROJECTS, &project_id) {
                     return (
                         Response::Error {
                             code: 404,
@@ -1341,7 +1580,8 @@ impl StateMachine<Command, Response> for ApiState {
                 };
 
                 let sg_id = id.clone();
-                self.security_groups.insert(id, sg.clone());
+                txn_put(&txn, SECURITY_GROUPS, &id, &sg);
+                txn.commit().expect("commit");
                 (
                     Response::SecurityGroup(sg),
                     vec![Event::SecurityGroupCreated { id: sg_id }],
@@ -1349,10 +1589,9 @@ impl StateMachine<Command, Response> for ApiState {
             }
 
             Command::DeleteSecurityGroup { id, .. } => {
-                // Check if any NICs reference this security group
-                let nic_refs = self
-                    .nics
-                    .values()
+                let txn = self.db.begin_write().expect("begin");
+                let nic_refs = txn_list::<NicData>(&txn, NICS)
+                    .iter()
                     .any(|n| n.spec.security_group_id.as_deref() == Some(&id));
                 if nic_refs {
                     return (
@@ -1364,19 +1603,21 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                match self.security_groups.remove(&id) {
-                    Some(_) => (
-                        Response::Deleted { id: id.clone() },
-                        vec![Event::SecurityGroupDeleted { id }],
-                    ),
-                    None => (
+                if !txn_has(&txn, SECURITY_GROUPS, &id) {
+                    return (
                         Response::Error {
                             code: 404,
                             message: format!("Security group '{}' not found", id),
                         },
                         vec![],
-                    ),
+                    );
                 }
+                txn_delete(&txn, SECURITY_GROUPS, &id);
+                txn.commit().expect("commit");
+                (
+                    Response::Deleted { id: id.clone() },
+                    vec![Event::SecurityGroupDeleted { id }],
+                )
             }
 
             Command::CreateSecurityGroupRule {
@@ -1390,82 +1631,153 @@ impl StateMachine<Command, Response> for ApiState {
                 cidr,
                 description,
                 ..
-            } => match self.security_groups.get_mut(&security_group_id) {
-                Some(sg) => {
-                    // Idempotent: return if rule ID already exists
-                    if sg.rules.iter().any(|r| r.id == id) {
-                        return (Response::SecurityGroup(sg.clone()), vec![]);
-                    }
-
-                    let rule = SecurityGroupRuleData {
-                        id,
-                        direction,
-                        protocol,
-                        port_range_start,
-                        port_range_end,
-                        cidr,
-                        description,
-                        created_at: timestamp.clone(),
-                    };
-                    sg.rules.push(rule);
-                    sg.updated_at = timestamp;
-                    (Response::SecurityGroup(sg.clone()), vec![])
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut sg) =
+                    txn_get::<SecurityGroupData>(&txn, SECURITY_GROUPS, &security_group_id)
+                else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Security group '{}' not found", security_group_id),
+                        },
+                        vec![],
+                    );
+                };
+                if sg.rules.iter().any(|r| r.id == id) {
+                    return (Response::SecurityGroup(sg), vec![]);
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Security group '{}' not found", security_group_id),
-                    },
-                    vec![],
-                ),
-            },
+                let rule = SecurityGroupRuleData {
+                    id,
+                    direction,
+                    protocol,
+                    port_range_start,
+                    port_range_end,
+                    cidr,
+                    description,
+                    created_at: timestamp.clone(),
+                };
+                sg.rules.push(rule);
+                sg.updated_at = timestamp;
+                txn_put(&txn, SECURITY_GROUPS, &security_group_id, &sg);
+                txn.commit().expect("commit");
+                (Response::SecurityGroup(sg), vec![])
+            }
 
             Command::DeleteSecurityGroupRule {
                 security_group_id,
                 rule_id,
                 ..
-            } => match self.security_groups.get_mut(&security_group_id) {
-                Some(sg) => {
-                    let before = sg.rules.len();
-                    sg.rules.retain(|r| r.id != rule_id);
-                    if sg.rules.len() == before {
-                        return (
-                            Response::Error {
-                                code: 404,
-                                message: format!("Rule '{}' not found", rule_id),
-                            },
-                            vec![],
-                        );
-                    }
-                    (Response::SecurityGroup(sg.clone()), vec![])
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut sg) =
+                    txn_get::<SecurityGroupData>(&txn, SECURITY_GROUPS, &security_group_id)
+                else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Security group '{}' not found", security_group_id),
+                        },
+                        vec![],
+                    );
+                };
+                let before = sg.rules.len();
+                sg.rules.retain(|r| r.id != rule_id);
+                if sg.rules.len() == before {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Rule '{}' not found", rule_id),
+                        },
+                        vec![],
+                    );
                 }
-                None => (
-                    Response::Error {
-                        code: 404,
-                        message: format!("Security group '{}' not found", security_group_id),
-                    },
-                    vec![],
-                ),
-            },
+                txn_put(&txn, SECURITY_GROUPS, &security_group_id, &sg);
+                txn.commit().expect("commit");
+                (Response::SecurityGroup(sg), vec![])
+            }
         };
 
         // Cache the response
-        if let Some(cache) = &mut self.applied_requests {
-            cache.put(cmd.request_id().to_string(), response.clone());
-        }
+        self.applied_requests
+            .lock()
+            .put(cmd.request_id().to_string(), response.clone());
 
         (response, events)
     }
 
     fn snapshot(&self) -> Result<Vec<u8>, mraft::StateMachineError> {
-        Ok(bincode::serialize(self)?)
+        let txn = self.db.begin_read()?;
+        let envelope = SnapshotEnvelope {
+            nodes: read_list_with_keys(&txn, NODES),
+            networks: read_list_with_keys(&txn, NETWORKS),
+            nics: read_list_with_keys(&txn, NICS),
+            vms: read_list_with_keys(&txn, VMS),
+            projects: read_list_with_keys(&txn, PROJECTS),
+            volumes: read_list_with_keys(&txn, VOLUMES),
+            templates: read_list_with_keys(&txn, TEMPLATES),
+            security_groups: read_list_with_keys(&txn, SECURITY_GROUPS),
+        };
+        Ok(bincode::serialize(&envelope)?)
     }
 
     fn restore(&mut self, bytes: &[u8]) -> Result<(), mraft::StateMachineError> {
-        *self = bincode::deserialize(bytes)?;
-        self.ensure_cache();
+        let envelope: SnapshotEnvelope = bincode::deserialize(bytes)?;
+        let txn = self.db.begin_write()?;
+
+        // Clear each table by dropping and recreating it inside the same txn.
+        for table in ALL_TABLES {
+            txn.delete_table(*table)?;
+            txn.open_table(*table)?;
+        }
+
+        for (k, v) in &envelope.nodes {
+            txn_put(&txn, NODES, k, v);
+        }
+        for (k, v) in &envelope.networks {
+            txn_put(&txn, NETWORKS, k, v);
+        }
+        for (k, v) in &envelope.nics {
+            txn_put(&txn, NICS, k, v);
+        }
+        for (k, v) in &envelope.vms {
+            txn_put(&txn, VMS, k, v);
+        }
+        for (k, v) in &envelope.projects {
+            txn_put(&txn, PROJECTS, k, v);
+        }
+        for (k, v) in &envelope.volumes {
+            txn_put(&txn, VOLUMES, k, v);
+        }
+        for (k, v) in &envelope.templates {
+            txn_put(&txn, TEMPLATES, k, v);
+        }
+        for (k, v) in &envelope.security_groups {
+            txn_put(&txn, SECURITY_GROUPS, k, v);
+        }
+
+        txn.commit()?;
+        // Reset the idempotency cache; a restored snapshot is from a different
+        // logical timeline and we must not return cached responses for new ids.
+        *self.applied_requests.lock() = LruCache::new(NonZeroUsize::new(1000).unwrap());
         Ok(())
     }
+
+    fn requires_external_persistence(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SnapshotEnvelope {
+    nodes: HashMap<String, NodeData>,
+    networks: HashMap<String, NetworkData>,
+    nics: HashMap<String, NicData>,
+    vms: HashMap<String, VmData>,
+    projects: HashMap<String, ProjectData>,
+    volumes: HashMap<String, VolumeData>,
+    templates: HashMap<String, TemplateData>,
+    security_groups: HashMap<String, SecurityGroupData>,
 }
 
 /// Generate a deterministic MAC address from an ID

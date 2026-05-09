@@ -17,12 +17,12 @@ use crate::state::ApiState;
 use crate::tunnel::NodeHandle;
 
 pub fn list_ids(state: &ApiState) -> Vec<String> {
-    state.volumes.keys().cloned().collect()
+    state.volume_ids()
 }
 
 pub async fn reconcile(ctx: &Ctx, id: &str) -> Result<()> {
     let state = ctx.store.snapshot().await;
-    let Some(vol) = state.volumes.get(id).cloned() else {
+    let Some(vol) = state.get_volume(id) else {
         // Resource gone from state — finalizer pattern is not yet uniform
         // across reconcilers (see ADR-0002, Subsystem 4); cleanup-on-delete
         // will be wired in once Event::*Deleted variants carry the deleted
@@ -43,9 +43,8 @@ pub async fn reconcile(ctx: &Ctx, id: &str) -> Result<()> {
     info!(volume = %id, node = %spec.node_id, name = %spec.name, "reconciling volume");
     let result = if let Some(template_id) = &spec.template_id {
         let template_name = state
-            .templates
-            .get(template_id)
-            .map(|t| t.spec.name.clone())
+            .get_template(template_id)
+            .map(|t| t.spec.name)
             .unwrap_or_else(|| template_id.clone());
         clone_from_template(&node, &template_name, &spec.name, spec.size_bytes).await
     } else {
