@@ -5,7 +5,7 @@
 ### Datenbanken
 | Pfad | Komponente | Größe |
 |------|-----------|-------|
-| `/var/lib/mvirt/cp/raft.db` | API (Raft) | 3.6MB |
+| `/var/lib/mvirt/cplane/raft.db` | Cplane (Raft) | 3.6MB |
 | `/var/lib/mvirt/vmm/mvirt.db` | VMM | 49KB |
 | `/var/lib/mvirt/zfs/metadata.db` | ZFS | 73KB |
 | `/var/lib/mvirt/log/logs.db` | Audit Log | ~4MB |
@@ -20,7 +20,7 @@
 
 ## Phase 1: Cleanup & Build
 
-- [ ] Stoppe mvirt-api
+- [ ] Stoppe mvirt-cplane
 - [ ] Lösche Datenbanken
 - [ ] Lösche ZFS test-datasets
 - [ ] `cargo build --release`
@@ -47,7 +47,7 @@
 - [x] NIC erstellen (auto MAC/IP)
 - [x] Security Group erstellen & attachen
 
-### D) mvirt-api (Control Plane) ✓ PASSED (2026-02-04)
+### D) mvirt-cplane (Control Plane) ✓ PASSED (2026-02-04)
 - [x] Starten (Raft single-node, leader elected)
 - [x] REST: Project CRUD
 - [ ] REST: Template import (needs Node agent)
@@ -71,7 +71,7 @@
 - mvirt-zfs: Volume CRUD, Template Import, Clone, Snapshot ✓
 - mvirt-vmm: VM Create/Start/Stop/Kill/Delete ✓
 - mvirt-ebpf: Network, NIC, SecurityGroup CRUD ✓
-- mvirt-api: Raft bootstrap, REST API, Project CRUD ✓
+- mvirt-cplane: Raft bootstrap, REST API, Project CRUD ✓
 - mvirt-node: Register, Manifest-Sync, Reconciliation ✓
 - E2E: Template Import → Volume Clone via REST API ✓
 
@@ -79,4 +79,4 @@
 1. **Manifest Loop** - Status updates trigger continuous manifest regeneration
    - Revision grows from 1 to 1500+ in seconds
    - Funktional OK, aber Performance/Log-Spam Problem
-   - Location: mvirt-api manifest broadcast or mvirt-node status update logic
+   - Location: mvirt-cplane manifest broadcast or mvirt-node status update logic

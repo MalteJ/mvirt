@@ -4,7 +4,7 @@ This describes a full end-to-end test flow covering the core mvirt resource life
 
 ## Prerequisites
 
-- mvirt-api running with at least one node registered
+- mvirt-cplane running with at least one node registered
 - mvirt-node, mvirt-vmm, mvirt-zfs, mvirt-ebpf running on that node
 - Network connectivity between API and node
 - A reachable QCOW2 image URL for template import (e.g. Debian cloud image)

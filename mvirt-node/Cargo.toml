@@ -2,7 +2,7 @@
 name = "mvirt-node"
 version = "0.1.0"
 edition = "2021"
-description = "mvirt Node Agent - reconciles desired state from mvirt-api with local hypervisor"
+description = "mvirt Node Agent - hosts NodeAgent + daemon proxies on the reverse tunnel to mvirt-cplane"
 
 [[bin]]
 name = "mvirt-node"
@@ -12,11 +12,16 @@ path = "src/main.rs"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+futures = "0.3"
 
 # gRPC client
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"
+tower = "0.5"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http2", "tokio"] }
+http = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -39,11 +44,6 @@ chrono = { version = "0.4", features = ["serde"] }
 hostname = "0.4"
 async-trait = "0.1"
 
-# Audit logging
-mvirt-log = { path = "../mvirt-log" }
-
-# Shared daemon proto bindings (vmm, zfs, net)
-mvirt-daemon-protos = { path = "../mvirt-daemon-protos" }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

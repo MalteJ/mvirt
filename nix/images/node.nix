@@ -79,8 +79,8 @@
         50052  # mvirt-log
         50053  # mvirt-zfs
         50054  # mvirt-ebpf
-        8080   # mvirt-api
-        50056  # mvirt-api grpc (node agents)
+        8080   # mvirt-cplane REST
+        50056  # mvirt-cplane reverse tunnel (node agents dial here)
       ];
     };
   };

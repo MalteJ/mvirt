@@ -7,7 +7,7 @@ members = [
     "mvirt-net",
     "mvirt-one",
     "mvirt-log",
-    "mvirt-api",
+    "mvirt-cplane",
     "mvirt-node",
     "mvirt-ebpf",
     "mvirt-shipper",

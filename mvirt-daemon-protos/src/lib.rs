@@ -1,4 +1,4 @@
-//! Shared gRPC bindings for the per-host daemons that mvirt-api and mvirt-node
+//! Shared gRPC bindings for the per-host daemons that mvirt-cplane and mvirt-node
 //! both need to talk to: mvirt-vmm, mvirt-zfs, and mvirt-ebpf (which uses
 //! mvirt-net's proto).
 //!

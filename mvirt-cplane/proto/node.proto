@@ -1,0 +1,105 @@
+syntax = "proto3";
+package mvirt.node;
+
+// =============================================================================
+// Reverse-tunnel architecture
+// =============================================================================
+//
+// mvirt-node dials out to mvirt-api over plain TCP. After the connect the roles
+// invert at the gRPC layer: the *node* hosts gRPC services, the *api* is the
+// gRPC client. Auth is intentionally absent for now. Four services are served
+// on the inverted channel:
+//
+//   1. NodeAgent              (defined here)            - node lifecycle / events
+//   2. daemon_protos::vmm     (mvirt-vmm proto)         - VM + Pod control
+//   3. daemon_protos::zfs     (mvirt-zfs proto)         - storage control
+//   4. daemon_protos::net     (mvirt-net/ebpf proto)    - networking control
+//
+// The api holds one tonic::transport::Channel per connected node, dispatches
+// reconciliation RPCs against the daemon services, and consumes node-originated
+// events via the streaming NodeAgent.WatchEvents RPC.
+//
+// Logs do NOT travel over this tunnel — mvirt-shipper runs alongside mvirt-node
+// and ships logs out-of-band, keeping the log path independent of agent health.
+
+// NodeAgent runs on the node, exposed over the reverse tunnel. All RPCs are
+// initiated by the api.
+service NodeAgent {
+    // Handshake. Called by the api immediately after the tunnel is established.
+    // Returns the node's identity, advertised address, total resources, and
+    // labels. Idempotent.
+    rpc Identify(IdentifyRequest) returns (IdentifyResponse);
+
+    // Server-streaming. The api opens this once per tunnel; the node pushes
+    // asynchronous events (daemon state changes, resource pressure, errors).
+    // Stream end => the api should re-open it. The api does *not* rely on this
+    // for desired-state delivery; that flows the other way through the daemon
+    // services.
+    rpc WatchEvents(WatchEventsRequest) returns (stream NodeEvent);
+
+    // Cheap polled snapshot of currently available resources. Used by the
+    // scheduler. The node may also volunteer this via NodeEvent.resources.
+    rpc CurrentResources(CurrentResourcesRequest) returns (NodeResources);
+}
+
+// =============================================================================
+// Handshake
+// =============================================================================
+
+message IdentifyRequest {}
+
+message IdentifyResponse {
+    // Stable, configured on the node (CLI arg / config file). The api uses this
+    // to look up or upsert the node in raft state.
+    string node_id = 1;
+    string name = 2;
+    string address = 3;
+    NodeResources resources = 4;
+    map<string, string> labels = 5;
+    string agent_version = 6;
+}
+
+// =============================================================================
+// Events (node -> api, via streaming response)
+// =============================================================================
+
+message WatchEventsRequest {}
+
+message NodeEvent {
+    oneof kind {
+        ResourcesChanged resources = 1;
+        DaemonHealthChanged daemon_health = 2;
+    }
+}
+
+message ResourcesChanged {
+    NodeResources current = 1;
+}
+
+enum DaemonKind {
+    DAEMON_KIND_UNSPECIFIED = 0;
+    DAEMON_KIND_VMM = 1;
+    DAEMON_KIND_ZFS = 2;
+    DAEMON_KIND_NET = 3;
+}
+
+message DaemonHealthChanged {
+    DaemonKind daemon = 1;
+    bool healthy = 2;
+    optional string message = 3;
+}
+
+// =============================================================================
+// Resource snapshot
+// =============================================================================
+
+message CurrentResourcesRequest {}
+
+message NodeResources {
+    uint32 cpu_cores = 1;
+    uint64 memory_mb = 2;
+    uint64 storage_gb = 3;
+    uint32 available_cpu_cores = 4;
+    uint64 available_memory_mb = 5;
+    uint64 available_storage_gb = 6;
+}

@@ -1,84 +1,72 @@
-//! mvirt-node: Node agent for mvirt hypervisor reconciliation.
+//! mvirt-node: per-host agent.
 //!
-//! This daemon runs on each hypervisor host and:
-//! - Registers with the mvirt-api cluster
-//! - Sends periodic heartbeats
-//! - Watches for spec changes via gRPC streaming
-//! - Reconciles desired state with local daemons (mvirt-net, mvirt-vmm, mvirt-zfs)
-//! - Reports status updates back to the API
+//! Dials out to mvirt-cplane over plain TCP and hosts the NodeAgent gRPC service
+//! plus byte-level forwarding proxies for the local daemons (vmm/zfs/net) on
+//! the dialed socket. The api drives reconciliation by calling those proxied
+//! services as a regular gRPC client; the node runs no reconciler logic.
 
-// Allow unused code for now - reconcilers and clients are stubs
-#![allow(dead_code, unused_imports, unused_variables)]
+mod agent_impl;
+mod proto;
+mod proxy;
+mod tunnel;
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use tokio::sync::RwLock;
-use tracing::{error, info};
+use http::Uri;
+use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod agent;
-mod clients;
-mod proto;
-mod reconciler;
+use crate::agent_impl::NodeAgentService;
+use crate::proto::NodeResources;
+use crate::proxy::DaemonProxy;
+use crate::tunnel::ProxyBundle;
 
-use agent::NodeAgent;
-use clients::{NetClient, VmmClient, ZfsClient};
-
-/// mvirt Node Agent
 #[derive(Parser, Debug)]
 #[command(name = "mvirt-node", version, about)]
 struct Args {
-    /// API server endpoint (e.g., http://[::1]:50056)
-    #[arg(long, default_value = "http://[::1]:50056")]
+    /// API server tunnel endpoint (host:port; the node dials TCP here)
+    #[arg(long, default_value = "[::1]:50056")]
     api_endpoint: String,
 
-    /// Node name (defaults to hostname)
+    /// Stable node id (must match what the api expects). Sent in Identify.
+    #[arg(long)]
+    node_id: String,
+
+    /// Node display name (defaults to hostname)
     #[arg(long)]
     name: Option<String>,
 
-    /// Node ID (auto-generated if not provided)
-    #[arg(long)]
-    node_id: Option<String>,
+    /// Advertised address for this node
+    #[arg(long, default_value = "0.0.0.0")]
+    address: String,
 
-    /// Heartbeat interval in seconds
-    #[arg(long, default_value = "10")]
-    heartbeat_interval: u64,
-
-    /// mvirt-net gRPC endpoint
+    /// Local mvirt-vmm gRPC endpoint (proxied for VmService + PodService)
     #[arg(long, default_value = "http://[::1]:50051")]
-    net_endpoint: String,
-
-    /// mvirt-vmm gRPC endpoint
-    #[arg(long, default_value = "http://[::1]:50053")]
     vmm_endpoint: String,
 
-    /// mvirt-zfs gRPC endpoint
-    #[arg(long, default_value = "http://[::1]:50054")]
+    /// Local mvirt-zfs gRPC endpoint (proxied for ZfsService)
+    #[arg(long, default_value = "http://[::1]:50053")]
     zfs_endpoint: String,
 
-    /// mvirt-log endpoint for audit logging
-    #[arg(long, default_value = "http://[::1]:50052")]
-    log_endpoint: String,
+    /// Local mvirt-net/ebpf gRPC endpoint (proxied for NetService)
+    #[arg(long, default_value = "http://[::1]:50054")]
+    net_endpoint: String,
 
-    /// CPU cores available on this node
+    /// CPU cores available on this node (auto-detected if absent)
     #[arg(long)]
     cpu_cores: Option<u32>,
 
-    /// Memory in MB available on this node
+    /// Memory in MB available on this node (auto-detected if absent)
     #[arg(long)]
     memory_mb: Option<u64>,
 
     /// Storage in GB available on this node
-    #[arg(long)]
-    storage_gb: Option<u64>,
+    #[arg(long, default_value_t = 0)]
+    storage_gb: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -89,93 +77,71 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Get node name from args or hostname
     let node_name = args.name.unwrap_or_else(|| {
         hostname::get()
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "unknown".to_string())
     });
 
-    info!("Starting mvirt-node agent: {}", node_name);
-    info!("API endpoint: {}", args.api_endpoint);
+    let cpu_cores = args.cpu_cores.unwrap_or_else(detect_cpu_cores);
+    let memory_mb = args.memory_mb.unwrap_or_else(detect_memory_mb);
 
-    // Create audit logger
-    let audit = Arc::new(crate::agent::NodeAuditLogger::new(&args.log_endpoint));
-
-    // Connect to local service daemons
-    info!("Connecting to local services...");
-    let vmm_client = VmmClient::connect(&args.vmm_endpoint).await?;
-    let zfs_client = ZfsClient::connect(&args.zfs_endpoint).await?;
-    let net_client = NetClient::connect(&args.net_endpoint).await?;
-    info!("Connected to all local services");
-
-    // Auto-detect system resources if not specified
-    let cpu_cores = args.cpu_cores.unwrap_or_else(|| {
-        std::fs::read_to_string("/proc/cpuinfo")
-            .map(|s| s.matches("processor\t:").count() as u32)
-            .unwrap_or(1)
-    });
-    let memory_mb = args.memory_mb.unwrap_or_else(|| {
-        std::fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("MemTotal:"))
-                    .and_then(|l| {
-                        l.split_whitespace()
-                            .nth(1)
-                            .and_then(|v| v.parse::<u64>().ok())
-                    })
-            })
-            .map(|kb| kb / 1024)
-            .unwrap_or(0)
-    });
-    let storage_gb = args.storage_gb.unwrap_or(0);
     info!(
-        "Resources: {} CPUs, {} MB RAM, {} GB storage",
-        cpu_cores, memory_mb, storage_gb
+        node_id = %args.node_id,
+        name = %node_name,
+        cpu_cores, memory_mb, storage_gb = args.storage_gb,
+        "starting mvirt-node"
     );
 
-    // Create the agent
-    let agent = Arc::new(RwLock::new(NodeAgent::new(
-        args.api_endpoint.clone(),
-        node_name.clone(),
-        args.node_id,
-        Duration::from_secs(args.heartbeat_interval),
-        agent::NodeResources {
-            cpu_cores,
-            memory_mb,
-            storage_gb,
-            available_cpu_cores: cpu_cores,
-            available_memory_mb: memory_mb,
-            available_storage_gb: storage_gb,
-        },
-        audit,
-        vmm_client,
-        zfs_client,
-        net_client,
-    )));
+    let resources = NodeResources {
+        cpu_cores,
+        memory_mb,
+        storage_gb: args.storage_gb,
+        available_cpu_cores: cpu_cores,
+        available_memory_mb: memory_mb,
+        available_storage_gb: args.storage_gb,
+    };
 
-    // Run the agent loop with reconnection
-    loop {
-        let agent_clone = Arc::clone(&agent);
+    let agent = NodeAgentService {
+        node_id: args.node_id.clone(),
+        name: node_name,
+        address: args.address,
+        resources,
+        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
 
-        match run_agent(agent_clone).await {
-            Ok(()) => {
-                info!("Agent loop completed normally");
-                break;
-            }
-            Err(e) => {
-                error!("Agent error: {}. Reconnecting in 5 seconds...", e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        }
-    }
+    let proxies = ProxyBundle {
+        vmm: DaemonProxy::new(parse_uri(&args.vmm_endpoint, "vmm_endpoint")?),
+        zfs: DaemonProxy::new(parse_uri(&args.zfs_endpoint, "zfs_endpoint")?),
+        net: DaemonProxy::new(parse_uri(&args.net_endpoint, "net_endpoint")?),
+    };
 
-    Ok(())
+    tunnel::run(args.api_endpoint, agent, proxies).await
 }
 
-async fn run_agent(agent: Arc<RwLock<NodeAgent>>) -> Result<()> {
-    let mut agent = agent.write().await;
-    agent.run().await
+fn parse_uri(s: &str, label: &str) -> Result<Uri> {
+    s.parse::<Uri>()
+        .with_context(|| format!("invalid {label}: {s}"))
+}
+
+fn detect_cpu_cores() -> u32 {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .map(|s| s.matches("processor\t:").count() as u32)
+        .unwrap_or(1)
+}
+
+fn detect_memory_mb() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("MemTotal:"))
+                .and_then(|l| {
+                    l.split_whitespace()
+                        .nth(1)
+                        .and_then(|v| v.parse::<u64>().ok())
+                })
+        })
+        .map(|kb| kb / 1024)
+        .unwrap_or(0)
 }

@@ -1,0 +1,64 @@
+[package]
+name = "mvirt-cplane"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "mvirt_cplane"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mvirt-cplane"
+path = "src/main.rs"
+
+[dependencies]
+# Raft consensus via mraft
+mraft = { path = "/home/malte/mraft" }
+
+# REST API
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs", "time"] }
+futures = "0.3"
+async-stream = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+mvirt-log = { path = "../mvirt-log" }
+
+# gRPC
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+tokio-stream = "0.1"
+tower = "0.5"
+hyper-util = { version = "0.1", features = ["tokio"] }
+mvirt-daemon-protos = { path = "../mvirt-daemon-protos" }
+
+# Utils
+uuid = { version = "1", features = ["v4", "serde"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+lru = "0.16"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+anyhow = "1"
+bincode = "1"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-test = "0.4"
+portpicker = "0.1"

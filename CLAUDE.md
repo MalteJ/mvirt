@@ -6,18 +6,22 @@ See [README.md](README.md) for build commands and project overview.
 
 ```
 mvirt/
-├── mvirt-api/       # Raft-based distributed control plane
+├── mvirt-cplane/    # Control plane: Raft consensus, REST API, scheduler, reconciler, tunnel acceptor
 │   ├── src/
-│   │   ├── grpc/    # gRPC NodeService server
+│   │   ├── grpc/    # NodeAgent proto bindings (api is the gRPC client over the reverse tunnel)
 │   │   ├── rest/    # REST API (handlers per resource)
 │   │   ├── store/   # Raft storage, event sourcing
 │   │   ├── state.rs # State machine + command handling
-│   │   └── scheduler.rs
-│   └── proto/       # node.proto
-├── mvirt-node/      # Node agent (reconciles desired state from API)
+│   │   ├── scheduler.rs
+│   │   ├── tunnel.rs    # Reverse-tunnel listener + NodeRegistry
+│   │   └── reconciler/  # Per-resource reconcilers (api drives daemon RPCs via tunnel)
+│   └── proto/       # node.proto (NodeAgent service hosted by the node)
+├── mvirt-node/      # Node agent: dials cplane, hosts NodeAgent + daemon proxies on the tunnel
 │   ├── src/
-│   │   ├── clients/ # gRPC clients for local services (vmm, ebpf, zfs)
-│   │   └── reconciler/ # Per-resource reconcilers (vm, nic, volume, network, route, security_group, template)
+│   │   ├── tunnel.rs      # TCP dialer + Server::serve_with_incoming
+│   │   ├── agent_impl.rs  # NodeAgent service implementation
+│   │   └── proxy.rs       # HTTP/2 forwarding proxies for vmm/zfs/net daemons
+├── mvirt-daemon-protos/ # Shared proto bindings for vmm/zfs/net (used by cplane clients + node proxies)
 ├── mvirt-vmm/       # Local hypervisor daemon (VM + Pod management)
 │   ├── src/
 │   │   ├── grpc.rs        # VmService implementation
@@ -60,27 +64,25 @@ No warnings allowed.
 
 ## Architecture
 
-### Distributed Control Plane (mvirt-api)
+### Control Plane (mvirt-cplane)
 
-Raft-based consensus for multi-node cluster management.
+Raft-based consensus for multi-node cluster management. Owns reconciliation: drives per-host daemons on each node via a reverse tunnel.
 
-- **Raft** via `mraft` for leader election and log replication
+- **Raft** via `mraft` for leader election and log replication (port 6001 inter-cplane)
 - **REST API** on port 8080 for external clients and UI
-- **gRPC NodeService** on port 50056 for node agents
-- **Raft** inter-node communication on port 6001
+- **Reverse-tunnel listener** on port 50056 — nodes dial in, gRPC roles invert (api becomes client, node hosts services)
 - **Event-sourced state machine** (`state.rs`) processes all commands
+- **Reconciler** (`reconciler/`) subscribes to raft events + 30s resync, dispatches per-resource RPCs to the owning node
+- **NodeRegistry** (`tunnel.rs`) holds per-node `Channel` + typed daemon clients (vmm/zfs/net)
 - **Scheduler** assigns resources to nodes
-
-REST handlers are split per resource: `controlplane.rs`, `nodes.rs`, `vms.rs`, `networks.rs`, `nics.rs`.
 
 ### Node Agent (mvirt-node)
 
-Runs on each hypervisor node, connects to mvirt-api.
+Runs on each hypervisor node. Stateless w.r.t. orchestration — the cplane drives everything.
 
-- Registers with the API, sends heartbeats
-- Watches spec stream (`WatchSpecs`) for desired state
-- Reconciles locally via per-resource reconcilers (VM, NIC, volume, network, route, security group, template)
-- Reports status back via `UpdateResourceStatus`
+- TCP-dials cplane (NAT-friendly outbound) and hosts gRPC services on the dialed socket
+- **NodeAgent** service: `Identify`, `WatchEvents` (events flow up via response stream), `CurrentResources`
+- **Daemon proxies**: byte-level HTTP/2 forwarders for `mvirt.VmService`, `mvirt.PodService`, `mvirt.zfs.ZfsService`, `mvirt.net.NetService` — the cplane talks to local daemons through these
 
 ### Local Hypervisor (mvirt-vmm)
 
@@ -139,13 +141,13 @@ ratatui-based terminal UI with non-blocking async and background gRPC workers.
 
 ### Web UI (mvirt-ui)
 
-React + Vite + Tailwind dashboard. Communicates with mvirt-api REST API on port 8080.
+React + Vite + Tailwind dashboard. Communicates with mvirt-cplane REST API on port 8080.
 
 ## gRPC Services
 
 | Proto | Service | Port | Key RPCs |
 |-------|---------|------|----------|
-| `mvirt-api/proto/node.proto` | NodeService | 50056 | Register, Heartbeat, Deregister, WatchSpecs, UpdateResourceStatus |
+| `mvirt-cplane/proto/node.proto` | NodeAgent (hosted by node) | 50056 (reverse tunnel) | Identify, WatchEvents, CurrentResources |
 | `mvirt-vmm/proto/mvirt.proto` | VmService, PodService | 50051 | CreateVm, StartVm, StopVm, Console, PodLogs, PodExec |
 | `mvirt-one/proto/one.proto` | OneService | (vsock) | CreatePod, StartPod, StopPod, Logs, Exec |
 | `mvirt-zfs/proto/zfs.proto` | ZfsService | 50053 | CreateVolume, ImportTemplate, CreateSnapshot, CloneFromTemplate |
@@ -164,7 +166,8 @@ React + Vite + Tailwind dashboard. Communicates with mvirt-api REST API on port 
 ## Key Decisions
 
 - **Raft consensus** for distributed cluster state (mraft)
-- **Event sourcing** in mvirt-api state machine
+- **Event sourcing** in mvirt-cplane state machine
+- **Reverse tunnel**: nodes dial cplane (NAT-friendly); gRPC client/server roles invert at the gRPC layer
 - **Reconciliation loop** pattern (desired state vs actual state)
 - **SQLite** for local persistence
 - **cloud-hypervisor** instead of QEMU

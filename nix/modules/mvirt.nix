@@ -89,8 +89,8 @@ in {
       };
     };
 
-    api = {
-      enable = mkEnableOption "mvirt-api (REST API control plane)";
+    cplane = {
+      enable = mkEnableOption "mvirt-cplane (Raft consensus, REST API, scheduler, reconciler, tunnel acceptor)";
 
       port = mkOption {
         type = types.port;
@@ -104,10 +104,10 @@ in {
         description = "Run in development mode (single-node, ephemeral storage)";
       };
 
-      grpcListen = mkOption {
+      tunnelListen = mkOption {
         type = types.str;
-        default = "[::1]:50056";
-        description = "gRPC listen address for node agents";
+        default = "[::]:50056";
+        description = "Listen address for the reverse-tunnel (mvirt-node agents dial here)";
       };
 
       nodeId = mkOption {
@@ -119,7 +119,7 @@ in {
       extraArgs = mkOption {
         type = types.listOf types.str;
         default = [];
-        description = "Extra arguments to pass to mvirt-api";
+        description = "Extra arguments to pass to mvirt-cplane";
       };
     };
 
@@ -128,8 +128,8 @@ in {
 
       apiEndpoint = mkOption {
         type = types.str;
-        default = "http://[::1]:50056";
-        description = "mvirt-api gRPC endpoint for node registration and spec streaming";
+        default = "[::1]:50056";
+        description = "mvirt-cplane reverse-tunnel endpoint (host:port; the node TCP-dials here)";
       };
 
       extraArgs = mkOption {
@@ -347,20 +347,20 @@ in {
       };
     };
 
-    # mvirt-api service
-    systemd.services.mvirt-api = mkIf cfg.api.enable {
-      description = "mvirt API Server";
+    # mvirt-cplane service
+    systemd.services.mvirt-cplane = mkIf cfg.cplane.enable {
+      description = "mvirt control plane";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" "mvirt-log.service" "mvirt-vmm.service" "mvirt-zfs.service" "mvirt-ebpf.service" ];
-      wants = [ "mvirt-log.service" "mvirt-vmm.service" "mvirt-zfs.service" "mvirt-ebpf.service" ];
+      after = [ "network.target" "mvirt-log.service" ];
+      wants = [ "mvirt-log.service" ];
 
       serviceConfig = {
         Type = "simple";
         User = "root";
         ExecStart = let
-          devFlag = if cfg.api.dev then " --dev" else "";
-          nodeIdFlag = " --node-id ${toString cfg.api.nodeId}";
-        in "${mvirtPkgs}/bin/mvirt-api --listen [::]:${toString cfg.api.port} --grpc-listen ${cfg.api.grpcListen} --data-dir ${cfg.dataDir}/cp --log-endpoint http://[::1]:${toString cfg.log.port}${devFlag}${nodeIdFlag} ${concatStringsSep " " cfg.api.extraArgs}";
+          devFlag = if cfg.cplane.dev then " --dev" else "";
+          nodeIdFlag = " --node-id ${toString cfg.cplane.nodeId}";
+        in "${mvirtPkgs}/bin/mvirt-cplane --listen [::]:${toString cfg.cplane.port} --tunnel-listen ${cfg.cplane.tunnelListen} --data-dir ${cfg.dataDir}/cplane --log-endpoint http://[::1]:${toString cfg.log.port}${devFlag}${nodeIdFlag} ${concatStringsSep " " cfg.cplane.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
