@@ -104,6 +104,10 @@ export function Sidebar() {
           <NavLink
             key={item.name}
             to={item.href}
+            // `end` makes /orgs match only the bare list, not /orgs/:slug/projects.
+            // Without it react-router's prefix match lights up Organizations
+            // whenever the URL starts with /orgs.
+            end
             className={({ isActive }) =>
               cn(
                 'flex items-center rounded-md px-3 py-2 text-sm font-medium transition-all duration-200 border',
