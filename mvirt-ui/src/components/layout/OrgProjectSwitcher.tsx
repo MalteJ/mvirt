@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Building2, Check, ChevronDown, FolderKanban, Plus, Settings } from 'lucide-react'
+import { Building2, Check, ChevronDown, FolderKanban, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -188,7 +188,7 @@ export function OrgProjectSwitcher() {
             }}
             className="flex w-3/5 items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
           >
-            <Plus className="h-3 w-3" />
+            <Settings className="h-3 w-3" />
             {focusedOrg
               ? `Manage Projects in ${focusedOrg.slug}`
               : 'Manage Projects'}
