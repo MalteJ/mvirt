@@ -13,7 +13,13 @@ import { StoragePage } from './features/storage/StoragePage'
 import { NetworkPage } from './features/network/NetworkPage'
 import { FirewallPage, SecurityGroupDetailPage } from './features/firewall'
 import { LogsPage } from './features/logs/LogsPage'
-import { OrgsPage, OrgSettingsPage, ProjectsPage } from './features/admin'
+import {
+  ClusterDetailPage,
+  ClustersPage,
+  OrgsPage,
+  OrgSettingsPage,
+  ProjectsPage,
+} from './features/admin'
 import { WelcomePage } from './features/welcome'
 import { useAuth } from './hooks/useAuth'
 import { useProject } from './hooks/useProject'
@@ -183,6 +189,11 @@ function App() {
                   path="/orgs/:orgSlug/projects"
                   element={<ProjectsPage />}
                 />
+                <Route
+                  path="/orgs/:orgSlug/clusters"
+                  element={<ClustersPage />}
+                />
+                <Route path="/clusters/:slug" element={<ClusterDetailPage />} />
                 <Route path="/projects" element={<FlatProjectsRedirect />} />
 
                 {/* Project-scoped routes — slug-based per ADR-0004.
