@@ -17,7 +17,7 @@ import { OrgsPage, OrgSettingsPage, ProjectsPage } from './features/admin'
 import { WelcomePage } from './features/welcome'
 import { useAuth } from './hooks/useAuth'
 import { useProject } from './hooks/useProject'
-import { useProjects } from './hooks/queries'
+import { useOrgs, useProjects } from './hooks/queries'
 import { useOrg } from './hooks/useOrg'
 import { useEffect } from 'react'
 
@@ -39,58 +39,59 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-// Sync the URL slug into the project store so pages downstream can read
-// `useProject().currentProject` without re-resolving the slug themselves.
-function ProjectSync({ children }: { children: React.ReactNode }) {
-  const { projectSlug } = useParams<{ projectSlug: string }>()
-  const { currentProject, setCurrentProject } = useProject()
-  const { data: projects } = useProjects()
-
-  useEffect(() => {
-    if (projectSlug && projects) {
-      const project = projects.find((p) => p.slug === projectSlug)
-      if (project && (!currentProject || currentProject.slug !== projectSlug)) {
-        setCurrentProject(project)
-      }
-    }
-  }, [projectSlug, projects, currentProject, setCurrentProject])
-
-  return <>{children}</>
-}
-
-// Mounted at the protected-route root so it runs on every route change.
-// Enforces three discrete scope states based on the URL:
+// One-way URL → store sync. The URL is the single source of truth for
+// scope; the zustand stores are convenience caches for components that
+// would otherwise have to re-resolve the slug themselves (Sidebar nav,
+// Header label, hooks like useLogs that key on currentProject.slug).
 //
-//   1. project scope — URL `/projects/:slug/*` → both currentProject and
-//      currentOrg are kept (set by ProjectSync below).
-//   2. org scope — URL `/orgs/:slug/*` (any sub-path, NOT bare `/orgs`)
-//      → currentOrg kept, currentProject cleared.
-//   3. neither — everything else (welcome, /orgs admin list, /cluster, …)
-//      → both cleared.
+// Three URL shapes determine scope, in priority order:
 //
-// Without this active enforcement, the persisted zustand state from earlier
-// navigations leaks: the switcher label, pod/log queries, and other
-// consumers behave as if a project or org is active when the user has
-// moved to a page where neither is meaningful.
+//   1. `/projects/:projectSlug/*` → project scope
+//      → set currentProject from URL slug; set currentOrg from
+//        project's orgSlug.
+//   2. `/orgs/:orgSlug/...` (any sub-path; bare `/orgs` is admin list)
+//      → org scope
+//      → set currentOrg from URL; clear currentProject.
+//   3. anything else (welcome, `/orgs`, `/cluster`, …) → no scope
+//      → clear both.
+//
+// Critical: this effect depends ONLY on the URL and the loaded
+// orgs/projects lists — NOT on the current store values. Including the
+// store values in the dep array creates a race: a state-setter call
+// (e.g. from an action that's about to navigate) would re-run this
+// effect with the OLD pathname and clear the just-set state before
+// the navigation completes.
 function ScopeSync() {
   const { pathname } = useLocation()
-  const { currentProject, setCurrentProject } = useProject()
-  const { currentOrg, setCurrentOrg } = useOrg()
+  const { data: orgs } = useOrgs()
+  const { data: projects } = useProjects()
+  const { setCurrentProject } = useProject()
+  const { setCurrentOrg } = useOrg()
 
   useEffect(() => {
-    const inProjectScope = /^\/projects\//.test(pathname)
-    const inOrgScope = /^\/orgs\/[^/]+/.test(pathname)
+    const projectMatch = pathname.match(/^\/projects\/([^/]+)/)
+    const orgMatch = pathname.match(/^\/orgs\/([^/]+)/)
 
-    if (!inProjectScope && currentProject) {
-      // setCurrentProject's typed signature requires a Project; pass null
-      // via a cast — the store accepts it and downstream code already
-      // checks for null/undefined.
-      setCurrentProject(null as unknown as never)
+    if (projectMatch) {
+      const project = projects?.find((p) => p.slug === projectMatch[1])
+      if (project) {
+        setCurrentProject(project)
+        const org = orgs?.find((o) => o.slug === project.orgSlug)
+        if (org) setCurrentOrg(org)
+      }
+      return
     }
-    if (!inProjectScope && !inOrgScope && currentOrg) {
-      setCurrentOrg(null)
+
+    setCurrentProject(null as unknown as never)
+
+    if (orgMatch) {
+      const org = orgs?.find((o) => o.slug === orgMatch[1])
+      if (org) setCurrentOrg(org)
+      return
     }
-  }, [pathname, currentProject, currentOrg, setCurrentProject, setCurrentOrg])
+
+    setCurrentOrg(null)
+  }, [pathname, orgs, projects, setCurrentProject, setCurrentOrg])
 
   return null
 }
@@ -184,23 +185,23 @@ function App() {
                 />
                 <Route path="/projects" element={<FlatProjectsRedirect />} />
 
-                {/* Project-scoped routes — slug-based per ADR-0004 */}
+                {/* Project-scoped routes — slug-based per ADR-0004.
+                    ScopeSync (above) populates currentProject and
+                    currentOrg from the URL; pages can read them directly. */}
                 <Route
                   path="/projects/:projectSlug/*"
                   element={
-                    <ProjectSync>
-                      <Routes>
-                        <Route path="/dashboard" element={<DashboardPage />} />
-                        <Route path="/vms" element={<VmsPage />} />
-                        <Route path="/vms/new" element={<CreateVmPage />} />
-                        <Route path="/vms/:id" element={<VmDetailPage />} />
-                        <Route path="/storage" element={<StoragePage />} />
-                        <Route path="/network" element={<NetworkPage />} />
-                        <Route path="/firewall" element={<FirewallPage />} />
-                        <Route path="/firewall/:id" element={<SecurityGroupDetailPage />} />
-                        <Route path="/logs" element={<LogsPage />} />
-                      </Routes>
-                    </ProjectSync>
+                    <Routes>
+                      <Route path="/dashboard" element={<DashboardPage />} />
+                      <Route path="/vms" element={<VmsPage />} />
+                      <Route path="/vms/new" element={<CreateVmPage />} />
+                      <Route path="/vms/:id" element={<VmDetailPage />} />
+                      <Route path="/storage" element={<StoragePage />} />
+                      <Route path="/network" element={<NetworkPage />} />
+                      <Route path="/firewall" element={<FirewallPage />} />
+                      <Route path="/firewall/:id" element={<SecurityGroupDetailPage />} />
+                      <Route path="/logs" element={<LogsPage />} />
+                    </Routes>
                   }
                 />
 

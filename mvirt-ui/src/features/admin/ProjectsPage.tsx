@@ -8,8 +8,6 @@ import {
   useOrgs,
   useCreateProjectInOrg,
 } from '@/hooks/queries'
-import { useProject } from '@/hooks/useProject'
-import { useOrg } from '@/hooks/useOrg'
 import { DataTable } from '@/components/data-display/DataTable'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -52,31 +50,17 @@ function slugify(name: string): string {
 
 export function ProjectsPage() {
   const navigate = useNavigate()
-  // The Org context comes from the URL: `/orgs/:orgSlug/projects`. The route
-  // is the source of truth — useOrg syncs to it so the header switcher
-  // reflects what the page is actually showing.
+  // Org context comes from the URL: `/orgs/:orgSlug/projects`. ScopeSync
+  // (App.tsx) syncs the zustand store to this URL on every route change,
+  // so reading currentOrg here always reflects the URL.
   const { orgSlug: orgSlugFromUrl } = useParams<{ orgSlug: string }>()
   const { data: allProjects, isLoading } = useProjects()
   const { data: orgs } = useOrgs()
-  const { setCurrentProject } = useProject()
-  const { currentOrg, setCurrentOrg } = useOrg()
   const deleteProject = useDeleteProject()
 
-  // Resolve the URL Org from the loaded list. Falls back to the active Org
-  // if the URL has none (e.g. someone routed here without `:orgSlug`).
-  const scopedOrg =
-    orgs?.find((o) => o.slug === orgSlugFromUrl) ?? currentOrg ?? null
-
-  // Sync the global Org store with the URL: navigating to a different Org's
-  // projects view also flips the header switcher.
-  useEffect(() => {
-    if (
-      scopedOrg &&
-      (!currentOrg || currentOrg.slug !== scopedOrg.slug)
-    ) {
-      setCurrentOrg(scopedOrg)
-    }
-  }, [scopedOrg, currentOrg, setCurrentOrg])
+  // Resolve the URL Org from the loaded list. Used for filtering + the
+  // page header. Independent of the zustand store — the URL is truth here.
+  const scopedOrg = orgs?.find((o) => o.slug === orgSlugFromUrl) ?? null
 
   const [dialogOpen, setDialogOpen] = useState(false)
   const [orgSlug, setOrgSlug] = useState<string>('')
@@ -122,8 +106,7 @@ export function ProjectsPage() {
           setName('')
           setDescription('')
           setSlugTouched(false)
-          // Switch to the new project
-          setCurrentProject(project)
+          // ScopeSync will set currentProject from the URL.
           navigate(`/projects/${project.slug}/vms`)
         },
       }
@@ -184,10 +167,7 @@ export function ProjectsPage() {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem
-              onClick={() => {
-                setCurrentProject(row.original)
-                navigate(`/projects/${row.original.slug}/vms`)
-              }}
+              onClick={() => navigate(`/projects/${row.original.slug}/vms`)}
             >
               <FolderOpen className="mr-2 h-4 w-4" />
               Open

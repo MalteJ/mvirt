@@ -29,8 +29,8 @@ export function OrgProjectSwitcher() {
   const { pathname } = useLocation()
   const { data: orgs } = useOrgs()
   const { data: projects } = useProjects()
-  const { currentOrg, setCurrentOrg } = useOrg()
-  const { currentProject, setCurrentProject } = useProject()
+  const { currentOrg } = useOrg()
+  const { currentProject } = useProject()
   const [open, setOpen] = useState(false)
   const [focusedOrgSlug, setFocusedOrgSlug] = useState<string | null>(null)
 
@@ -51,12 +51,8 @@ export function OrgProjectSwitcher() {
     }
   }, [open, currentOrg, orgs])
 
-  // If the active Org disappears (deleted by another admin), drop it.
-  useEffect(() => {
-    if (currentOrg && orgs && !orgs.some((o) => o.slug === currentOrg.slug)) {
-      setCurrentOrg(orgs[0] ?? null)
-    }
-  }, [currentOrg, orgs, setCurrentOrg])
+  // ScopeSync owns currentOrg / currentProject — it derives them from the
+  // URL on every route change. Components in here only *read* the stores.
 
   const focusedOrg = orgs?.find((o) => o.slug === focusedOrgSlug) ?? null
   const focusedProjects =
@@ -88,13 +84,12 @@ export function OrgProjectSwitcher() {
     return <span className="text-muted-foreground">Select Project</span>
   })()
 
-  const activate = (org: Org, projectSlug: string) => {
-    const project = projects?.find((p) => p.slug === projectSlug)
-    if (!project) return
-    setCurrentOrg(org)
-    setCurrentProject(project)
+  const activate = (_org: Org, projectSlug: string) => {
+    // Navigate-only — ScopeSync will pick up the new URL and populate
+    // currentOrg + currentProject from it. Setting state here in addition
+    // races against ScopeSync's effect with the OLD pathname.
     setOpen(false)
-    navigate(`/projects/${project.slug}/vms`)
+    navigate(`/projects/${projectSlug}/vms`)
   }
 
   return (
@@ -203,10 +198,7 @@ export function OrgProjectSwitcher() {
           </Link>
           <Link
             to={focusedOrg ? `/orgs/${focusedOrg.slug}/projects` : '/orgs'}
-            onClick={() => {
-              if (focusedOrg) setCurrentOrg(focusedOrg)
-              setOpen(false)
-            }}
+            onClick={() => setOpen(false)}
             className="flex w-3/5 items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
           >
             <Settings className="h-3 w-3" />
