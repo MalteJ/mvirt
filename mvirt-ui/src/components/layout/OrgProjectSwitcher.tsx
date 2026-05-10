@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { Building2, Check, ChevronDown, FolderKanban, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -26,12 +26,19 @@ import type { Org } from '@/types'
  */
 export function OrgProjectSwitcher() {
   const navigate = useNavigate()
+  const { pathname } = useLocation()
   const { data: orgs } = useOrgs()
   const { data: projects } = useProjects()
   const { currentOrg, setCurrentOrg } = useOrg()
   const { currentProject, setCurrentProject } = useProject()
   const [open, setOpen] = useState(false)
   const [focusedOrgSlug, setFocusedOrgSlug] = useState<string | null>(null)
+
+  // The label reflects the page context, not just persisted store state.
+  // Inside `/projects/:slug/*` the user is in a project; everywhere else
+  // ("/orgs", "/orgs/:slug/projects", "/cluster", …) they're in Org scope
+  // even if a project was previously activated.
+  const inProjectScope = /^\/projects\//.test(pathname)
 
   // When the dropdown opens, focus the active Org by default; otherwise the
   // first Org. Keeps the right pane meaningful even before the user clicks.
@@ -53,7 +60,7 @@ export function OrgProjectSwitcher() {
     projects?.filter((p) => p.orgSlug === focusedOrgSlug) ?? []
 
   const triggerLabel = (() => {
-    if (currentProject && currentOrg) {
+    if (inProjectScope && currentProject && currentOrg) {
       return (
         <>
           <span className="text-muted-foreground font-mono">
@@ -61,6 +68,17 @@ export function OrgProjectSwitcher() {
           </span>
           <span className="text-muted-foreground/60 mx-1">/</span>
           <span className="font-medium">{currentProject.name}</span>
+        </>
+      )
+    }
+    if (currentOrg) {
+      return (
+        <>
+          <span className="text-muted-foreground font-mono">
+            {currentOrg.slug}
+          </span>
+          <span className="text-muted-foreground/60 mx-1">/</span>
+          <span className="text-muted-foreground">Select Project</span>
         </>
       )
     }
