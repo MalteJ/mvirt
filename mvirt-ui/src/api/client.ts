@@ -10,6 +10,12 @@ export class ApiError extends Error {
     super(message)
     this.name = 'ApiError'
   }
+
+  /** Stringification in toast/inline-error contexts shouldn't drag the
+   *  "ApiError: " prefix into the UI — return just the human message. */
+  toString(): string {
+    return this.message
+  }
 }
 
 async function authHeaders(): Promise<Record<string, string>> {
@@ -19,8 +25,22 @@ async function authHeaders(): Promise<Record<string, string>> {
 
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const errorText = await response.text()
-    throw new ApiError(response.status, errorText || response.statusText)
+    const text = await response.text()
+    // cplane returns errors as `{ "error": "<human message>", "code": <n> }`.
+    // Pull `error` out so the thrown ApiError carries just the human text;
+    // fall back to the raw body / status text on non-JSON responses.
+    let message = text || response.statusText
+    if (text) {
+      try {
+        const parsed = JSON.parse(text)
+        if (parsed && typeof parsed.error === 'string') {
+          message = parsed.error
+        }
+      } catch {
+        // not JSON — keep the raw text
+      }
+    }
+    throw new ApiError(response.status, message)
   }
   if (response.status === 204 || response.headers.get('content-length') === '0') {
     return undefined as T

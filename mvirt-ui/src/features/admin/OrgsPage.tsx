@@ -49,17 +49,27 @@ export function OrgsPage() {
   // confirmation message can show the display name even after the row
   // disappears from the list.
   const [orgToDelete, setOrgToDelete] = useState<Org | null>(null)
+  // The user must re-type the slug to confirm. Type-to-confirm exists for
+  // destructive multi-tenancy actions where a misclick is much worse than
+  // an extra keystroke.
+  const [deleteConfirmSlug, setDeleteConfirmSlug] = useState('')
+  const deleteConfirmMatches =
+    !!orgToDelete && deleteConfirmSlug === orgToDelete.slug
+
+  const openDeleteDialog = (org: Org) => {
+    setOrgToDelete(org)
+    setDeleteConfirmSlug('')
+    deleteOrg.reset()
+  }
   const closeDeleteDialog = () => {
     setOrgToDelete(null)
+    setDeleteConfirmSlug('')
     deleteOrg.reset()
   }
   const handleConfirmDelete = () => {
-    if (!orgToDelete) return
+    if (!orgToDelete || !deleteConfirmMatches) return
     deleteOrg.mutate(orgToDelete.slug, {
-      onSuccess: () => {
-        setOrgToDelete(null)
-        deleteOrg.reset()
-      },
+      onSuccess: () => closeDeleteDialog(),
     })
   }
 
@@ -143,7 +153,7 @@ export function OrgsPage() {
             </DropdownMenuItem>
             <DropdownMenuItem
               className="text-destructive"
-              onClick={() => setOrgToDelete(row.original)}
+              onClick={() => openDeleteDialog(row.original)}
             >
               <Trash2 className="mr-2 h-4 w-4" />
               Delete
@@ -256,34 +266,56 @@ export function OrgsPage() {
         }}
       >
         <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete Organization</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete{' '}
-              <span className="font-medium text-foreground">
-                {orgToDelete?.name}
-              </span>
-              ? Will be rejected if any Projects still belong to it.
-            </DialogDescription>
-          </DialogHeader>
-          {deleteOrg.error && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {String(deleteOrg.error)}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              handleConfirmDelete()
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>Delete Organization</DialogTitle>
+              <DialogDescription>
+                Are you sure you want to delete{' '}
+                <span className="font-medium text-foreground">
+                  {orgToDelete?.name}
+                </span>
+                ? Will be rejected if any Projects still belong to it.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-2 py-4">
+              <Label htmlFor="confirm-slug">
+                Type{' '}
+                <span className="font-mono text-foreground">
+                  {orgToDelete?.slug}
+                </span>{' '}
+                to confirm
+              </Label>
+              <Input
+                id="confirm-slug"
+                className="font-mono"
+                autoComplete="off"
+                value={deleteConfirmSlug}
+                onChange={(e) => setDeleteConfirmSlug(e.target.value)}
+              />
             </div>
-          )}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={closeDeleteDialog}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={deleteOrg.isPending}
-              onClick={handleConfirmDelete}
-            >
-              {deleteOrg.isPending ? 'Deleting…' : 'Delete'}
-            </Button>
-          </DialogFooter>
+            {deleteOrg.error && (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {String(deleteOrg.error)}
+              </div>
+            )}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={closeDeleteDialog}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                variant="destructive"
+                disabled={!deleteConfirmMatches || deleteOrg.isPending}
+              >
+                {deleteOrg.isPending ? 'Deleting…' : 'Delete'}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
     </div>
