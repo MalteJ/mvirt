@@ -150,7 +150,7 @@ function App() {
             <ProjectScopeSync />
             <Layout>
               <Routes>
-                <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/" element={<Navigate to="/orgs" replace />} />
                 <Route path="/dashboard" element={<ProjectRedirect path="/dashboard" />} />
                 <Route path="/cluster" element={<ClusterPage />} />
                 <Route path="/cluster/:id" element={<NodeDetailPage />} />
