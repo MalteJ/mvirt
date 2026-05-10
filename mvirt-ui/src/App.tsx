@@ -13,7 +13,7 @@ import { StoragePage } from './features/storage/StoragePage'
 import { NetworkPage } from './features/network/NetworkPage'
 import { FirewallPage, SecurityGroupDetailPage } from './features/firewall'
 import { LogsPage } from './features/logs/LogsPage'
-import { OrgsPage, ProjectsPage } from './features/admin'
+import { OrgsPage, OrgSettingsPage, ProjectsPage } from './features/admin'
 import { WelcomePage } from './features/welcome'
 import { useAuth } from './hooks/useAuth'
 import { useProject } from './hooks/useProject'
@@ -174,6 +174,10 @@ function App() {
                 <Route path="/cluster" element={<ClusterPage />} />
                 <Route path="/cluster/:id" element={<NodeDetailPage />} />
                 <Route path="/orgs" element={<OrgsPage />} />
+                <Route
+                  path="/orgs/:orgSlug/settings"
+                  element={<OrgSettingsPage />}
+                />
                 <Route
                   path="/orgs/:orgSlug/projects"
                   element={<ProjectsPage />}

@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::command::{
-    NetworkData, NicData, OrgData, ProjectData, SnapshotData, TemplateData, TemplatePhase, VmData,
-    VmDesiredState, VmPhase, VolumeData, VolumePhase,
+    NetworkData, NicData, OrgContact, OrgData, ProjectData, SnapshotData, TemplateData,
+    TemplatePhase, VmData, VmDesiredState, VmPhase, VolumeData, VolumePhase,
 };
 
 // =============================================================================
@@ -276,6 +276,58 @@ pub struct NicListResponse {
 // Org Types
 // =============================================================================
 
+/// Org contact / billing details surfaced over the wire.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiOrgContact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legal_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub street_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postal_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub technical_contact_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_contact_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vat_id: Option<String>,
+}
+
+impl From<OrgContact> for UiOrgContact {
+    fn from(c: OrgContact) -> Self {
+        Self {
+            legal_name: c.legal_name,
+            street_address: c.street_address,
+            postal_code: c.postal_code,
+            city: c.city,
+            country: c.country,
+            technical_contact_email: c.technical_contact_email,
+            billing_contact_email: c.billing_contact_email,
+            vat_id: c.vat_id,
+        }
+    }
+}
+
+impl From<UiOrgContact> for OrgContact {
+    fn from(c: UiOrgContact) -> Self {
+        Self {
+            legal_name: c.legal_name,
+            street_address: c.street_address,
+            postal_code: c.postal_code,
+            city: c.city,
+            country: c.country,
+            technical_contact_email: c.technical_contact_email,
+            billing_contact_email: c.billing_contact_email,
+            vat_id: c.vat_id,
+        }
+    }
+}
+
 /// UI-compatible Org representation
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -284,6 +336,7 @@ pub struct UiOrg {
     pub name: String,
     pub default_static_key_ttl_days: u32,
     pub disallow_static_keys: bool,
+    pub contact: UiOrgContact,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -295,6 +348,7 @@ impl From<OrgData> for UiOrg {
             name: data.name,
             default_static_key_ttl_days: data.default_static_key_ttl_days,
             disallow_static_keys: data.disallow_static_keys,
+            contact: UiOrgContact::from(data.contact),
             created_at: data.created_at,
             updated_at: data.updated_at,
         }
@@ -324,6 +378,11 @@ pub struct UiUpdateOrgRequest {
     pub default_static_key_ttl_days: Option<u32>,
     #[serde(default)]
     pub disallow_static_keys: Option<bool>,
+    /// Whole new contact record (partial updates are done client-side: the
+    /// UI fetches the current Org, lets the user edit, and posts the
+    /// resulting full record).
+    #[serde(default)]
+    pub contact: Option<UiOrgContact>,
 }
 
 /// Response wrapper for Org list

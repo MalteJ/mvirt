@@ -142,6 +142,7 @@ pub enum Command {
         name: String,
         default_static_key_ttl_days: u32,
         disallow_static_keys: bool,
+        contact: OrgContact,
     },
     UpdateOrg {
         request_id: String,
@@ -150,6 +151,11 @@ pub enum Command {
         name: Option<String>,
         default_static_key_ttl_days: Option<u32>,
         disallow_static_keys: Option<bool>,
+        // Contact patch — `Some(value)` writes that value (including
+        // `Some(None)` to clear an individual sub-field), `None` leaves the
+        // sub-field unchanged. The outer `Option` distinguishes "patch not
+        // included" from "patch with explicit nulls".
+        contact: Option<OrgContact>,
     },
     DeleteOrg {
         request_id: String,
@@ -500,6 +506,28 @@ pub enum ResourcePhase {
 // Organization Types
 // =============================================================================
 
+/// Contact / billing details for an Organization. All fields optional —
+/// a fresh Org has nothing filled in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OrgContact {
+    /// Legal company name (Firmenname).
+    pub legal_name: Option<String>,
+    /// Street and house number on a single line (Straße/Hausnummer).
+    pub street_address: Option<String>,
+    /// Postal code (PLZ).
+    pub postal_code: Option<String>,
+    /// City (Ort).
+    pub city: Option<String>,
+    /// ISO-3166 country (free text for now; we'll tighten later).
+    pub country: Option<String>,
+    /// Technical contact (incident notifications, abuse).
+    pub technical_contact_email: Option<String>,
+    /// Billing contact (invoices, dunning).
+    pub billing_contact_email: Option<String>,
+    /// VAT identification number (USt-IdNr.).
+    pub vat_id: Option<String>,
+}
+
 /// Organization data — the tenancy container above Project. See ADR-0004.
 /// The slug is the primary key (kebab-case, platform-unique, immutable).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -508,6 +536,7 @@ pub struct OrgData {
     pub name: String,
     pub default_static_key_ttl_days: u32,
     pub disallow_static_keys: bool,
+    pub contact: OrgContact,
     pub created_at: String,
     pub updated_at: String,
 }

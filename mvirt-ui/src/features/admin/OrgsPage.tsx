@@ -1,6 +1,7 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { ColumnDef } from '@tanstack/react-table'
-import { MoreHorizontal, Plus, Trash2 } from 'lucide-react'
+import { MoreHorizontal, Plus, Settings, Trash2 } from 'lucide-react'
 import { useOrgs, useCreateOrg, useDeleteOrg } from '@/hooks/queries'
 import { DataTable } from '@/components/data-display/DataTable'
 import { Button } from '@/components/ui/button'
@@ -33,6 +34,7 @@ function slugify(name: string): string {
 }
 
 export function OrgsPage() {
+  const navigate = useNavigate()
   const { data: orgs, isLoading } = useOrgs()
   const createOrg = useCreateOrg()
   const deleteOrg = useDeleteOrg()
@@ -114,6 +116,12 @@ export function OrgsPage() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onClick={() => navigate(`/orgs/${row.original.slug}/settings`)}
+            >
+              <Settings className="mr-2 h-4 w-4" />
+              Settings
+            </DropdownMenuItem>
             <DropdownMenuItem
               className="text-destructive"
               onClick={() => {

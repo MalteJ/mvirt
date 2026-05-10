@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::command::{
-    NetworkData, NicData, NodeData, NodeResources, NodeStatus, OrgData, ProjectData, RuleDirection,
-    SecurityGroupData, TemplateData, TemplatePhase, VmData, VmDesiredState, VmSpec, VmStatus,
-    VolumeData,
+    NetworkData, NicData, NodeData, NodeResources, NodeStatus, OrgContact, OrgData, ProjectData,
+    RuleDirection, SecurityGroupData, TemplateData, TemplatePhase, VmData, VmDesiredState, VmSpec,
+    VmStatus, VolumeData,
 };
 use std::collections::HashMap;
 
@@ -126,11 +126,14 @@ pub struct CreateOrgRequest {
 }
 
 /// Request to update an Org. All fields optional; unset fields are unchanged.
+/// `contact` is the new full contact record — the handler builds it by
+/// merging the user-supplied patch over the current value.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateOrgRequest {
     pub name: Option<String>,
     pub default_static_key_ttl_days: Option<u32>,
     pub disallow_static_keys: Option<bool>,
+    pub contact: Option<OrgContact>,
 }
 
 /// Request to create a new project.

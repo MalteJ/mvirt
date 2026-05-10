@@ -8,8 +8,8 @@ use mraft::RaftNode;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::command::{
-    Command, NetworkData, NicData, NodeData, OrgData, ProjectData, Response, TemplateData, VmData,
-    VmPhase, VmStatus, VolumeData,
+    Command, NetworkData, NicData, NodeData, OrgContact, OrgData, ProjectData, Response,
+    TemplateData, VmData, VmPhase, VmStatus, VolumeData,
 };
 use crate::scheduler::Scheduler;
 use crate::state::ApiState;
@@ -573,6 +573,7 @@ impl OrgStore for RaftStore {
             name: req.name,
             default_static_key_ttl_days: req.default_static_key_ttl_days.unwrap_or(90),
             disallow_static_keys: req.disallow_static_keys.unwrap_or(false),
+            contact: OrgContact::default(),
         };
 
         match self.write_command(cmd).await? {
@@ -591,6 +592,7 @@ impl OrgStore for RaftStore {
             name: req.name,
             default_static_key_ttl_days: req.default_static_key_ttl_days,
             disallow_static_keys: req.disallow_static_keys,
+            contact: req.contact,
         };
 
         match self.write_command(cmd).await? {

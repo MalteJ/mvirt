@@ -125,6 +125,7 @@ use crate::auth::{JwtValidator, require_auth};
         handlers::ApiError,
         // UI schemas - Orgs
         ui_types::UiOrg,
+        ui_types::UiOrgContact,
         ui_types::UiCreateOrgRequest,
         ui_types::UiUpdateOrgRequest,
         ui_types::OrgListResponse,

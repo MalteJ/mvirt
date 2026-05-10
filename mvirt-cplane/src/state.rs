@@ -15,9 +15,10 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::command::VolumePhase;
 use crate::command::{
-    Command, NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus, OrgData, ProjectData,
-    Response, SecurityGroupData, SecurityGroupRuleData, SnapshotData, TemplateData, TemplatePhase,
-    TemplateSpec, TemplateStatus, VmData, VmPhase, VmStatus, VolumeData, VolumeSpec, VolumeStatus,
+    Command, NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus, OrgContact, OrgData,
+    ProjectData, Response, SecurityGroupData, SecurityGroupRuleData, SnapshotData, TemplateData,
+    TemplatePhase, TemplateSpec, TemplateStatus, VmData, VmPhase, VmStatus, VolumeData, VolumeSpec,
+    VolumeStatus,
 };
 use crate::store::Event;
 
@@ -1175,6 +1176,7 @@ impl StateMachine<Command, Response> for ApiState {
                 name,
                 default_static_key_ttl_days,
                 disallow_static_keys,
+                contact,
                 ..
             } => {
                 let txn = self.db.begin_write().expect("begin");
@@ -1194,6 +1196,7 @@ impl StateMachine<Command, Response> for ApiState {
                     name,
                     default_static_key_ttl_days,
                     disallow_static_keys,
+                    contact,
                     created_at: timestamp.clone(),
                     updated_at: timestamp,
                 };
@@ -1209,6 +1212,7 @@ impl StateMachine<Command, Response> for ApiState {
                 name,
                 default_static_key_ttl_days,
                 disallow_static_keys,
+                contact,
                 ..
             } => {
                 let txn = self.db.begin_write().expect("begin");
@@ -1229,6 +1233,13 @@ impl StateMachine<Command, Response> for ApiState {
                 }
                 if let Some(d) = disallow_static_keys {
                     org.disallow_static_keys = d;
+                }
+                if let Some(c) = contact {
+                    // Whole-record replace. The REST handler echoes the
+                    // current contact and overwrites only the fields the
+                    // user changed in the form, so a partial PATCH on the
+                    // wire still ends up as a full record here.
+                    org.contact = c;
                 }
                 org.updated_at = timestamp;
                 txn_put(&txn, ORGS, &slug, &org);
@@ -1285,10 +1296,7 @@ impl StateMachine<Command, Response> for ApiState {
                     return (
                         Response::Error {
                             code: 409,
-                            message: format!(
-                                "Project with slug '{}' already exists",
-                                slug
-                            ),
+                            message: format!("Project with slug '{}' already exists", slug),
                         },
                         vec![],
                     );
@@ -2443,6 +2451,7 @@ mod tests {
             name: format!("Org {}", slug),
             default_static_key_ttl_days: 90,
             disallow_static_keys: false,
+            contact: OrgContact::default(),
         }
     }
 

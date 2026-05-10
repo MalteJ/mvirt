@@ -119,6 +119,7 @@ pub async fn update_org(
         name: req.name,
         default_static_key_ttl_days: req.default_static_key_ttl_days,
         disallow_static_keys: req.disallow_static_keys,
+        contact: req.contact.map(Into::into),
     };
     let data = state.store.update_org(&org.slug, store_req).await?;
     Ok(Json(UiOrg::from(data)))
