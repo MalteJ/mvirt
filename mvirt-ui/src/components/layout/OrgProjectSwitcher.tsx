@@ -35,10 +35,13 @@ export function OrgProjectSwitcher() {
   const [focusedOrgSlug, setFocusedOrgSlug] = useState<string | null>(null)
 
   // The label reflects the page context, not just persisted store state.
-  // Inside `/projects/:slug/*` the user is in a project; everywhere else
-  // ("/orgs", "/orgs/:slug/projects", "/cluster", …) they're in Org scope
-  // even if a project was previously activated.
+  // - `/projects/:slug/*` — inside a project; show "{org} / project".
+  // - `/orgs` (plain) — Organizations admin list; no Org is scoped here,
+  //   show plain "Select Project".
+  // - everything else with an active Org — Org-scoped (e.g.
+  //   `/orgs/:slug/projects`, `/cluster`); show "{org} / Select Project".
   const inProjectScope = /^\/projects\//.test(pathname)
+  const isOrgsAdminList = pathname === '/orgs' || pathname === '/orgs/'
 
   // When the dropdown opens, focus the active Org by default; otherwise the
   // first Org. Keeps the right pane meaningful even before the user clicks.
@@ -71,7 +74,7 @@ export function OrgProjectSwitcher() {
         </>
       )
     }
-    if (currentOrg) {
+    if (currentOrg && !isOrgsAdminList) {
       return (
         <>
           <span className="text-muted-foreground font-mono">
