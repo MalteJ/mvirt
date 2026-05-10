@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useParams } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom'
 import { Layout } from './components/layout/Layout'
 import { LoginPage } from './features/auth/LoginPage'
 import { TermsPage } from './features/auth/TermsPage'
@@ -56,6 +56,26 @@ function ProjectSync({ children }: { children: React.ReactNode }) {
   }, [projectSlug, projects, currentProject, setCurrentProject])
 
   return <>{children}</>
+}
+
+// Mounted at the protected-route root so it runs on every route change.
+// Clears the active-project store when the URL leaves `/projects/:slug/*` —
+// without this, `currentProject` from a previous project visit lingers and
+// downstream consumers (label, pod-list query, log query, …) think a
+// project is active in the middle of an Org-scoped page.
+function ProjectScopeSync() {
+  const { pathname } = useLocation()
+  const { currentProject, setCurrentProject } = useProject()
+  useEffect(() => {
+    const inProjectScope = /^\/projects\//.test(pathname)
+    if (!inProjectScope && currentProject) {
+      // setCurrentProject's typed signature requires a Project; pass null via
+      // a cast — the store happily accepts it and downstream code already
+      // checks for null/undefined.
+      setCurrentProject(null as unknown as never)
+    }
+  }, [pathname, currentProject, setCurrentProject])
+  return null
 }
 
 // Redirect to the active project (or first one in the active Org). Falls
@@ -128,6 +148,7 @@ function App() {
         path="/*"
         element={
           <ProtectedRoute>
+            <ProjectScopeSync />
             <Layout>
               <Routes>
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
