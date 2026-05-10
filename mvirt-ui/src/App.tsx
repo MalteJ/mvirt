@@ -59,22 +59,39 @@ function ProjectSync({ children }: { children: React.ReactNode }) {
 }
 
 // Mounted at the protected-route root so it runs on every route change.
-// Clears the active-project store when the URL leaves `/projects/:slug/*` —
-// without this, `currentProject` from a previous project visit lingers and
-// downstream consumers (label, pod-list query, log query, …) think a
-// project is active in the middle of an Org-scoped page.
-function ProjectScopeSync() {
+// Enforces three discrete scope states based on the URL:
+//
+//   1. project scope — URL `/projects/:slug/*` → both currentProject and
+//      currentOrg are kept (set by ProjectSync below).
+//   2. org scope — URL `/orgs/:slug/*` (any sub-path, NOT bare `/orgs`)
+//      → currentOrg kept, currentProject cleared.
+//   3. neither — everything else (welcome, /orgs admin list, /cluster, …)
+//      → both cleared.
+//
+// Without this active enforcement, the persisted zustand state from earlier
+// navigations leaks: the switcher label, pod/log queries, and other
+// consumers behave as if a project or org is active when the user has
+// moved to a page where neither is meaningful.
+function ScopeSync() {
   const { pathname } = useLocation()
   const { currentProject, setCurrentProject } = useProject()
+  const { currentOrg, setCurrentOrg } = useOrg()
+
   useEffect(() => {
     const inProjectScope = /^\/projects\//.test(pathname)
+    const inOrgScope = /^\/orgs\/[^/]+/.test(pathname)
+
     if (!inProjectScope && currentProject) {
-      // setCurrentProject's typed signature requires a Project; pass null via
-      // a cast — the store happily accepts it and downstream code already
+      // setCurrentProject's typed signature requires a Project; pass null
+      // via a cast — the store accepts it and downstream code already
       // checks for null/undefined.
       setCurrentProject(null as unknown as never)
     }
-  }, [pathname, currentProject, setCurrentProject])
+    if (!inProjectScope && !inOrgScope && currentOrg) {
+      setCurrentOrg(null)
+    }
+  }, [pathname, currentProject, currentOrg, setCurrentProject, setCurrentOrg])
+
   return null
 }
 
@@ -148,7 +165,7 @@ function App() {
         path="/*"
         element={
           <ProtectedRoute>
-            <ProjectScopeSync />
+            <ScopeSync />
             <Layout>
               <Routes>
                 <Route path="/" element={<WelcomePage />} />
