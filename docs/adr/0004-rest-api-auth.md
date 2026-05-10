@@ -214,29 +214,54 @@ A single resolution step yields an `Account`, regardless of credential kind. Aut
 - FederatedTrust policies: stored in plaintext (issuer URL, audience, required claim values).
 - Bootstrap email/sub: read from env at runtime, not persisted.
 
-## Forward compatibility: Cluster (a named subset of Nodes)
+## Forward compatibility: Cluster (a named subset of Nodes, Org-scoped)
 
-A planned follow-up entity, **deferred to its own ADR** but flagged here because it shapes the scope hierarchy we commit to today: a `Cluster` is a named, explicitly-listed subset of Nodes (a placement target). Clusters can be:
+A planned follow-up entity, **deferred to its own ADR** but flagged here because it shapes the scope hierarchy we commit to today: a `Cluster` is a named, explicitly-listed subset of Nodes (a placement target).
 
-- **Project-scoped** — owned by one Project, only that Project may place resources on its Nodes. Use case: a customer brings their own hardware.
-- **Org-scoped** — visible to every Project in one Org. Use case: an enterprise puts compliance-bound Projects on FIPS-validated hardware.
-- **Platform-scoped (global)** — visible to every Project. Use case: the operator's general-purpose pool.
+For v1 the scope is **Org only**: every Cluster belongs to exactly one Org, and an Org can have many Clusters (typically one per physical site / availability zone). Project-scoped and platform-scoped Clusters are deliberately deferred — they add cross-Org sharing or per-tenant ownership questions that v1 doesn't need to answer.
 
-The `MembershipScope` enum extends naturally:
+Why Org-scoped only:
+
+- The customer-brings-their-own-hardware case is satisfied by giving that customer their own Org plus that Org's Clusters; we don't need a separate Project-scoped Cluster kind.
+- The "platform's general-purpose pool" case is satisfied by an operator-owned Org with one or more Clusters that other Orgs are *not* members of. If we later want true cross-Org sharing, that lands as a separate ADR introducing a sharing relation, not as a new Cluster scope.
+- Avoiding scope-of-Cluster keeps the data model and the Authorizer cascade simple.
+
+The `MembershipScope` enum still admits a future Cluster level (admin/member/viewer for managing the Cluster's Node list), but the *resource-placement* relation is plain Org → Cluster:
 
 ```rust
 enum MembershipScope {
     Platform,
-    Org { org_id: String },
-    Project { project_id: String },
-    // Added in the Cluster ADR:
+    Org { org_slug: String },
+    Project { project_slug: String },
+    // Added in the Cluster ADR (Cluster scope is purely *about* the Cluster
+    // entity — its Node list, admins. The Cluster's parent Org governs which
+    // Projects may place resources on it):
     // Cluster { cluster_id: String },
 }
 ```
 
-…and the cascade similarly grows a Cluster level (admin/member/viewer for managing the Cluster's Node list, picking a Cluster as placement target, etc.). Resource scheduling moves from "any Node" to "any Node in a Cluster the requester is allowed to use", with the existing Project membership still gating which resources the requester can create at all.
+Schema sketch (lands in its own ADR):
 
-The Cluster entity intentionally does *not* land in this ADR — it touches the scheduler, NodeRegistry, and reconciler in a non-trivial way. What we are committing to here is only that the Membership scope and role-naming choices leave room for it without another rename round.
+```rust
+struct ClusterData {
+    id: String,
+    slug: String,         // unique within the parent Org
+    org_slug: String,     // FK
+    name: String,
+    description: Option<String>,
+    location: Option<String>,  // free-text site / region label
+    node_ids: Vec<String>,
+    created_at: String,
+    updated_at: String,
+}
+```
+
+Resource placement: VM / Volume / Template creation moves from "pick a Node directly" to "pick a Cluster from the resource's owning Org, the scheduler picks the Node within it". A Cluster slug is unique within its Org (mirrors the Org → Project naming pattern).
+
+The Cluster entity intentionally does *not* land in this ADR — it touches the scheduler, NodeRegistry, and reconciler in a non-trivial way. What we are committing to here is only that:
+
+1. The Cluster lives under the Org (one-to-many Org → Cluster).
+2. The Membership scope and role-naming choices leave room for Cluster-level roles without another rename round.
 
 Naming reconciliation: ADR-0001 and ADR-0002 use "the cluster" colloquially for the whole mvirt deployment. With `Cluster` becoming a first-class entity, those documents will need a wording pass when this lands; the role-rename in this ADR (`platform-admin` instead of `cluster-admin`) is the load-bearing change.
 
