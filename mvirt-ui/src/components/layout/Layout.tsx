@@ -1,16 +1,16 @@
 import { ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { FolderKanban, Sparkles } from 'lucide-react'
+import { Building2, FolderKanban, Sparkles } from 'lucide-react'
 import { Sidebar } from './Sidebar'
 import { Header } from './Header'
 import { Button } from '@/components/ui/button'
-import { useProjects } from '@/hooks/queries'
+import { useOrgs, useProjects } from '@/hooks/queries'
 
 interface LayoutProps {
   children: ReactNode
 }
 
-function EmptyProjectsState() {
+function EmptyProjectsState({ hasOrgs }: { hasOrgs: boolean }) {
   const navigate = useNavigate()
 
   return (
@@ -22,7 +22,11 @@ function EmptyProjectsState() {
           </div>
           <div className="relative flex items-center justify-center">
             <div className="flex h-24 w-24 items-center justify-center rounded-2xl bg-gradient-to-br from-purple to-blue shadow-glow-purple">
-              <FolderKanban className="h-12 w-12 text-white" />
+              {hasOrgs ? (
+                <FolderKanban className="h-12 w-12 text-white" />
+              ) : (
+                <Building2 className="h-12 w-12 text-white" />
+              )}
             </div>
           </div>
         </div>
@@ -30,16 +34,17 @@ function EmptyProjectsState() {
           It's quiet... too quiet
         </h2>
         <p className="text-muted-foreground mb-8">
-          No VMs humming, no containers running, no packets flowing.
-          Time to bring this place to life.
+          {hasOrgs
+            ? 'No VMs humming, no containers running, no packets flowing. Time to bring this place to life.'
+            : 'No organization yet. Create one to get started — every project lives under an Org.'}
         </p>
         <Button
           size="lg"
-          onClick={() => navigate('/projects')}
+          onClick={() => navigate(hasOrgs ? '/projects' : '/orgs')}
           className="gap-2"
         >
           <Sparkles className="h-4 w-4" />
-          Let's Build Something
+          {hasOrgs ? "Let's Build Something" : 'Create your first Org'}
         </Button>
       </div>
     </div>
@@ -48,13 +53,24 @@ function EmptyProjectsState() {
 
 export function Layout({ children }: LayoutProps) {
   const location = useLocation()
-  const { data: projects, isLoading } = useProjects()
+  const { data: projects, isLoading: projectsLoading } = useProjects()
+  const { data: orgs, isLoading: orgsLoading } = useOrgs()
 
   const hasProjects = projects && projects.length > 0
-  const isProjectsPage = location.pathname === '/projects'
+  const hasOrgs = !!orgs && orgs.length > 0
+  // The admin pages (Orgs, Projects, Cluster) and Org-create flow must remain
+  // reachable even when nothing else exists — otherwise the empty-state
+  // overlay traps the user on a CTA that points at the very page it's
+  // hiding.
+  const isAdminPage =
+    location.pathname === '/orgs' ||
+    location.pathname.startsWith('/orgs/') ||
+    location.pathname === '/projects' ||
+    location.pathname === '/cluster' ||
+    location.pathname.startsWith('/cluster/')
 
-  // Show empty state if no projects exist (except on the projects page itself)
-  const showEmptyState = !isLoading && !hasProjects && !isProjectsPage
+  const showEmptyState =
+    !projectsLoading && !orgsLoading && !hasProjects && !isAdminPage
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -66,7 +82,7 @@ export function Layout({ children }: LayoutProps) {
         <div className="relative z-10 flex flex-1 flex-col overflow-hidden">
           <Header />
           <main className="main-content flex-1 overflow-auto p-6">
-            {showEmptyState ? <EmptyProjectsState /> : children}
+            {showEmptyState ? <EmptyProjectsState hasOrgs={hasOrgs} /> : children}
           </main>
         </div>
       </div>
