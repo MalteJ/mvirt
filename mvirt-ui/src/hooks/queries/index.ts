@@ -1,5 +1,4 @@
 export * from './useVms'
-export * from './usePods'
 export * from './useOrgs'
 export * from './useProjects'
 export * from './useStorage'

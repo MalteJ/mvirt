@@ -9,7 +9,6 @@ import { NodeDetailPage } from './features/cluster/NodeDetailPage'
 import { VmsPage } from './features/vms/VmsPage'
 import { VmDetailPage } from './features/vms/VmDetailPage'
 import { CreateVmPage } from './features/vms/CreateVmPage'
-import { ContainersPage, CreatePodPage, PodDetailPage } from './features/containers'
 import { StoragePage } from './features/storage/StoragePage'
 import { NetworkPage } from './features/network/NetworkPage'
 import { FirewallPage, SecurityGroupDetailPage } from './features/firewall'
@@ -172,9 +171,6 @@ function App() {
                         <Route path="/vms" element={<VmsPage />} />
                         <Route path="/vms/new" element={<CreateVmPage />} />
                         <Route path="/vms/:id" element={<VmDetailPage />} />
-                        <Route path="/containers" element={<ContainersPage />} />
-                        <Route path="/containers/new" element={<CreatePodPage />} />
-                        <Route path="/containers/:id" element={<PodDetailPage />} />
                         <Route path="/storage" element={<StoragePage />} />
                         <Route path="/network" element={<NetworkPage />} />
                         <Route path="/firewall" element={<FirewallPage />} />
@@ -191,8 +187,6 @@ function App() {
                 {/* Bare-path redirects pick a default project. */}
                 <Route path="/vms" element={<ProjectRedirect path="/vms" />} />
                 <Route path="/vms/*" element={<ProjectRedirect path="/vms" />} />
-                <Route path="/containers" element={<ProjectRedirect path="/containers" />} />
-                <Route path="/containers/*" element={<ProjectRedirect path="/containers" />} />
                 <Route path="/storage" element={<ProjectRedirect path="/storage" />} />
                 <Route path="/network" element={<ProjectRedirect path="/network" />} />
                 <Route path="/firewall" element={<ProjectRedirect path="/firewall" />} />

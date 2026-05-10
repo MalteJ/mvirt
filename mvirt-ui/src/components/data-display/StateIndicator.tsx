@@ -1,8 +1,8 @@
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
-import { VmState, PodState, ContainerState } from '@/types'
+import { VmState } from '@/types'
 
-type State = VmState | PodState | ContainerState
+type State = VmState
 
 interface StateIndicatorProps {
   state: State
@@ -18,38 +18,17 @@ interface StateConfig {
 
 function getStateConfig(state: State): StateConfig {
   switch (state) {
-    // Running states
     case VmState.RUNNING:
-    case PodState.RUNNING:
-    case ContainerState.RUNNING:
       return { variant: 'running', label: 'Running', pulse: false }
 
-    // Starting/transitioning states
     case VmState.STARTING:
-    case PodState.STARTING:
       return { variant: 'starting', label: 'Starting', pulse: true }
 
     case VmState.STOPPING:
-    case PodState.STOPPING:
       return { variant: 'starting', label: 'Stopping', pulse: true }
 
-    case ContainerState.CREATING:
-      return { variant: 'starting', label: 'Creating', pulse: true }
-
-    // Stopped/created states
     case VmState.STOPPED:
-    case PodState.STOPPED:
-    case ContainerState.STOPPED:
       return { variant: 'stopped', label: 'Stopped', pulse: false }
-
-    case PodState.CREATED:
-    case ContainerState.CREATED:
-      return { variant: 'stopped', label: 'Created', pulse: false }
-
-    // Error states
-    case PodState.FAILED:
-    case ContainerState.FAILED:
-      return { variant: 'error', label: 'Failed', pulse: false }
 
     default:
       return { variant: 'stopped', label: String(state), pulse: false }

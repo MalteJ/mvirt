@@ -35,7 +35,7 @@ function EmptyProjectsState({ hasOrgs }: { hasOrgs: boolean }) {
         </h2>
         <p className="text-muted-foreground mb-8">
           {hasOrgs
-            ? 'No VMs humming, no containers running, no packets flowing. Time to bring this place to life.'
+            ? 'No VMs humming, no packets flowing. Time to bring this place to life.'
             : 'No organization yet. Create one to get started — every project lives under an Org.'}
         </p>
         <Button

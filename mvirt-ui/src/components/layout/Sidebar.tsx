@@ -1,7 +1,6 @@
 import { NavLink, Link, useLocation } from 'react-router-dom'
 import {
   Server,
-  Container,
   HardDrive,
   Network,
   Flame,
@@ -16,7 +15,6 @@ import { useOrg } from '@/hooks/useOrg'
 
 const navigation = [
   { name: 'Virtual Machines', path: '/vms', icon: Server },
-  { name: 'Containers', path: '/containers', icon: Container },
   { name: 'Storage', path: '/storage', icon: HardDrive },
   { name: 'Network', path: '/network', icon: Network },
   { name: 'Firewall', path: '/firewall', icon: Flame },
@@ -29,7 +27,7 @@ const adminBaseNav = [
 ]
 
 export function Sidebar() {
-  // Project-scoped nav (VMs, Containers, Storage, …) is shown only when the
+  // Project-scoped nav (VMs, Storage, …) is shown only when the
   // user is actually inside a project route (`/projects/:projectSlug/*`).
   // On Org-scope admin pages (`/projects`, `/orgs`, `/cluster`) those links
   // would either point at a previously-active project that the user has
