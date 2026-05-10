@@ -48,9 +48,11 @@ pub struct ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = match self.code {
+            400 => StatusCode::BAD_REQUEST,
+            401 => StatusCode::UNAUTHORIZED,
             404 => StatusCode::NOT_FOUND,
             409 => StatusCode::CONFLICT,
-            400 => StatusCode::BAD_REQUEST,
+            410 => StatusCode::GONE,
             501 => StatusCode::NOT_IMPLEMENTED,
             503 => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -85,6 +87,18 @@ impl From<StoreError> for ApiError {
             StoreError::VersionMismatch { expected, actual } => ApiError {
                 error: format!("Version mismatch: expected {}, got {}", expected, actual),
                 code: 409,
+            },
+            StoreError::Unauthorized(msg) => ApiError {
+                error: msg,
+                code: 401,
+            },
+            StoreError::Validation(msg) => ApiError {
+                error: msg,
+                code: 400,
+            },
+            StoreError::Gone(msg) => ApiError {
+                error: msg,
+                code: 410,
             },
         }
     }

@@ -17,15 +17,16 @@ use crate::state::ApiState;
 use super::error::{Result, StoreError};
 use super::event::Event;
 use super::traits::{
-    ClusterStore, ControlplaneInfo, ControlplaneStore, CreateClusterRequest, CreateNetworkRequest,
-    CreateNicRequest, CreateOrgRequest, CreateProjectRequest, CreateSecurityGroupRequest,
-    CreateSecurityGroupRuleRequest, CreateSnapshotRequest, CreateTemplateRequest, CreateVmRequest,
-    CreateVolumeRequest, DataStore, DeleteNetworkResult, Membership, MembershipPeer, NetworkStore,
-    NicStore, NodeStore, OrgStore, ProjectStore, RegisterNodeRequest, ResizeVolumeRequest,
-    SecurityGroupStore, TemplateStore, UpdateClusterRequest, UpdateNetworkRequest,
-    UpdateNicRequest, UpdateNodeStatusRequest, UpdateOrgRequest, UpdateSecurityGroupRequest,
-    UpdateSecurityGroupRuleRequest, UpdateTemplateStatusRequest, UpdateVmSpecRequest,
-    UpdateVmStatusRequest, VmStore, VolumeStore,
+    BootstrapOutcome, ClusterStore, ControlplaneInfo, ControlplaneStore, CreateClusterRequest,
+    CreateNetworkRequest, CreateNicRequest, CreateOnboardingTokenRequest, CreateOrgRequest,
+    CreateProjectRequest, CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest,
+    CreateSnapshotRequest, CreateTemplateRequest, CreateVmRequest, CreateVolumeRequest, DataStore,
+    DeleteNetworkResult, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore,
+    OnboardingStore, OrgStore, ProjectStore, RedeemOnboardingTokenRequest, RegisterNodeRequest,
+    ResizeVolumeRequest, SecurityGroupStore, TemplateStore, UpdateClusterRequest,
+    UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateOrgRequest,
+    UpdateSecurityGroupRequest, UpdateSecurityGroupRuleRequest, UpdateTemplateStatusRequest,
+    UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore, VolumeStore,
 };
 
 /// RaftStore wraps a RaftNode and implements the DataStore trait.
@@ -1100,8 +1101,216 @@ impl SecurityGroupStore for RaftStore {
     }
 }
 
+#[async_trait]
+impl OnboardingStore for RaftStore {
+    async fn ensure_internal_ca(&self, deployment_name: &str) -> Result<crate::ca::InternalCa> {
+        // Fast path: CA already exists.
+        {
+            let node = self.node.read().await;
+            let state = node.get_state().await;
+            if let Some(ca) = state.get_internal_ca() {
+                return Ok(ca);
+            }
+        }
+        // Slow path: generate locally on this leader, send through raft so
+        // every replica writes the same bytes. Subsequent EnsureInternalCa
+        // applies are noops via the idempotency check.
+        let ca = crate::ca::generate_root_ca(deployment_name)
+            .map_err(|e| StoreError::Internal(format!("generate CA: {e}")))?;
+        let cmd = Command::EnsureInternalCa {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            ca: ca.clone(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Ack => {}
+            Response::Error { message, .. } => return Err(StoreError::Internal(message)),
+            _ => return Err(StoreError::Internal("unexpected response".into())),
+        }
+        // Re-read so the caller sees whatever the cluster agreed on (in case
+        // a concurrent ensure raced ahead).
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        state
+            .get_internal_ca()
+            .ok_or_else(|| StoreError::Internal("CA missing after EnsureInternalCa".into()))
+    }
+
+    async fn get_server_cert(&self) -> Result<Option<crate::command::ServerCertData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_server_cert())
+    }
+
+    async fn rotate_server_cert(
+        &self,
+        dns_names: Vec<String>,
+    ) -> Result<crate::command::ServerCertData> {
+        let ca = self.ensure_internal_ca("mvirt").await?;
+        let (signed, key_pem) =
+            crate::ca::sign_server_cert(&ca, dns_names, crate::ca::new_serial())
+                .map_err(|e| StoreError::Internal(format!("sign server cert: {e}")))?;
+        let cmd = Command::UpdateServerCert {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            cert_pem: signed.cert_pem.clone(),
+            key_pem: key_pem.clone(),
+            serial_hex: signed.serial_hex.clone(),
+            not_after: signed.not_after.clone(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Ack => Ok(crate::command::ServerCertData {
+                cert_pem: signed.cert_pem,
+                key_pem,
+                serial_hex: signed.serial_hex,
+                not_after: signed.not_after,
+                created_at: Utc::now().to_rfc3339(),
+            }),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn create_onboarding_token(
+        &self,
+        req: CreateOnboardingTokenRequest,
+    ) -> Result<(crate::command::OnboardingTokenData, String)> {
+        // Cap TTL at 7 days (ADR-0006), floor at 1 minute.
+        let ttl = req.ttl_seconds.clamp(60, 7 * 24 * 3600);
+        let expires = Utc::now() + chrono::Duration::seconds(ttl as i64);
+
+        // Generate the bare token (32 bytes, base64url) and hash it.
+        let bare = generate_bare_token();
+        let hash_hex = sha256_hex(bare.as_bytes());
+
+        let id = format!("tok_{}", short_id());
+
+        let cmd = Command::CreateOnboardingToken {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            id: id.clone(),
+            token_hash_hex: hash_hex,
+            cluster_slug: req.cluster_slug,
+            description: req.description,
+            expires_at: expires.to_rfc3339(),
+            created_by_account: req.created_by_account,
+        };
+        match self.write_command(cmd).await? {
+            Response::OnboardingToken(t) => Ok((t, bare)),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn list_onboarding_tokens_by_cluster(
+        &self,
+        cluster_slug: &str,
+    ) -> Result<Vec<crate::command::OnboardingTokenData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_onboarding_tokens_by_cluster(cluster_slug))
+    }
+
+    async fn delete_onboarding_token(&self, cluster_slug: &str, id: &str) -> Result<()> {
+        let cmd = Command::DeleteOnboardingToken {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            cluster_slug: cluster_slug.to_string(),
+            id: id.to_string(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn redeem_onboarding_token(
+        &self,
+        req: RedeemOnboardingTokenRequest,
+    ) -> Result<BootstrapOutcome> {
+        let hash_hex = sha256_hex(req.token.as_bytes());
+        let cmd = Command::RedeemOnboardingToken {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            token_hash_hex: hash_hex,
+            csr_pem: req.csr_pem,
+            hostname: req.hostname,
+            agent_version: req.agent_version,
+            kernel_version: req.kernel_version,
+            arch: req.arch,
+        };
+        match self.write_command(cmd).await? {
+            Response::BootstrapResult {
+                node,
+                client_cert_pem,
+                ca_cert_pem,
+            } => Ok(BootstrapOutcome {
+                cluster_slug: node.cluster_slug.clone().unwrap_or_default(),
+                cert_not_after: node.cert_expires_at.clone().unwrap_or_default(),
+                node_id: node.id,
+                client_cert_pem,
+                ca_cert_pem,
+            }),
+            Response::Error { code: 401, message } => Err(StoreError::Unauthorized(message)),
+            Response::Error { code: 410, message } => Err(StoreError::Gone(message)),
+            Response::Error { code: 400, message } => Err(StoreError::Validation(message)),
+            Response::Error { code: 503, message } => Err(StoreError::Internal(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn revoke_node_cert(
+        &self,
+        node_id: &str,
+        reason: crate::command::RevocationReason,
+    ) -> Result<()> {
+        let cmd = Command::RevokeNodeCert {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            node_id: node_id.to_string(),
+            reason,
+        };
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+}
+
 impl DataStore for RaftStore {
     fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
     }
+}
+
+fn generate_bare_token() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn sha256_hex(input: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(input);
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+fn short_id() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+    let mut bytes = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }

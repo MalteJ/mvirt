@@ -529,6 +529,107 @@ pub struct ClusterListResponse {
 }
 
 // =============================================================================
+// Node onboarding (ADR-0006)
+// =============================================================================
+
+/// UI-facing token record (no bare-token field — that's only returned at
+/// create time via `UiCreateOnboardingTokenResponse`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiOnboardingToken {
+    pub id: String,
+    pub cluster_slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_by_node_id: Option<String>,
+    pub created_by_account: String,
+    pub created_at: String,
+}
+
+impl From<crate::command::OnboardingTokenData> for UiOnboardingToken {
+    fn from(d: crate::command::OnboardingTokenData) -> Self {
+        Self {
+            id: d.id,
+            cluster_slug: d.cluster_slug,
+            description: d.description,
+            expires_at: d.expires_at,
+            used_at: d.used_at,
+            used_by_node_id: d.used_by_node_id,
+            created_by_account: d.created_by_account,
+            created_at: d.created_at,
+        }
+    }
+}
+
+/// Operator-supplied parameters for issuing a new onboarding token.
+/// The Cluster comes from the URL path.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreateOnboardingTokenRequest {
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Response to a successful token creation. **The `token` field is the only
+/// time the bare token is ever revealed** — the operator copies it into
+/// node config and the cplane keeps only its hash.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreateOnboardingTokenResponse {
+    pub id: String,
+    pub token: String,
+    pub cluster_slug: String,
+    pub expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingTokenListResponse {
+    pub tokens: Vec<UiOnboardingToken>,
+}
+
+/// Body of `POST /v1/bootstrap/onboarding`. The bare token is sent in the
+/// `Authorization: Bearer ...` header instead, so the body stays free of
+/// secrets — easier to log + tcpdump for debugging.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiBootstrapRequest {
+    /// PEM-encoded CSR. Subject + SAN in the CSR are ignored — the cplane
+    /// fills its own. Only the public key carries.
+    pub csr_pem: String,
+    pub hostname: String,
+    pub agent_version: String,
+    pub kernel_version: String,
+    pub arch: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiBootstrapResponse {
+    pub node_id: String,
+    pub cluster_slug: String,
+    pub client_cert_pem: String,
+    pub ca_cert_pem: String,
+    pub cert_not_after: String,
+}
+
+/// Body of `POST /v1/nodes/{id}/revoke`.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiRevokeNodeRequest {
+    /// One of: `compromise`, `decommission`, `other`.
+    pub reason: String,
+}
+
+// =============================================================================
 // Volume Types
 // =============================================================================
 

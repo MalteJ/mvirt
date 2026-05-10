@@ -19,10 +19,12 @@ use crate::command::{VmDesiredState, VmPhase, VmSpec, VmStatus};
 use crate::store::{
     CreateClusterRequest as StoreCreateClusterRequest,
     CreateNetworkRequest as StoreCreateNetworkRequest, CreateNicRequest as StoreCreateNicRequest,
+    CreateOnboardingTokenRequest as StoreCreateOnboardingTokenRequest,
     CreateOrgRequest as StoreCreateOrgRequest, CreateProjectRequest as StoreCreateProjectRequest,
     CreateSnapshotRequest as StoreCreateSnapshotRequest,
     CreateTemplateRequest as StoreCreateTemplateRequest, CreateVmRequest as StoreCreateVmRequest,
     CreateVolumeRequest as StoreCreateVolumeRequest,
+    RedeemOnboardingTokenRequest as StoreRedeemOnboardingTokenRequest,
     ResizeVolumeRequest as StoreResizeVolumeRequest,
     UpdateClusterRequest as StoreUpdateClusterRequest, UpdateOrgRequest as StoreUpdateOrgRequest,
     UpdateVmSpecRequest as StoreUpdateVmSpecRequest,
@@ -484,6 +486,193 @@ pub async fn remove_node_from_cluster(
         .remove_node_from_cluster(&slug, &node_id)
         .await?;
     Ok(Json(UiCluster::from(data)))
+}
+
+// =============================================================================
+// Node onboarding handlers (ADR-0006)
+// =============================================================================
+
+const DEFAULT_ONBOARDING_TOKEN_TTL_SECONDS: u64 = 3600;
+
+/// List onboarding tokens issued for a given Cluster.
+#[utoipa::path(
+    get,
+    path = "/v1/clusters/{slug}/onboarding-tokens",
+    params(("slug" = String, Path)),
+    responses(
+        (status = 200, body = OnboardingTokenListResponse),
+        (status = 404, body = ApiError)
+    ),
+    tag = "clusters"
+)]
+pub async fn list_onboarding_tokens_in_cluster(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<Json<OnboardingTokenListResponse>, ApiError> {
+    if state.store.get_cluster(&slug).await?.is_none() {
+        return Err(ApiError {
+            error: format!("Cluster '{}' not found", slug),
+            code: 404,
+        });
+    }
+    let tokens = state.store.list_onboarding_tokens_by_cluster(&slug).await?;
+    Ok(Json(OnboardingTokenListResponse {
+        tokens: tokens.into_iter().map(UiOnboardingToken::from).collect(),
+    }))
+}
+
+/// Mint a new onboarding token bound to a Cluster. The bare token is in the
+/// response body — only chance the operator has to see it.
+#[utoipa::path(
+    post,
+    path = "/v1/clusters/{slug}/onboarding-tokens",
+    params(("slug" = String, Path)),
+    request_body = UiCreateOnboardingTokenRequest,
+    responses(
+        (status = 200, body = UiCreateOnboardingTokenResponse),
+        (status = 404, body = ApiError)
+    ),
+    tag = "clusters"
+)]
+pub async fn create_onboarding_token(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    Json(req): Json<UiCreateOnboardingTokenRequest>,
+) -> Result<Json<UiCreateOnboardingTokenResponse>, ApiError> {
+    if state.store.get_cluster(&slug).await?.is_none() {
+        return Err(ApiError {
+            error: format!("Cluster '{}' not found", slug),
+            code: 404,
+        });
+    }
+    let store_req = StoreCreateOnboardingTokenRequest {
+        cluster_slug: slug,
+        description: req.description,
+        ttl_seconds: req
+            .ttl_seconds
+            .unwrap_or(DEFAULT_ONBOARDING_TOKEN_TTL_SECONDS),
+        // No Account auth in v1 (ADR-0004 deferred). Stamp a placeholder so
+        // audit carries something — real Account lands with the auth layer.
+        created_by_account: "operator".to_string(),
+    };
+    let (record, bare) = state.store.create_onboarding_token(store_req).await?;
+    Ok(Json(UiCreateOnboardingTokenResponse {
+        id: record.id,
+        token: bare,
+        cluster_slug: record.cluster_slug,
+        expires_at: record.expires_at,
+        description: record.description,
+    }))
+}
+
+/// Revoke an unredeemed onboarding token.
+#[utoipa::path(
+    delete,
+    path = "/v1/clusters/{slug}/onboarding-tokens/{id}",
+    params(("slug" = String, Path), ("id" = String, Path)),
+    responses(
+        (status = 204),
+        (status = 404, body = ApiError)
+    ),
+    tag = "clusters"
+)]
+pub async fn delete_onboarding_token(
+    State(state): State<Arc<AppState>>,
+    Path((slug, id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    state.store.delete_onboarding_token(&slug, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Bootstrap endpoint. Token-authed via `Authorization: Bearer ...`; not
+/// gated by the regular Account-session middleware. ADR-0006.
+#[utoipa::path(
+    post,
+    path = "/v1/bootstrap/onboarding",
+    request_body = UiBootstrapRequest,
+    responses(
+        (status = 200, body = UiBootstrapResponse),
+        (status = 400, body = ApiError),
+        (status = 401, body = ApiError),
+        (status = 410, body = ApiError)
+    ),
+    tag = "bootstrap"
+)]
+pub async fn bootstrap_onboarding(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<UiBootstrapRequest>,
+) -> Result<Json<UiBootstrapResponse>, ApiError> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| ApiError {
+            error: "missing Authorization: Bearer header".into(),
+            code: 401,
+        })?;
+
+    // Lazy CA bootstrap so the very first redeem in a fresh deployment
+    // doesn't fail with 503. After the first call the CA is cached in raft.
+    state.store.ensure_internal_ca("mvirt").await?;
+
+    let outcome = state
+        .store
+        .redeem_onboarding_token(StoreRedeemOnboardingTokenRequest {
+            token,
+            csr_pem: req.csr_pem,
+            hostname: req.hostname,
+            agent_version: req.agent_version,
+            kernel_version: req.kernel_version,
+            arch: req.arch,
+        })
+        .await?;
+
+    Ok(Json(UiBootstrapResponse {
+        node_id: outcome.node_id,
+        cluster_slug: outcome.cluster_slug,
+        client_cert_pem: outcome.client_cert_pem,
+        ca_cert_pem: outcome.ca_cert_pem,
+        cert_not_after: outcome.cert_not_after,
+    }))
+}
+
+/// Revoke a Node's cert. `decommission` also deletes the Node row (and
+/// drops it from every Cluster's `node_ids`).
+#[utoipa::path(
+    post,
+    path = "/v1/nodes/{id}/revoke",
+    params(("id" = String, Path)),
+    request_body = UiRevokeNodeRequest,
+    responses(
+        (status = 204),
+        (status = 400, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "nodes"
+)]
+pub async fn revoke_node(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UiRevokeNodeRequest>,
+) -> Result<StatusCode, ApiError> {
+    let reason = match req.reason.as_str() {
+        "decommission" => crate::command::RevocationReason::Decommission,
+        "compromise" => crate::command::RevocationReason::Compromise,
+        "other" => crate::command::RevocationReason::Other,
+        other => {
+            return Err(ApiError {
+                error: format!(
+                    "unknown reason '{}'; allowed: decommission, compromise, other",
+                    other
+                ),
+                code: 400,
+            });
+        }
+    };
+    state.store.revoke_node_cert(&id, reason).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // =============================================================================

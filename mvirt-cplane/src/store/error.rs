@@ -25,6 +25,20 @@ pub enum StoreError {
     #[error("scheduling failed: {0}")]
     ScheduleFailed(String),
 
+    /// Caller is not allowed to perform this operation (401).
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
+    /// Request validation failed (400).
+    #[error("validation: {0}")]
+    Validation(String),
+
+    /// Resource existed at one point but has since been removed (410).
+    /// Distinguished from `NotFound` so the caller can react differently
+    /// — e.g. an onboarding token whose Cluster got deleted post-issue.
+    #[error("gone: {0}")]
+    Gone(String),
+
     /// Internal error.
     #[error("internal: {0}")]
     Internal(String),

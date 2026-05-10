@@ -67,6 +67,7 @@ pub struct RegisterHypervisorNodeRequest {
 
 /// Hypervisor node resource
 #[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct HypervisorNode {
     pub id: String,
     pub name: String,
@@ -77,6 +78,16 @@ pub struct HypervisorNode {
     pub last_heartbeat: String,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_serial_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<String>,
 }
 
 impl From<NodeData> for HypervisorNode {
@@ -85,12 +96,17 @@ impl From<NodeData> for HypervisorNode {
             id: data.id,
             name: data.name,
             address: data.address,
-            status: format!("{:?}", data.status),
+            status: format!("{:?}", data.status).to_lowercase(),
             resources: data.resources.into(),
             labels: data.labels,
             last_heartbeat: data.last_heartbeat,
             created_at: data.created_at,
             updated_at: data.updated_at,
+            cluster_slug: data.cluster_slug,
+            cert_serial_hex: data.cert_serial_hex,
+            cert_expires_at: data.cert_expires_at,
+            hostname: data.hostname,
+            agent_version: data.agent_version,
         }
     }
 }

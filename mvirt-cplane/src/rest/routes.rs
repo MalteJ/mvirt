@@ -26,6 +26,7 @@ use crate::auth::{JwtValidator, require_auth};
         (name = "orgs", description = "Organization management (tenancy container above Project)"),
         (name = "projects", description = "Project management"),
         (name = "clusters", description = "Cluster management (named groups of Nodes within an Org)"),
+        (name = "bootstrap", description = "Node onboarding (token-authed; no Account session)"),
         (name = "networks", description = "Network CRUD operations"),
         (name = "nics", description = "NIC CRUD operations"),
         (name = "vms", description = "VM CRUD and lifecycle operations"),
@@ -67,6 +68,12 @@ use crate::auth::{JwtValidator, require_auth};
         ui_handlers::delete_cluster,
         ui_handlers::add_node_to_cluster,
         ui_handlers::remove_node_from_cluster,
+        // Node onboarding (ADR-0006)
+        ui_handlers::list_onboarding_tokens_in_cluster,
+        ui_handlers::create_onboarding_token,
+        ui_handlers::delete_onboarding_token,
+        ui_handlers::bootstrap_onboarding,
+        ui_handlers::revoke_node,
         // VMs (UI)
         ui_handlers::list_vms,
         ui_handlers::get_vm,
@@ -150,6 +157,14 @@ use crate::auth::{JwtValidator, require_auth};
         ui_types::UiCreateClusterRequest,
         ui_types::UiUpdateClusterRequest,
         ui_types::ClusterListResponse,
+        // UI schemas - Onboarding (ADR-0006)
+        ui_types::UiOnboardingToken,
+        ui_types::UiCreateOnboardingTokenRequest,
+        ui_types::UiCreateOnboardingTokenResponse,
+        ui_types::OnboardingTokenListResponse,
+        ui_types::UiBootstrapRequest,
+        ui_types::UiBootstrapResponse,
+        ui_types::UiRevokeNodeRequest,
         // UI schemas - VMs
         ui_types::UiVm,
         ui_types::UiVmState,
@@ -274,6 +289,21 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
             "/clusters/{slug}/nodes/{node_id}",
             delete(ui_handlers::remove_node_from_cluster),
         )
+        // Onboarding token management (ADR-0006)
+        .route(
+            "/clusters/{slug}/onboarding-tokens",
+            get(ui_handlers::list_onboarding_tokens_in_cluster),
+        )
+        .route(
+            "/clusters/{slug}/onboarding-tokens",
+            post(ui_handlers::create_onboarding_token),
+        )
+        .route(
+            "/clusters/{slug}/onboarding-tokens/{id}",
+            delete(ui_handlers::delete_onboarding_token),
+        )
+        // Node revoke (cert revocation; Decommission also deletes the row)
+        .route("/nodes/{id}/revoke", post(ui_handlers::revoke_node))
         // Global storage
         .route("/import-jobs/{id}", get(ui_handlers::get_import_job))
         .route("/pool", get(ui_handlers::get_pool_stats))
@@ -362,6 +392,15 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
         .route("/security-groups", get(ui_handlers::list_security_groups))
         .route("/security-groups", post(ui_handlers::create_security_group));
 
+    // Bootstrap endpoint (ADR-0006). Token-authed via the Authorization
+    // header inside the handler — *not* through the Account JWT middleware.
+    // Hosted under /v1/bootstrap/... so the Account-auth layer above can
+    // short-circuit on path prefix.
+    let bootstrap_routes = Router::new().route(
+        "/bootstrap/onboarding",
+        post(ui_handlers::bootstrap_onboarding),
+    );
+
     // User-facing routes get JWT auth applied when a validator is configured.
     // Internal routes are reached via the cplane-to-cplane network, not the
     // public REST endpoint, and stay unauthenticated for now.
@@ -377,6 +416,7 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .nest("/v1", internal_routes)
         .nest("/v1", global_routes)
+        .nest("/v1", bootstrap_routes)
         .nest("/v1/projects/{project_slug}", project_routes)
         .with_state(state)
         .layer(tower_http::cors::CorsLayer::permissive())

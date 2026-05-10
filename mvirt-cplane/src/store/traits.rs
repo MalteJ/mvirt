@@ -174,6 +174,42 @@ pub struct UpdateClusterRequest {
 }
 
 // =============================================================================
+// Node-onboarding Request DTOs (ADR-0006)
+// =============================================================================
+
+/// Operator-supplied parameters for issuing a new onboarding token.
+#[derive(Debug, Clone)]
+pub struct CreateOnboardingTokenRequest {
+    pub cluster_slug: String,
+    pub description: Option<String>,
+    /// TTL in seconds; clamped server-side.
+    pub ttl_seconds: u64,
+    pub created_by_account: String,
+}
+
+/// Wire-format inputs of a redeem request, validated by the handler before
+/// going to raft.
+#[derive(Debug, Clone)]
+pub struct RedeemOnboardingTokenRequest {
+    pub token: String,
+    pub csr_pem: String,
+    pub hostname: String,
+    pub agent_version: String,
+    pub kernel_version: String,
+    pub arch: String,
+}
+
+/// Result of a successful redeem.
+#[derive(Debug, Clone)]
+pub struct BootstrapOutcome {
+    pub node_id: String,
+    pub cluster_slug: String,
+    pub client_cert_pem: String,
+    pub ca_cert_pem: String,
+    pub cert_not_after: String,
+}
+
+// =============================================================================
 // Volume Request DTOs
 // =============================================================================
 
@@ -439,6 +475,48 @@ pub trait ClusterStore: Send + Sync {
     ) -> Result<ClusterData>;
 }
 
+/// Store trait for node onboarding (ADR-0006). Tokens are issued and
+/// consumed via the bootstrap REST endpoint; revoke targets node certs.
+#[async_trait]
+pub trait OnboardingStore: Send + Sync {
+    /// Idempotent: if the CA exists already, returns the existing one.
+    /// Called once at cplane startup.
+    async fn ensure_internal_ca(&self, deployment_name: &str) -> Result<crate::ca::InternalCa>;
+
+    /// Returns the persisted server cert (PEM, key, serial, expiry). Used
+    /// by the tunnel listener at startup.
+    async fn get_server_cert(&self) -> Result<Option<crate::command::ServerCertData>>;
+
+    /// Sign + persist a fresh server cert.
+    async fn rotate_server_cert(
+        &self,
+        dns_names: Vec<String>,
+    ) -> Result<crate::command::ServerCertData>;
+
+    async fn create_onboarding_token(
+        &self,
+        req: CreateOnboardingTokenRequest,
+    ) -> Result<(crate::command::OnboardingTokenData, String)>;
+
+    async fn list_onboarding_tokens_by_cluster(
+        &self,
+        cluster_slug: &str,
+    ) -> Result<Vec<crate::command::OnboardingTokenData>>;
+
+    async fn delete_onboarding_token(&self, cluster_slug: &str, id: &str) -> Result<()>;
+
+    async fn redeem_onboarding_token(
+        &self,
+        req: RedeemOnboardingTokenRequest,
+    ) -> Result<BootstrapOutcome>;
+
+    async fn revoke_node_cert(
+        &self,
+        node_id: &str,
+        reason: crate::command::RevocationReason,
+    ) -> Result<()>;
+}
+
 /// Store trait for volume operations.
 #[async_trait]
 pub trait VolumeStore: Send + Sync {
@@ -607,6 +685,7 @@ pub trait DataStore:
     + OrgStore
     + ProjectStore
     + ClusterStore
+    + OnboardingStore
     + VolumeStore
     + TemplateStore
     + SecurityGroupStore
