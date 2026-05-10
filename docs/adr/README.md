@@ -22,5 +22,6 @@ Each file: `NNNN-short-title.md`. Sections:
 | [0002](0002-control-plane.md) | mvirt-cplane: the control plane component | Accepted |
 | [0003](0003-reverse-tunnel.md) | Reverse tunnel between node and cplane | Accepted |
 | [0004](0004-rest-api-auth.md) | Identity, authentication, authorization, and tenancy | Accepted |
+| [0005](0005-cluster.md) | Cluster: a named group of Nodes within an Org | Accepted |
 
-Start with 0001 for the big picture, then 0002 for the cplane internals, then 0003 for how the cplane talks to the per-host daemons. 0004 covers user-facing identity, authorization, and the Org → Project tenancy hierarchy (rauthy as bundled IdP, unified Account model, ServiceAccount credential variants, polymorphic Memberships).
+Start with 0001 for the big picture, then 0002 for the cplane internals, then 0003 for how the cplane talks to the per-host daemons. 0004 covers user-facing identity, authorization, and the Org → Project tenancy hierarchy (rauthy as bundled IdP, unified Account model, ServiceAccount credential variants, polymorphic Memberships). 0005 layers Cluster under Org as the placement target for resources.
