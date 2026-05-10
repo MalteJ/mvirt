@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { ColumnDef } from '@tanstack/react-table'
 import { MoreHorizontal, Plus, Trash2, FolderOpen } from 'lucide-react'
 import {
@@ -14,7 +14,6 @@ import { DataTable } from '@/components/data-display/DataTable'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Badge } from '@/components/ui/badge'
 import {
   Dialog,
   DialogContent,
@@ -53,15 +52,33 @@ function slugify(name: string): string {
 
 export function ProjectsPage() {
   const navigate = useNavigate()
+  // The Org context comes from the URL: `/orgs/:orgSlug/projects`. The route
+  // is the source of truth — useOrg syncs to it so the header switcher
+  // reflects what the page is actually showing.
+  const { orgSlug: orgSlugFromUrl } = useParams<{ orgSlug: string }>()
   const { data: allProjects, isLoading } = useProjects()
   const { data: orgs } = useOrgs()
-  const { currentProject, setCurrentProject } = useProject()
-  const { currentOrg } = useOrg()
+  const { setCurrentProject } = useProject()
+  const { currentOrg, setCurrentOrg } = useOrg()
   const deleteProject = useDeleteProject()
 
+  // Resolve the URL Org from the loaded list. Falls back to the active Org
+  // if the URL has none (e.g. someone routed here without `:orgSlug`).
+  const scopedOrg =
+    orgs?.find((o) => o.slug === orgSlugFromUrl) ?? currentOrg ?? null
+
+  // Sync the global Org store with the URL: navigating to a different Org's
+  // projects view also flips the header switcher.
+  useEffect(() => {
+    if (
+      scopedOrg &&
+      (!currentOrg || currentOrg.slug !== scopedOrg.slug)
+    ) {
+      setCurrentOrg(scopedOrg)
+    }
+  }, [scopedOrg, currentOrg, setCurrentOrg])
+
   const [dialogOpen, setDialogOpen] = useState(false)
-  // The create dialog defaults to the active Org from the switcher; user can
-  // still override per-create if they want.
   const [orgSlug, setOrgSlug] = useState<string>('')
   const [slug, setSlug] = useState('')
   const [name, setName] = useState('')
@@ -70,20 +87,18 @@ export function ProjectsPage() {
 
   const createProject = useCreateProjectInOrg(orgSlug)
 
-  // Page is scoped to the active Org from the global switcher.
-  // Falls back to all projects only if no Org is active (shouldn't normally happen).
-  const projects = currentOrg
-    ? allProjects?.filter((p) => p.orgSlug === currentOrg.slug)
+  const projects = scopedOrg
+    ? allProjects?.filter((p) => p.orgSlug === scopedOrg.slug)
     : allProjects
 
-  // Pre-fill the create dialog with the active Org.
+  // Pre-fill the create dialog with the URL-scoped Org.
   useEffect(() => {
-    if (!orgSlug && currentOrg) {
-      setOrgSlug(currentOrg.slug)
+    if (!orgSlug && scopedOrg) {
+      setOrgSlug(scopedOrg.slug)
     } else if (!orgSlug && orgs && orgs.length > 0) {
       setOrgSlug(orgs[0].slug)
     }
-  }, [orgSlug, currentOrg, orgs])
+  }, [orgSlug, scopedOrg, orgs])
 
   // Auto-generate slug from name unless the user has manually edited it.
   useEffect(() => {
@@ -120,16 +135,11 @@ export function ProjectsPage() {
       accessorKey: 'name',
       header: 'Name',
       cell: ({ row }) => (
-        <div className="flex items-center gap-2">
-          <div>
-            <div className="font-medium">{row.original.name}</div>
-            <div className="text-xs text-muted-foreground font-mono">
-              {row.original.slug}
-            </div>
+        <div>
+          <div className="font-medium">{row.original.name}</div>
+          <div className="text-xs text-muted-foreground font-mono">
+            {row.original.slug}
           </div>
-          {currentProject?.slug === row.original.slug && (
-            <Badge variant="running">Active</Badge>
-          )}
         </div>
       ),
     },
@@ -178,10 +188,9 @@ export function ProjectsPage() {
                 setCurrentProject(row.original)
                 navigate(`/projects/${row.original.slug}/vms`)
               }}
-              disabled={currentProject?.slug === row.original.slug}
             >
               <FolderOpen className="mr-2 h-4 w-4" />
-              Set as Active
+              Open
             </DropdownMenuItem>
             <DropdownMenuItem
               className="text-destructive"
@@ -194,7 +203,6 @@ export function ProjectsPage() {
                   deleteProject.mutate(row.original.slug)
                 }
               }}
-              disabled={currentProject?.slug === row.original.slug}
             >
               <Trash2 className="mr-2 h-4 w-4" />
               Delete
@@ -213,15 +221,15 @@ export function ProjectsPage() {
         <div>
           <h2 className="text-2xl font-bold tracking-tight">
             Projects
-            {currentOrg && (
+            {scopedOrg && (
               <span className="ml-2 font-mono text-base font-normal text-muted-foreground">
-                in {currentOrg.slug}
+                in {scopedOrg.slug}
               </span>
             )}
           </h2>
           <p className="text-muted-foreground">
-            {currentOrg
-              ? `Projects scoped to ${currentOrg.name}. Switch Org in the header to view projects elsewhere.`
+            {scopedOrg
+              ? `Projects scoped to ${scopedOrg.name}. Switch Org in the header to view projects elsewhere.`
               : 'Pick an Org from the header switcher to scope this view.'}
           </p>
         </div>

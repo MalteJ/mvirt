@@ -1,4 +1,4 @@
-import { NavLink, Link } from 'react-router-dom'
+import { NavLink, Link, useLocation } from 'react-router-dom'
 import {
   Server,
   Container,
@@ -11,8 +11,8 @@ import {
   FolderKanban,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useProjects, useApiHealth } from '@/hooks/queries'
-import { useProject } from '@/hooks/useProject'
+import { useApiHealth } from '@/hooks/queries'
+import { useOrg } from '@/hooks/useOrg'
 
 const navigation = [
   { name: 'Virtual Machines', path: '/vms', icon: Server },
@@ -23,18 +23,38 @@ const navigation = [
   { name: 'Logs', path: '/logs', icon: ScrollText },
 ]
 
-const adminNavigation = [
+const adminBaseNav = [
   { name: 'Organizations', href: '/orgs', icon: Building2 },
-  { name: 'Projects', href: '/projects', icon: FolderKanban },
   { name: 'Cluster', href: '/cluster', icon: Boxes },
 ]
 
 export function Sidebar() {
-  const { data: projects } = useProjects()
-  const { currentProject } = useProject()
+  // Project-scoped nav (VMs, Containers, Storage, …) is shown only when the
+  // user is actually inside a project route (`/projects/:projectSlug/*`).
+  // On Org-scope admin pages (`/projects`, `/orgs`, `/cluster`) those links
+  // would either point at a previously-active project that the user has
+  // navigated away from, or have no meaningful target at all — hide them.
+  //
+  // Sidebar is rendered by `Layout`, which sits outside the inner `<Routes>`
+  // that defines `:projectSlug`, so `useParams` returns nothing here. Pull
+  // the slug out of `pathname` instead.
+  const { pathname } = useLocation()
+  const projectMatch = pathname.match(/^\/projects\/([^/]+)/)
+  const projectSlug = projectMatch?.[1]
+  const { currentOrg } = useOrg()
   const apiHealth = useApiHealth()
-  const hasProjects = projects && projects.length > 0
-  const projectSlug = currentProject?.slug
+
+  // The Projects entry points at the active Org's project list when one is
+  // known; otherwise it falls back to the Org list (where the user can pick).
+  const adminNavigation = [
+    adminBaseNav[0],
+    {
+      name: 'Projects',
+      href: currentOrg ? `/orgs/${currentOrg.slug}/projects` : '/orgs',
+      icon: FolderKanban,
+    },
+    adminBaseNav[1],
+  ]
 
   const apiStatus: 'connected' | 'connecting' | 'disconnected' =
     apiHealth.isSuccess ? 'connected'
@@ -60,23 +80,24 @@ export function Sidebar() {
         <span className="logo-shimmer text-lg font-semibold">mvirt</span>
       </Link>
       <nav className="flex-1 space-y-1 p-2">
-        {hasProjects && projectSlug && navigation.map((item) => (
-          <NavLink
-            key={item.name}
-            to={`/projects/${projectSlug}${item.path}`}
-            className={({ isActive }) =>
-              cn(
-                'flex items-center rounded-md px-3 py-2 text-sm font-medium transition-all duration-200 border',
-                isActive
-                  ? 'bg-purple/20 text-purple-light border-purple/30'
-                  : 'text-foreground/80 border-transparent hover:bg-secondary hover:text-foreground'
-              )
-            }
-          >
-            <item.icon className="mr-3 h-4 w-4" />
-            {item.name}
-          </NavLink>
-        ))}
+        {projectSlug &&
+          navigation.map((item) => (
+            <NavLink
+              key={item.name}
+              to={`/projects/${projectSlug}${item.path}`}
+              className={({ isActive }) =>
+                cn(
+                  'flex items-center rounded-md px-3 py-2 text-sm font-medium transition-all duration-200 border',
+                  isActive
+                    ? 'bg-purple/20 text-purple-light border-purple/30'
+                    : 'text-foreground/80 border-transparent hover:bg-secondary hover:text-foreground',
+                )
+              }
+            >
+              <item.icon className="mr-3 h-4 w-4" />
+              {item.name}
+            </NavLink>
+          ))}
       </nav>
       <div className="border-t border-border p-2">
         {adminNavigation.map((item) => (

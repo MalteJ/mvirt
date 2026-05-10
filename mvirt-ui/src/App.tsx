@@ -59,7 +59,8 @@ function ProjectSync({ children }: { children: React.ReactNode }) {
 }
 
 // Redirect to the active project (or first one in the active Org). Falls
-// through to /projects if neither exists.
+// through to the Org's project-list if no project exists, or `/orgs` if
+// there isn't even an Org yet.
 function ProjectRedirect({ path }: { path: string }) {
   const { currentProject } = useProject()
   const { currentOrg } = useOrg()
@@ -78,7 +79,22 @@ function ProjectRedirect({ path }: { path: string }) {
     return <Navigate to={`/projects/${candidates[0].slug}${path}`} replace />
   }
 
-  return <Navigate to="/projects" replace />
+  if (currentOrg) {
+    return <Navigate to={`/orgs/${currentOrg.slug}/projects`} replace />
+  }
+  return <Navigate to="/orgs" replace />
+}
+
+// Old `/projects` URL — bounce to the org-scoped variant for the active Org,
+// or /orgs if there is none. Kept as a soft redirect so bookmarks survive.
+function FlatProjectsRedirect() {
+  const { currentOrg } = useOrg()
+  return (
+    <Navigate
+      to={currentOrg ? `/orgs/${currentOrg.slug}/projects` : '/orgs'}
+      replace
+    />
+  )
 }
 
 // Backward-compat redirect: old `/p/:projectId/*` URLs (UUID-based) bounce to
@@ -119,7 +135,11 @@ function App() {
                 <Route path="/cluster" element={<ClusterPage />} />
                 <Route path="/cluster/:id" element={<NodeDetailPage />} />
                 <Route path="/orgs" element={<OrgsPage />} />
-                <Route path="/projects" element={<ProjectsPage />} />
+                <Route
+                  path="/orgs/:orgSlug/projects"
+                  element={<ProjectsPage />}
+                />
+                <Route path="/projects" element={<FlatProjectsRedirect />} />
 
                 {/* Project-scoped routes — slug-based per ADR-0004 */}
                 <Route

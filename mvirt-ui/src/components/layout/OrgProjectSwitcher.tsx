@@ -181,7 +181,7 @@ export function OrgProjectSwitcher() {
             Manage Orgs
           </Link>
           <Link
-            to="/projects"
+            to={focusedOrg ? `/orgs/${focusedOrg.slug}/projects` : '/orgs'}
             onClick={() => {
               if (focusedOrg) setCurrentOrg(focusedOrg)
               setOpen(false)
