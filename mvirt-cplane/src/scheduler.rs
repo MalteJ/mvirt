@@ -194,6 +194,11 @@ mod tests {
             last_heartbeat: "2024-01-01T00:00:00Z".to_string(),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
+            cluster_slug: None,
+            cert_serial_hex: None,
+            cert_expires_at: None,
+            hostname: None,
+            agent_version: None,
         }
     }
 

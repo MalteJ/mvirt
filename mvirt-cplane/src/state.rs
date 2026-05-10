@@ -12,9 +12,11 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::ca::{InternalCa, new_serial, sign_node_leaf};
 use crate::command::{
-    ClusterData, Command, NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus, OrgData,
-    ProjectData, Response, SecurityGroupData, SecurityGroupRuleData, SnapshotData, TemplateData,
+    ClusterData, Command, NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus,
+    OnboardingTokenData, OrgData, ProjectData, Response, RevocationReason, RevokedCertData,
+    SecurityGroupData, SecurityGroupRuleData, ServerCertData, SnapshotData, TemplateData,
     TemplatePhase, TemplateSpec, TemplateStatus, VmData, VmPhase, VmStatus, VolumeData, VolumeSpec,
     VolumeStatus,
 };
@@ -36,6 +38,15 @@ const CLUSTERS: TableDefinition<&str, &[u8]> = TableDefinition::new("clusters");
 const VOLUMES: TableDefinition<&str, &[u8]> = TableDefinition::new("volumes");
 const TEMPLATES: TableDefinition<&str, &[u8]> = TableDefinition::new("templates");
 const SECURITY_GROUPS: TableDefinition<&str, &[u8]> = TableDefinition::new("security_groups");
+// Node-onboarding state (ADR-0006).
+const ONBOARDING_TOKENS: TableDefinition<&str, &[u8]> = TableDefinition::new("onboarding_tokens");
+const REVOKED_CERTS: TableDefinition<&str, &[u8]> = TableDefinition::new("revoked_certs");
+const PKI: TableDefinition<&str, &[u8]> = TableDefinition::new("pki");
+
+/// Singleton key inside PKI for the CA material.
+const PKI_KEY_CA: &str = "internal_ca";
+/// Singleton key inside PKI for the cplane tunnel server cert.
+const PKI_KEY_SERVER: &str = "server_cert";
 
 const ALL_TABLES: &[TableDefinition<&str, &[u8]>] = &[
     NODES,
@@ -48,6 +59,9 @@ const ALL_TABLES: &[TableDefinition<&str, &[u8]>] = &[
     VOLUMES,
     TEMPLATES,
     SECURITY_GROUPS,
+    ONBOARDING_TOKENS,
+    REVOKED_CERTS,
+    PKI,
 ];
 
 // =============================================================================
@@ -445,6 +459,47 @@ impl ApiState {
     }
 
     // =========================================================================
+    // Node-onboarding queries (ADR-0006).
+    // =========================================================================
+
+    pub fn get_internal_ca(&self) -> Option<InternalCa> {
+        read_get(&self.read_txn(), PKI, PKI_KEY_CA)
+    }
+
+    pub fn get_server_cert(&self) -> Option<ServerCertData> {
+        read_get(&self.read_txn(), PKI, PKI_KEY_SERVER)
+    }
+
+    pub fn list_onboarding_tokens(&self) -> Vec<OnboardingTokenData> {
+        read_list(&self.read_txn(), ONBOARDING_TOKENS)
+    }
+
+    pub fn list_onboarding_tokens_by_cluster(
+        &self,
+        cluster_slug: &str,
+    ) -> Vec<OnboardingTokenData> {
+        read_list::<OnboardingTokenData>(&self.read_txn(), ONBOARDING_TOKENS)
+            .into_iter()
+            .filter(|t| t.cluster_slug == cluster_slug)
+            .collect()
+    }
+
+    pub fn get_onboarding_token(&self, id: &str) -> Option<OnboardingTokenData> {
+        read_get(&self.read_txn(), ONBOARDING_TOKENS, id)
+    }
+
+    pub fn list_revoked_certs(&self) -> Vec<RevokedCertData> {
+        read_list(&self.read_txn(), REVOKED_CERTS)
+    }
+
+    pub fn is_cert_revoked(&self, serial_hex: &str) -> bool {
+        self.read_txn()
+            .open_table(REVOKED_CERTS)
+            .map(|t| t.get(serial_hex).map(|g| g.is_some()).unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    // =========================================================================
     // Volume queries
     // =========================================================================
 
@@ -595,6 +650,11 @@ impl StateMachine<Command, Response> for ApiState {
                     last_heartbeat: timestamp.clone(),
                     created_at: timestamp.clone(),
                     updated_at: timestamp,
+                    cluster_slug: None,
+                    cert_serial_hex: None,
+                    cert_expires_at: None,
+                    hostname: None,
+                    agent_version: None,
                 };
 
                 txn_put(&txn, NODES, &id, &node);
@@ -1536,6 +1596,293 @@ impl StateMachine<Command, Response> for ApiState {
                 }
                 txn.commit().expect("commit");
                 (Response::Cluster(cluster), vec![])
+            }
+
+            // =================================================================
+            // Node onboarding (ADR-0006).
+            // =================================================================
+            Command::EnsureInternalCa { ca, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                if txn_get::<InternalCa>(&txn, PKI, PKI_KEY_CA).is_none() {
+                    txn_put(&txn, PKI, PKI_KEY_CA, &ca);
+                }
+                txn.commit().expect("commit");
+                (Response::Ack, vec![])
+            }
+
+            Command::UpdateServerCert {
+                timestamp,
+                cert_pem,
+                key_pem,
+                serial_hex,
+                not_after,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let data = ServerCertData {
+                    cert_pem,
+                    key_pem,
+                    serial_hex,
+                    not_after,
+                    created_at: timestamp,
+                };
+                txn_put(&txn, PKI, PKI_KEY_SERVER, &data);
+                txn.commit().expect("commit");
+                (Response::Ack, vec![])
+            }
+
+            Command::CreateOnboardingToken {
+                timestamp,
+                id,
+                token_hash_hex,
+                cluster_slug,
+                description,
+                expires_at,
+                created_by_account,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                if !txn_has(&txn, CLUSTERS, &cluster_slug) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Cluster '{}' not found", cluster_slug),
+                        },
+                        vec![],
+                    );
+                }
+                if txn_has(&txn, ONBOARDING_TOKENS, &id) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Onboarding token '{}' already exists", id),
+                        },
+                        vec![],
+                    );
+                }
+                let token = OnboardingTokenData {
+                    id: id.clone(),
+                    token_hash_hex,
+                    cluster_slug,
+                    description,
+                    expires_at,
+                    used_at: None,
+                    used_by_node_id: None,
+                    created_by_account,
+                    created_at: timestamp,
+                };
+                txn_put(&txn, ONBOARDING_TOKENS, &id, &token);
+                txn.commit().expect("commit");
+                (Response::OnboardingToken(token), vec![])
+            }
+
+            Command::DeleteOnboardingToken {
+                cluster_slug, id, ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(t) = txn_get::<OnboardingTokenData>(&txn, ONBOARDING_TOKENS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Onboarding token '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                if t.cluster_slug != cluster_slug {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!(
+                                "Token '{}' does not belong to cluster '{}'",
+                                id, cluster_slug
+                            ),
+                        },
+                        vec![],
+                    );
+                }
+                txn_delete(&txn, ONBOARDING_TOKENS, &id);
+                txn.commit().expect("commit");
+                (Response::Deleted { id }, vec![])
+            }
+
+            Command::RedeemOnboardingToken {
+                timestamp,
+                token_hash_hex,
+                csr_pem,
+                hostname,
+                agent_version,
+                kernel_version,
+                arch,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+
+                // 1. Find token by hash. With low token volumes (<1000) the
+                //    scan is cheap; redeem-path is rare anyway.
+                let mut token: Option<OnboardingTokenData> = None;
+                for t in txn_list::<OnboardingTokenData>(&txn, ONBOARDING_TOKENS) {
+                    if t.token_hash_hex == token_hash_hex {
+                        token = Some(t);
+                        break;
+                    }
+                }
+                let Some(mut token) = token else {
+                    return (
+                        Response::Error {
+                            code: 401,
+                            message: "invalid onboarding token".into(),
+                        },
+                        vec![],
+                    );
+                };
+
+                if token.used_at.is_some() {
+                    return (
+                        Response::Error {
+                            code: 401,
+                            message: "invalid onboarding token".into(),
+                        },
+                        vec![],
+                    );
+                }
+                if timestamp.as_str() > token.expires_at.as_str() {
+                    return (
+                        Response::Error {
+                            code: 401,
+                            message: "invalid onboarding token".into(),
+                        },
+                        vec![],
+                    );
+                }
+
+                let Some(mut cluster) = txn_get::<ClusterData>(&txn, CLUSTERS, &token.cluster_slug)
+                else {
+                    return (
+                        Response::Error {
+                            code: 410,
+                            message: format!(
+                                "cluster '{}' gone since token issuance",
+                                token.cluster_slug
+                            ),
+                        },
+                        vec![],
+                    );
+                };
+
+                let Some(ca) = txn_get::<InternalCa>(&txn, PKI, PKI_KEY_CA) else {
+                    return (
+                        Response::Error {
+                            code: 503,
+                            message: "internal CA not initialised".into(),
+                        },
+                        vec![],
+                    );
+                };
+
+                let node_id = format!("node_{}", uuid::Uuid::new_v4().simple());
+                let serial = new_serial();
+                let signed = match sign_node_leaf(&ca, &csr_pem, &node_id, &cluster.slug, serial) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return (
+                            Response::Error {
+                                code: 400,
+                                message: format!("CSR invalid: {e}"),
+                            },
+                            vec![],
+                        );
+                    }
+                };
+
+                token.used_at = Some(timestamp.clone());
+                token.used_by_node_id = Some(node_id.clone());
+                txn_put(&txn, ONBOARDING_TOKENS, &token.id, &token);
+
+                let node = NodeData {
+                    id: node_id.clone(),
+                    name: hostname.clone(),
+                    address: String::new(),
+                    status: NodeStatus::Online,
+                    resources: Default::default(),
+                    labels: Default::default(),
+                    last_heartbeat: timestamp.clone(),
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp.clone(),
+                    cluster_slug: Some(cluster.slug.clone()),
+                    cert_serial_hex: Some(signed.serial_hex.clone()),
+                    cert_expires_at: Some(signed.not_after.clone()),
+                    hostname: Some(hostname),
+                    agent_version: Some(format!("{} ({} {})", agent_version, kernel_version, arch)),
+                };
+                txn_put(&txn, NODES, &node_id, &node);
+
+                if !cluster.node_ids.iter().any(|n| n == &node_id) {
+                    cluster.node_ids.push(node_id.clone());
+                    cluster.updated_at = timestamp.clone();
+                    let slug = cluster.slug.clone();
+                    txn_put(&txn, CLUSTERS, &slug, &cluster);
+                }
+
+                txn.commit().expect("commit");
+                (
+                    Response::BootstrapResult {
+                        node,
+                        client_cert_pem: signed.cert_pem,
+                        ca_cert_pem: ca.ca_cert_pem,
+                    },
+                    vec![],
+                )
+            }
+
+            Command::RevokeNodeCert {
+                timestamp,
+                node_id,
+                reason,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut node) = txn_get::<NodeData>(&txn, NODES, &node_id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Node '{}' not found", node_id),
+                        },
+                        vec![],
+                    );
+                };
+
+                if let Some(serial) = node.cert_serial_hex.clone() {
+                    let revoked = RevokedCertData {
+                        serial_hex: serial.clone(),
+                        node_id: node_id.clone(),
+                        revoked_at: timestamp.clone(),
+                        reason,
+                    };
+                    txn_put(&txn, REVOKED_CERTS, &serial, &revoked);
+                }
+
+                match reason {
+                    RevocationReason::Decommission => {
+                        for mut cluster in txn_list::<ClusterData>(&txn, CLUSTERS) {
+                            let before = cluster.node_ids.len();
+                            cluster.node_ids.retain(|n| n != &node_id);
+                            if cluster.node_ids.len() != before {
+                                cluster.updated_at = timestamp.clone();
+                                let slug = cluster.slug.clone();
+                                txn_put(&txn, CLUSTERS, &slug, &cluster);
+                            }
+                        }
+                        txn_delete(&txn, NODES, &node_id);
+                    }
+                    RevocationReason::Compromise | RevocationReason::Other => {
+                        node.status = NodeStatus::Revoked;
+                        node.updated_at = timestamp;
+                        txn_put(&txn, NODES, &node_id, &node);
+                    }
+                }
+                txn.commit().expect("commit");
+                (Response::Deleted { id: node_id }, vec![])
             }
 
             // =================================================================

@@ -204,10 +204,7 @@ async fn add_node_to_cluster_then_remove() {
 
     // Add.
     let r = server
-        .post_json(
-            &format!("/clusters/members/nodes/{}", node_id),
-            &json!({}),
-        )
+        .post_json(&format!("/clusters/members/nodes/{}", node_id), &json!({}))
         .await;
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
@@ -221,10 +218,7 @@ async fn add_node_to_cluster_then_remove() {
 
     // Adding the same node twice is idempotent.
     let r = server
-        .post_json(
-            &format!("/clusters/members/nodes/{}", node_id),
-            &json!({}),
-        )
+        .post_json(&format!("/clusters/members/nodes/{}", node_id), &json!({}))
         .await;
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["nodeIds"].as_array().unwrap().len(), 1);
@@ -250,10 +244,7 @@ async fn add_node_to_cluster_then_remove() {
 async fn add_node_to_cluster_rejects_unknown_node() {
     let server = common::TestServer::spawn().await;
     server
-        .post_json(
-            "/orgs/test/clusters",
-            &json!({"slug": "c1", "name": "c1"}),
-        )
+        .post_json("/orgs/test/clusters", &json!({"slug": "c1", "name": "c1"}))
         .await;
 
     let r = server

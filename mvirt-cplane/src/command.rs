@@ -176,6 +176,74 @@ pub enum Command {
         slug: String,
     },
 
+    // -- Node onboarding (ADR-0006) -----------------------------------------
+    /// Bootstrap the internal CA if it doesn't exist. Idempotent: noop on
+    /// subsequent calls. Triggered by the leader on startup. The CA material
+    /// in the command is pre-generated (deterministic across replicas because
+    /// the leader generates once and replicates).
+    EnsureInternalCa {
+        request_id: String,
+        timestamp: String,
+        ca: crate::ca::InternalCa,
+    },
+
+    /// Persist a newly-signed server cert for the cplane tunnel listener.
+    /// Triggered by the leader at startup and on rotation.
+    UpdateServerCert {
+        request_id: String,
+        timestamp: String,
+        cert_pem: String,
+        key_pem: String,
+        serial_hex: String,
+        not_after: String,
+    },
+
+    /// Issue a new onboarding token bound to a Cluster.
+    CreateOnboardingToken {
+        request_id: String,
+        timestamp: String,
+        /// `tok_<short-random>` display id.
+        id: String,
+        /// sha256(bare token), 32 bytes hex.
+        token_hash_hex: String,
+        cluster_slug: String,
+        description: Option<String>,
+        expires_at: String,
+        created_by_account: String,
+    },
+
+    /// Operator-initiated token revocation (before redemption).
+    DeleteOnboardingToken {
+        request_id: String,
+        cluster_slug: String,
+        id: String,
+    },
+
+    /// Atomic: validate the token (hash + not-used + not-expired + cluster
+    /// exists), mint a new `node_id`, sign a leaf cert against `csr_pem`,
+    /// mark the token used, write the Node row, append `node_id` to the
+    /// Cluster's `node_ids`. Returns `Response::BootstrapResult` carrying
+    /// the cert chain back to the caller.
+    RedeemOnboardingToken {
+        request_id: String,
+        timestamp: String,
+        token_hash_hex: String,
+        csr_pem: String,
+        hostname: String,
+        agent_version: String,
+        kernel_version: String,
+        arch: String,
+    },
+
+    /// Revoke a Node's current cert (compromise response). Node row stays;
+    /// the cert serial moves to the revocation set.
+    RevokeNodeCert {
+        request_id: String,
+        timestamp: String,
+        node_id: String,
+        reason: RevocationReason,
+    },
+
     // Cluster operations — keyed by slug (platform-wide unique). See ADR-0005.
     CreateCluster {
         request_id: String,
@@ -362,6 +430,12 @@ impl Command {
             Command::DeleteCluster { request_id, .. } => request_id,
             Command::AddNodeToCluster { request_id, .. } => request_id,
             Command::RemoveNodeFromCluster { request_id, .. } => request_id,
+            Command::EnsureInternalCa { request_id, .. } => request_id,
+            Command::UpdateServerCert { request_id, .. } => request_id,
+            Command::CreateOnboardingToken { request_id, .. } => request_id,
+            Command::DeleteOnboardingToken { request_id, .. } => request_id,
+            Command::RedeemOnboardingToken { request_id, .. } => request_id,
+            Command::RevokeNodeCert { request_id, .. } => request_id,
             Command::CreateVolume { request_id, .. } => request_id,
             Command::DeleteVolume { request_id, .. } => request_id,
             Command::UpdateVolumeStatus { request_id, .. } => request_id,
@@ -395,6 +469,21 @@ pub struct NodeData {
     pub last_heartbeat: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Cluster this node was onboarded into. None for legacy/test rows.
+    #[serde(default)]
+    pub cluster_slug: Option<String>,
+    /// Hex serial of the current mTLS client cert. None for legacy rows.
+    #[serde(default)]
+    pub cert_serial_hex: Option<String>,
+    /// When the current cert expires (RFC3339). None for legacy rows.
+    #[serde(default)]
+    pub cert_expires_at: Option<String>,
+    /// Hostname reported during onboarding. None for legacy rows.
+    #[serde(default)]
+    pub hostname: Option<String>,
+    /// Agent version reported during onboarding.
+    #[serde(default)]
+    pub agent_version: Option<String>,
 }
 
 /// Node status - health state of the hypervisor
@@ -407,6 +496,21 @@ pub enum NodeStatus {
     /// Node status is unknown (initial state)
     #[default]
     Unknown,
+    /// Node onboarding completed, but cert revoked. Node is kept in the
+    /// table for audit, must not be allowed to reconnect.
+    Revoked,
+}
+
+/// Reason for revoking a node's cert. Recorded alongside the serial.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RevocationReason {
+    /// Operator-initiated decommission. Node row is deleted from the table.
+    Decommission,
+    /// Operator-initiated response to suspected key compromise. Node row
+    /// stays in the table with status=Revoked.
+    Compromise,
+    /// Catch-all.
+    Other,
 }
 
 /// Node resource capacity and availability
@@ -626,6 +730,42 @@ pub struct ProjectData {
     pub updated_at: String,
 }
 
+/// Persisted onboarding token. Only the hash of the bare token survives —
+/// the bare value is shown to the operator once at creation time. See
+/// ADR-0006.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingTokenData {
+    pub id: String,
+    pub token_hash_hex: String,
+    pub cluster_slug: String,
+    pub description: Option<String>,
+    pub expires_at: String,
+    pub used_at: Option<String>,
+    pub used_by_node_id: Option<String>,
+    pub created_by_account: String,
+    pub created_at: String,
+}
+
+/// Revoked cert serial; checked by the tunnel listener on every handshake.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokedCertData {
+    pub serial_hex: String,
+    pub node_id: String,
+    pub revoked_at: String,
+    pub reason: RevocationReason,
+}
+
+/// Current cplane server cert + key, persisted in raft so a freshly-elected
+/// leader can serve TLS without re-minting. Rotation is leader-driven.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerCertData {
+    pub cert_pem: String,
+    pub key_pem: String,
+    pub serial_hex: String,
+    pub not_after: String,
+    pub created_at: String,
+}
+
 /// Cluster data — a named, explicitly-listed group of Nodes within an Org.
 /// See ADR-0005. The slug is the primary key (kebab-case, platform-unique,
 /// immutable); `org_slug` is the foreign key to the parent Org. `node_ids`
@@ -786,12 +926,32 @@ pub enum Response {
     Org(OrgData),
     Project(ProjectData),
     Cluster(ClusterData),
+    OnboardingToken(OnboardingTokenData),
+    /// Result of a successful `RedeemOnboardingToken` apply: the freshly-
+    /// minted Node + signed leaf + CA root (so the node can verify the
+    /// cplane server cert on the next mTLS handshake).
+    BootstrapResult {
+        node: NodeData,
+        client_cert_pem: String,
+        ca_cert_pem: String,
+    },
+    /// Result of `EnsureInternalCa` / `UpdateServerCert` when the caller
+    /// just needs a confirmation that the apply ran.
+    Ack,
     Volume(VolumeData),
     Template(TemplateData),
     SecurityGroup(SecurityGroupData),
-    Deleted { id: String },
-    DeletedWithCount { id: String, nics_deleted: u32 },
-    Error { code: u32, message: String },
+    Deleted {
+        id: String,
+    },
+    DeletedWithCount {
+        id: String,
+        nics_deleted: u32,
+    },
+    Error {
+        code: u32,
+        message: String,
+    },
 }
 
 impl Default for Response {

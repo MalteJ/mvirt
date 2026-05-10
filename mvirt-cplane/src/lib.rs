@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod auth;
+pub mod ca;
 pub mod command;
 pub mod grpc;
 pub mod reconciler;
