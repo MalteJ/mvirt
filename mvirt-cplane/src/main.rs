@@ -15,7 +15,7 @@ use mvirt_cplane::reconciler::Controller;
 use mvirt_cplane::rest::{AppState, create_router};
 use mvirt_cplane::store::{Event, RaftStore};
 use mvirt_cplane::{
-    ApiAuditLogger, ApiState, Command, DataStore, NodeId, NodeRegistry, Response, tunnel,
+    ApiAuditLogger, ApiState, Command, DataStore, NodeId, NodeRegistry, Response, ca, tunnel,
 };
 
 #[derive(Parser)]
@@ -43,6 +43,11 @@ struct Args {
     /// Listen address for the reverse-tunnel (mvirt-node agents dial here)
     #[arg(long, default_value = "[::]:50056")]
     tunnel_listen: String,
+
+    /// Hostnames + IPs the tunnel server cert covers. Repeatable.
+    /// Defaults to localhost + 127.0.0.1 + ::1 so dev nodes Just Work.
+    #[arg(long = "tunnel-san", value_name = "DNS-OR-IP")]
+    tunnel_san: Vec<String>,
 
     /// Peer nodes (format: id:addr, can be repeated)
     #[arg(long, value_parser = parse_peer)]
@@ -213,10 +218,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .await
     });
 
+    // Bootstrap PKI: ensure the internal CA exists, generate a server cert
+    // for the tunnel listener. Both are raft-replicated, so on join we end
+    // up with whatever the cluster already has.
+    ca::install_default_crypto_provider();
+    let san = if args.tunnel_san.is_empty() {
+        vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ]
+    } else {
+        args.tunnel_san.clone()
+    };
+    let pki_store: Arc<dyn DataStore> = store.clone();
+    let _ = pki_store.ensure_internal_ca("mvirt").await.map_err(|e| {
+        warn!(error = %e, "ensure_internal_ca failed; tunnel will be retried");
+        e
+    });
+    let server_cert = match pki_store.get_server_cert().await? {
+        Some(c) => c,
+        None => pki_store.rotate_server_cert(san).await?,
+    };
+    let internal_ca = pki_store.ensure_internal_ca("mvirt").await?;
+    let server_config = ca::build_server_config(
+        &internal_ca.ca_cert_pem,
+        &server_cert.cert_pem,
+        &server_cert.key_pem,
+    )?;
+    let acceptor = Arc::new(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)));
+
     let tunnel_handle = {
         let registry = registry.clone();
         let tunnel_store: Arc<dyn DataStore> = store.clone();
-        tokio::spawn(async move { tunnel::listen(tunnel_addr, registry, tunnel_store).await })
+        tokio::spawn(
+            async move { tunnel::listen(tunnel_addr, acceptor, registry, tunnel_store).await },
+        )
     };
 
     let ctrl_c = signal::ctrl_c();

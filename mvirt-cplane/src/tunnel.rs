@@ -1,10 +1,15 @@
-//! Reverse-tunnel listener.
+//! Reverse-tunnel listener — mTLS edition (ADR-0006).
 //!
-//! mvirt-node dials in over plain TCP. The roles invert at the gRPC layer:
-//! the node hosts gRPC services on its end of the dialed socket, the api here
-//! consumes them as a regular tonic Channel client. Each accepted connection
-//! produces a NodeHandle bundling the per-node daemon clients, registered in
-//! the shared NodeRegistry so api-side reconcilers can dispatch RPCs by node id.
+//! mvirt-node dials in over TLS with a client cert issued by the internal
+//! CA. We require the client cert (`WebPkiClientVerifier`), extract the
+//! `(node_id, cluster_slug)` from the verified peer cert's SAN URIs, check
+//! it against the revocation set and the Node table, and then hand the TLS
+//! stream off to tonic as the byte-pipe for an inverted HTTP/2 channel.
+//!
+//! The gRPC roles still invert at this point: the node serves NodeAgent +
+//! daemon proxies on its end; the cplane drives them as a tonic client.
+//! Identity, however, is no longer self-claimed in `Identify` — it's pinned
+//! to the cert.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -16,20 +21,23 @@ use mvirt_daemon_protos::vmm::vm_service_client::VmServiceClient;
 use mvirt_daemon_protos::zfs::zfs_service_client::ZfsServiceClient;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
+use tokio_rustls::TlsAcceptor;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 use tracing::{info, warn};
 
-use crate::command::{NodeResources as StoreNodeResources, NodeStatus};
+use crate::ca::extract_identity_from_der;
+use crate::command::NodeStatus;
+use crate::grpc::proto::WatchEventsRequest;
 use crate::grpc::proto::node_agent_client::NodeAgentClient;
-use crate::grpc::proto::{IdentifyRequest, IdentifyResponse, WatchEventsRequest};
-use crate::store::{DataStore, RegisterNodeRequest, UpdateNodeStatusRequest};
+use crate::store::{DataStore, UpdateNodeStatusRequest};
 
 /// Per-node connection state. All four clients share the same underlying
-/// HTTP/2 connection (the inverted tunnel socket).
+/// HTTP/2-over-TLS connection (the inverted tunnel socket).
 pub struct NodeHandle {
     pub node_id: String,
     pub name: String,
+    pub cluster_slug: String,
     pub address: String,
     pub agent: NodeAgentClient<Channel>,
     pub vmm: VmServiceClient<Channel>,
@@ -67,25 +75,27 @@ impl NodeRegistry {
     }
 }
 
-/// Bind a TCP listener and accept reverse-tunnel connections from nodes.
-/// Each accepted socket spawns a task that performs the Identify handshake
-/// and registers the node.
+/// Bind a TCP listener, wrap each accepted socket in TLS, and spawn a
+/// per-connection handler that performs identity extraction and channel
+/// setup.
 pub async fn listen(
     addr: SocketAddr,
+    acceptor: Arc<TlsAcceptor>,
     registry: Arc<NodeRegistry>,
     store: Arc<dyn DataStore>,
 ) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding tunnel listener on {addr}"))?;
-    info!(%addr, "tunnel listener up");
+    info!(%addr, "tunnel listener up (mTLS)");
 
     loop {
         let (sock, peer) = listener.accept().await?;
+        let acceptor = acceptor.clone();
         let registry = registry.clone();
         let store = store.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(sock, peer, registry, store).await {
+            if let Err(e) = handle_connection(sock, peer, acceptor, registry, store).await {
                 warn!(%peer, error = %e, "tunnel connection terminated");
             }
         });
@@ -95,14 +105,65 @@ pub async fn listen(
 async fn handle_connection(
     sock: TcpStream,
     peer: SocketAddr,
+    acceptor: Arc<TlsAcceptor>,
     registry: Arc<NodeRegistry>,
     store: Arc<dyn DataStore>,
 ) -> Result<()> {
     sock.set_nodelay(true).ok();
 
-    // Hand the accepted socket to tonic via a one-shot connector. The Channel
-    // reuses this single HTTP/2 connection for all RPCs back to the node.
-    let slot = Arc::new(StdMutex::new(Some(sock)));
+    // 1. TLS handshake (client cert required by ServerConfig).
+    let tls = acceptor.accept(sock).await.context("TLS handshake")?;
+
+    // 2. Identity from peer cert SAN URIs.
+    let (node_id, cluster_slug) = {
+        let (_, session) = tls.get_ref();
+        let chain = session
+            .peer_certificates()
+            .ok_or_else(|| anyhow!("peer presented no client cert"))?;
+        let leaf = chain
+            .first()
+            .ok_or_else(|| anyhow!("empty peer cert chain"))?;
+        extract_identity_from_der(leaf.as_ref()).context("extract identity from peer cert")?
+    };
+
+    info!(
+        %peer,
+        node_id = %node_id,
+        cluster_slug = %cluster_slug,
+        "tunnel mTLS handshake ok"
+    );
+
+    // 3. Sanity-check against raft state.
+    let node_row = match store
+        .get_node(&node_id)
+        .await
+        .context("looking up node row")?
+    {
+        Some(n) if matches!(n.status, NodeStatus::Revoked) => {
+            return Err(anyhow!(
+                "node '{}' is revoked, refusing connection",
+                node_id
+            ));
+        }
+        Some(n) if n.cluster_slug.as_deref() != Some(cluster_slug.as_str()) => {
+            return Err(anyhow!(
+                "cert claims cluster '{}' but node row has '{:?}' — refusing",
+                cluster_slug,
+                n.cluster_slug
+            ));
+        }
+        Some(n) => n,
+        None => {
+            return Err(anyhow!(
+                "node '{}' (claimed via cert) is not in the node table",
+                node_id
+            ));
+        }
+    };
+
+    // 4. Hand the TLS stream to tonic as a one-shot connector.
+    let slot: Arc<StdMutex<Option<tokio_rustls::server::TlsStream<TcpStream>>>> =
+        Arc::new(StdMutex::new(Some(tls)));
     let connector = service_fn(move |_uri: Uri| {
         let slot = slot.clone();
         async move {
@@ -118,89 +179,43 @@ async fn handle_connection(
                 })
         }
     });
-
-    // The URI authority is irrelevant — the connector ignores it. Keep-alive
-    // is required because the api-side Channel sits idle between reconciliation
-    // RPCs and hyper-util's pooled client would otherwise close the inverted
-    // connection after the first request completes.
-    let endpoint = Endpoint::from_static("http://reverse.tunnel")
+    let endpoint = Endpoint::from_static("https://reverse.tunnel")
         .keep_alive_while_idle(true)
         .http2_keep_alive_interval(std::time::Duration::from_secs(10))
         .keep_alive_timeout(std::time::Duration::from_secs(20));
     let channel = endpoint
         .connect_with_connector(connector)
         .await
-        .context("building inverted channel from accepted socket")?;
+        .context("building inverted channel from accepted TLS socket")?;
 
-    let mut agent = NodeAgentClient::new(channel.clone());
-    let identify = agent
-        .identify(tonic::Request::new(IdentifyRequest {}))
-        .await
-        .context("calling NodeAgent.Identify")?
-        .into_inner();
-
-    if identify.node_id.is_empty() {
-        return Err(anyhow!("node returned empty node_id during Identify"));
-    }
-
-    info!(
-        node_id = %identify.node_id,
-        name = %identify.name,
-        version = %identify.agent_version,
-        %peer,
-        "node connected via reverse tunnel"
-    );
-
-    // Upsert into raft state so REST clients (UI/CLI) and the reconciler see the
-    // node. The Identify proto comment mandates this — without it /v1/nodes is
-    // empty even while the tunnel is healthy.
-    let resources = identify_resources(&identify);
     if let Err(e) = store
-        .upsert_node(
-            &identify.node_id,
-            RegisterNodeRequest {
-                name: identify.name.clone(),
-                address: identify.address.clone(),
-                resources: resources.clone(),
-                labels: identify.labels.clone(),
-            },
-        )
-        .await
-    {
-        // Don't drop the connection — the registry insert below still lets
-        // reconcilers reach the node via the tunnel. Log and continue.
-        warn!(node_id = %identify.node_id, error = %e, "raft upsert_node failed; continuing with tunnel only");
-    } else if let Err(e) = store
         .update_node_status(
-            &identify.node_id,
+            &node_id,
             UpdateNodeStatusRequest {
                 status: NodeStatus::Online,
-                resources: Some(resources),
+                resources: None,
             },
         )
         .await
     {
-        warn!(node_id = %identify.node_id, error = %e, "raft update_node_status(Online) failed");
+        warn!(node_id = %node_id, error = %e, "raft update_node_status(Online) failed");
     }
 
+    let agent = NodeAgentClient::new(channel.clone());
     let handle = Arc::new(NodeHandle {
-        node_id: identify.node_id.clone(),
-        name: identify.name,
-        address: identify.address,
+        node_id: node_id.clone(),
+        name: node_row.name,
+        cluster_slug: cluster_slug.clone(),
+        address: peer.to_string(),
         agent,
         vmm: VmServiceClient::new(channel.clone()),
         zfs: ZfsServiceClient::new(channel.clone()),
         net: NetServiceClient::new(channel),
     });
 
-    let node_id = handle.node_id.clone();
     registry.insert(handle.clone()).await;
 
-    // Hold an open WatchEvents stream for the lifetime of the tunnel. This
-    // doubles as our liveness signal — when the underlying HTTP/2 connection
-    // dies (peer disconnect, network failure, h2 keep-alive timeout) the stream
-    // errors and we deregister the node. Phase 3 will also drain
-    // node-originated events from this stream.
+    // 5. Hold an open WatchEvents stream for the lifetime of the tunnel.
     let mut agent = handle.agent.clone();
     let stream_result = agent
         .watch_events(tonic::Request::new(WatchEventsRequest {}))
@@ -211,7 +226,7 @@ async fn handle_connection(
             loop {
                 match stream.message().await {
                     Ok(Some(_event)) => {
-                        // TODO Phase 3: forward event to controller for state-machine update
+                        // Phase 3 TODO: drive controller from node-emitted events.
                     }
                     Ok(None) => {
                         info!(node_id = %node_id, "node closed event stream cleanly");
@@ -230,9 +245,6 @@ async fn handle_connection(
     }
     registry.remove(&node_id).await;
 
-    // Reflect the disconnect in raft state. A best-effort write — if the cplane
-    // is shutting down or has lost leadership we still want the registry-side
-    // cleanup above to succeed.
     if let Err(e) = store
         .update_node_status(
             &node_id,
@@ -246,19 +258,4 @@ async fn handle_connection(
         warn!(node_id = %node_id, error = %e, "raft update_node_status(Offline) failed");
     }
     Ok(())
-}
-
-fn identify_resources(identify: &IdentifyResponse) -> StoreNodeResources {
-    identify
-        .resources
-        .as_ref()
-        .map(|r| StoreNodeResources {
-            cpu_cores: r.cpu_cores,
-            memory_mb: r.memory_mb,
-            storage_gb: r.storage_gb,
-            available_cpu_cores: r.available_cpu_cores,
-            available_memory_mb: r.available_memory_mb,
-            available_storage_gb: r.available_storage_gb,
-        })
-        .unwrap_or_default()
 }

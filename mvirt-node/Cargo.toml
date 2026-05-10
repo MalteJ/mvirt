@@ -24,7 +24,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "http2", 
 http = "1"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -44,6 +44,13 @@ chrono = { version = "0.4", features = ["serde"] }
 hostname = "0.4"
 async-trait = "0.1"
 
+# Onboarding + mTLS (ADR-0006)
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring", "x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-pemfile = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+toml = "0.8"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

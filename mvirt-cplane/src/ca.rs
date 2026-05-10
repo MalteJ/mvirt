@@ -266,6 +266,91 @@ fn hex_serial(bytes: &[u8]) -> String {
     s
 }
 
+/// Hex-encode the DER bytes of a peer cert serial for comparison against
+/// the REVOKED_CERTS table. The serial in our cert generation uses 16
+/// random bytes; we serialize it back to the same hex format.
+pub fn serial_hex_from_der(serial: &[u8]) -> String {
+    hex_serial(serial)
+}
+
+// =============================================================================
+// rustls glue (server + client TLS configs)
+// =============================================================================
+
+/// Parse one or more PEM certificates into rustls `CertificateDer`.
+pub fn parse_pem_certs(
+    pem: &str,
+) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let mut bytes = pem.as_bytes();
+    rustls_pemfile::certs(&mut bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .context("parse PEM certs")
+}
+
+/// Parse a PEM-encoded private key (PKCS#8 or SEC1) into rustls.
+pub fn parse_pem_private_key(
+    pem: &str,
+) -> anyhow::Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let mut bytes = pem.as_bytes();
+    rustls_pemfile::private_key(&mut bytes)
+        .context("parse PEM key")?
+        .ok_or_else(|| anyhow!("no PEM private key found"))
+}
+
+/// Build a rustls server config that requires + verifies client certs
+/// signed by `ca_cert_pem`. Used by the reverse-tunnel listener.
+pub fn build_server_config(
+    ca_cert_pem: &str,
+    server_cert_pem: &str,
+    server_key_pem: &str,
+) -> anyhow::Result<rustls::ServerConfig> {
+    let ca_certs = parse_pem_certs(ca_cert_pem)?;
+    let server_chain = parse_pem_certs(server_cert_pem)?;
+    let server_key = parse_pem_private_key(server_key_pem)?;
+
+    let mut roots = rustls::RootCertStore::empty();
+    for c in &ca_certs {
+        roots.add(c.clone()).context("add CA to root store")?;
+    }
+    let verifier = rustls::server::WebPkiClientVerifier::builder(std::sync::Arc::new(roots))
+        .build()
+        .context("build client cert verifier")?;
+    rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(server_chain, server_key)
+        .context("server config with_single_cert")
+}
+
+/// Build a rustls client config that pins `ca_cert_pem` as the only trust
+/// anchor and presents `(client_cert_pem, client_key_pem)`. Used by the
+/// mvirt-node mTLS dialer.
+pub fn build_client_config(
+    ca_cert_pem: &str,
+    client_cert_pem: &str,
+    client_key_pem: &str,
+) -> anyhow::Result<rustls::ClientConfig> {
+    let ca_certs = parse_pem_certs(ca_cert_pem)?;
+    let client_chain = parse_pem_certs(client_cert_pem)?;
+    let client_key = parse_pem_private_key(client_key_pem)?;
+
+    let mut roots = rustls::RootCertStore::empty();
+    for c in &ca_certs {
+        roots.add(c.clone()).context("add CA to root store")?;
+    }
+    rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(client_chain, client_key)
+        .context("client config with_client_auth_cert")
+}
+
+/// Install the ring-backed default crypto provider exactly once.
+pub fn install_default_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
