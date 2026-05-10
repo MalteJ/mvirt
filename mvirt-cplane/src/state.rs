@@ -12,14 +12,14 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
-#[cfg(test)]
-use crate::command::VolumePhase;
 use crate::command::{
-    Command, NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus, OrgContact, OrgData,
+    ClusterData, Command, NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus, OrgData,
     ProjectData, Response, SecurityGroupData, SecurityGroupRuleData, SnapshotData, TemplateData,
     TemplatePhase, TemplateSpec, TemplateStatus, VmData, VmPhase, VmStatus, VolumeData, VolumeSpec,
     VolumeStatus,
 };
+#[cfg(test)]
+use crate::command::{OrgContact, VolumePhase};
 use crate::store::Event;
 
 // =============================================================================
@@ -32,6 +32,7 @@ const NICS: TableDefinition<&str, &[u8]> = TableDefinition::new("nics");
 const VMS: TableDefinition<&str, &[u8]> = TableDefinition::new("vms");
 const ORGS: TableDefinition<&str, &[u8]> = TableDefinition::new("orgs");
 const PROJECTS: TableDefinition<&str, &[u8]> = TableDefinition::new("projects");
+const CLUSTERS: TableDefinition<&str, &[u8]> = TableDefinition::new("clusters");
 const VOLUMES: TableDefinition<&str, &[u8]> = TableDefinition::new("volumes");
 const TEMPLATES: TableDefinition<&str, &[u8]> = TableDefinition::new("templates");
 const SECURITY_GROUPS: TableDefinition<&str, &[u8]> = TableDefinition::new("security_groups");
@@ -43,6 +44,7 @@ const ALL_TABLES: &[TableDefinition<&str, &[u8]>] = &[
     VMS,
     ORGS,
     PROJECTS,
+    CLUSTERS,
     VOLUMES,
     TEMPLATES,
     SECURITY_GROUPS,
@@ -411,6 +413,34 @@ impl ApiState {
         read_list::<ProjectData>(&self.read_txn(), PROJECTS)
             .into_iter()
             .filter(|p| p.org_slug == org_slug)
+            .collect()
+    }
+
+    // =========================================================================
+    // Cluster queries — Cluster is keyed by slug. See ADR-0005.
+    // =========================================================================
+
+    pub fn get_cluster(&self, slug: &str) -> Option<ClusterData> {
+        read_get(&self.read_txn(), CLUSTERS, slug)
+    }
+
+    pub fn list_clusters(&self) -> Vec<ClusterData> {
+        read_list(&self.read_txn(), CLUSTERS)
+    }
+
+    pub fn list_clusters_by_org(&self, org_slug: &str) -> Vec<ClusterData> {
+        read_list::<ClusterData>(&self.read_txn(), CLUSTERS)
+            .into_iter()
+            .filter(|c| c.org_slug == org_slug)
+            .collect()
+    }
+
+    /// All Clusters that include this `node_id` in their `node_ids` list.
+    /// A Node may legitimately be in more than one Cluster (ADR-0005).
+    pub fn list_clusters_with_node(&self, node_id: &str) -> Vec<ClusterData> {
+        read_list::<ClusterData>(&self.read_txn(), CLUSTERS)
+            .into_iter()
+            .filter(|c| c.node_ids.iter().any(|n| n == node_id))
             .collect()
     }
 
@@ -1340,6 +1370,172 @@ impl StateMachine<Command, Response> for ApiState {
                 txn_delete(&txn, PROJECTS, &slug);
                 txn.commit().expect("commit");
                 (Response::Deleted { id: slug }, vec![])
+            }
+
+            // =================================================================
+            // Cluster Commands — keyed by slug. See ADR-0005.
+            // =================================================================
+            Command::CreateCluster {
+                timestamp,
+                org_slug,
+                slug,
+                name,
+                description,
+                location,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+
+                if txn_has(&txn, CLUSTERS, &slug) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Cluster with slug '{}' already exists", slug),
+                        },
+                        vec![],
+                    );
+                }
+
+                if !txn_has(&txn, ORGS, &org_slug) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Org '{}' not found", org_slug),
+                        },
+                        vec![],
+                    );
+                }
+
+                let cluster = ClusterData {
+                    slug: slug.clone(),
+                    org_slug,
+                    name,
+                    description,
+                    location,
+                    node_ids: Vec::new(),
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                };
+
+                txn_put(&txn, CLUSTERS, &slug, &cluster);
+                txn.commit().expect("commit");
+                (Response::Cluster(cluster), vec![])
+            }
+
+            Command::UpdateCluster {
+                slug,
+                timestamp,
+                name,
+                description,
+                location,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut cluster) = txn_get::<ClusterData>(&txn, CLUSTERS, &slug) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Cluster '{}' not found", slug),
+                        },
+                        vec![],
+                    );
+                };
+                if let Some(n) = name {
+                    cluster.name = n;
+                }
+                if let Some(d) = description {
+                    cluster.description = d;
+                }
+                if let Some(l) = location {
+                    cluster.location = l;
+                }
+                cluster.updated_at = timestamp;
+                txn_put(&txn, CLUSTERS, &slug, &cluster);
+                txn.commit().expect("commit");
+                (Response::Cluster(cluster), vec![])
+            }
+
+            Command::DeleteCluster { slug, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                if !txn_has(&txn, CLUSTERS, &slug) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Cluster '{}' not found", slug),
+                        },
+                        vec![],
+                    );
+                }
+                // ADR-0005: reject if any resource references this Cluster.
+                // Today no resource carries `cluster_slug` yet; the gate becomes
+                // load-bearing once VM/Volume specs gain that field. Until then,
+                // the Cluster's `node_ids` is the only reference and clearing it
+                // is the operator's job (DELETE membership first).
+                txn_delete(&txn, CLUSTERS, &slug);
+                txn.commit().expect("commit");
+                (Response::Deleted { id: slug }, vec![])
+            }
+
+            Command::AddNodeToCluster {
+                timestamp,
+                cluster_slug,
+                node_id,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut cluster) = txn_get::<ClusterData>(&txn, CLUSTERS, &cluster_slug)
+                else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Cluster '{}' not found", cluster_slug),
+                        },
+                        vec![],
+                    );
+                };
+                if !txn_has(&txn, NODES, &node_id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Node '{}' not found", node_id),
+                        },
+                        vec![],
+                    );
+                }
+                if !cluster.node_ids.iter().any(|n| n == &node_id) {
+                    cluster.node_ids.push(node_id);
+                    cluster.updated_at = timestamp;
+                    txn_put(&txn, CLUSTERS, &cluster_slug, &cluster);
+                }
+                txn.commit().expect("commit");
+                (Response::Cluster(cluster), vec![])
+            }
+
+            Command::RemoveNodeFromCluster {
+                timestamp,
+                cluster_slug,
+                node_id,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut cluster) = txn_get::<ClusterData>(&txn, CLUSTERS, &cluster_slug)
+                else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Cluster '{}' not found", cluster_slug),
+                        },
+                        vec![],
+                    );
+                };
+                let before = cluster.node_ids.len();
+                cluster.node_ids.retain(|n| n != &node_id);
+                if cluster.node_ids.len() != before {
+                    cluster.updated_at = timestamp;
+                    txn_put(&txn, CLUSTERS, &cluster_slug, &cluster);
+                }
+                txn.commit().expect("commit");
+                (Response::Cluster(cluster), vec![])
             }
 
             // =================================================================

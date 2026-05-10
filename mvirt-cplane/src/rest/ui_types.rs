@@ -5,10 +5,29 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use serde::Deserializer;
+
 use crate::command::{
-    NetworkData, NicData, OrgContact, OrgData, ProjectData, SnapshotData, TemplateData,
-    TemplatePhase, VmData, VmDesiredState, VmPhase, VolumeData, VolumePhase,
+    ClusterData, NetworkData, NicData, OrgContact, OrgData, ProjectData, SnapshotData,
+    TemplateData, TemplatePhase, VmData, VmDesiredState, VmPhase, VolumeData, VolumePhase,
 };
+
+/// Tri-state deserializer for `Option<Option<T>>` PATCH semantics.
+///
+/// - field absent     → `None`        (untouched)
+/// - field is null    → `Some(None)`  (clear)
+/// - field is value v → `Some(Some(v))` (set)
+///
+/// Plain `#[serde(default)]` collapses null to `None` at the outer level,
+/// which means the apply handler can't distinguish "leave alone" from
+/// "clear". Pair this helper with `#[serde(default, deserialize_with = ...)]`.
+fn deserialize_tristate<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Option::<T>::deserialize(de).map(Some)
+}
 
 // =============================================================================
 // VM Types
@@ -438,6 +457,78 @@ pub struct ProjectListResponse {
 }
 
 // =============================================================================
+// Cluster Types — see ADR-0005.
+// =============================================================================
+
+/// UI-compatible Cluster representation.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCluster {
+    pub slug: String,
+    pub org_slug: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    pub node_ids: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<ClusterData> for UiCluster {
+    fn from(data: ClusterData) -> Self {
+        Self {
+            slug: data.slug,
+            org_slug: data.org_slug,
+            name: data.name,
+            description: data.description,
+            location: data.location,
+            node_ids: data.node_ids,
+            created_at: data.created_at,
+            updated_at: data.updated_at,
+        }
+    }
+}
+
+/// Request to create a Cluster (UI-compatible). The Org comes from the URL
+/// path (`POST /v1/orgs/:org-slug/clusters`); the body carries the cluster
+/// slug + display fields.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreateClusterRequest {
+    /// URL identifier — kebab-case, platform-wide unique, immutable.
+    pub slug: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
+/// Request to update a Cluster. All fields optional; unset leaves the field
+/// unchanged. For nullable fields the `Option<Option<_>>` carries tri-state:
+/// key absent → untouched; key present with value → set; key present with
+/// JSON `null` → clear.
+#[derive(Debug, Clone, Deserialize, Default, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiUpdateClusterRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_tristate")]
+    pub description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_tristate")]
+    pub location: Option<Option<String>>,
+}
+
+/// Response wrapper for Cluster list.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterListResponse {
+    pub clusters: Vec<UiCluster>,
+}
+
+// =============================================================================
 // Volume Types
 // =============================================================================
 
@@ -848,9 +939,11 @@ pub struct UiCreateSecurityGroupRequest {
 pub struct UiUpdateSecurityGroupRequest {
     #[serde(default)]
     pub name: Option<String>,
-    /// `description` follows the same `Option<Option<_>>` shape as elsewhere:
-    /// key absent → untouched; key present → set (null clears).
-    #[serde(default)]
+    /// `description` follows the tri-state shape: absent → untouched,
+    /// present-and-null → clear, present-with-value → set. The custom
+    /// deserializer is required — plain `#[serde(default)]` collapses
+    /// null to `None` at the outer level.
+    #[serde(default, deserialize_with = "deserialize_tristate")]
     pub description: Option<Option<String>>,
 }
 
@@ -866,7 +959,7 @@ pub struct UiUpdateSecurityGroupRuleRequest {
     /// On the wire we collapse this to "always set" — the inner Option is
     /// the value (null = clear). The handler maps to the internal patch
     /// shape with `Some(req.description)`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_tristate")]
     pub description: Option<Option<String>>,
 }
 

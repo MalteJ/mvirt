@@ -25,6 +25,7 @@ use crate::auth::{JwtValidator, require_auth};
         (name = "nodes", description = "Hypervisor node registration and status"),
         (name = "orgs", description = "Organization management (tenancy container above Project)"),
         (name = "projects", description = "Project management"),
+        (name = "clusters", description = "Cluster management (named groups of Nodes within an Org)"),
         (name = "networks", description = "Network CRUD operations"),
         (name = "nics", description = "NIC CRUD operations"),
         (name = "vms", description = "VM CRUD and lifecycle operations"),
@@ -57,6 +58,15 @@ use crate::auth::{JwtValidator, require_auth};
         ui_handlers::get_project,
         ui_handlers::create_project,
         ui_handlers::delete_project,
+        // Clusters
+        ui_handlers::list_clusters,
+        ui_handlers::list_clusters_in_org,
+        ui_handlers::get_cluster,
+        ui_handlers::create_cluster,
+        ui_handlers::update_cluster,
+        ui_handlers::delete_cluster,
+        ui_handlers::add_node_to_cluster,
+        ui_handlers::remove_node_from_cluster,
         // VMs (UI)
         ui_handlers::list_vms,
         ui_handlers::get_vm,
@@ -135,6 +145,11 @@ use crate::auth::{JwtValidator, require_auth};
         ui_types::UiProject,
         ui_types::UiCreateProjectRequest,
         ui_types::ProjectListResponse,
+        // UI schemas - Clusters
+        ui_types::UiCluster,
+        ui_types::UiCreateClusterRequest,
+        ui_types::UiUpdateClusterRequest,
+        ui_types::ClusterListResponse,
         // UI schemas - VMs
         ui_types::UiVm,
         ui_types::UiVmState,
@@ -236,6 +251,29 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
         .route("/projects", get(ui_handlers::list_projects))
         .route("/projects/{id}", get(ui_handlers::get_project))
         .route("/projects/{id}", delete(ui_handlers::delete_project))
+        // Clusters within an Org (Org-scoped list + create)
+        .route(
+            "/orgs/{org_slug}/clusters",
+            get(ui_handlers::list_clusters_in_org),
+        )
+        .route(
+            "/orgs/{org_slug}/clusters",
+            post(ui_handlers::create_cluster),
+        )
+        // Clusters (flat: cross-org list, individual ops by slug)
+        .route("/clusters", get(ui_handlers::list_clusters))
+        .route("/clusters/{slug}", get(ui_handlers::get_cluster))
+        .route("/clusters/{slug}", patch(ui_handlers::update_cluster))
+        .route("/clusters/{slug}", delete(ui_handlers::delete_cluster))
+        // Cluster ↔ Node membership
+        .route(
+            "/clusters/{slug}/nodes/{node_id}",
+            post(ui_handlers::add_node_to_cluster),
+        )
+        .route(
+            "/clusters/{slug}/nodes/{node_id}",
+            delete(ui_handlers::remove_node_from_cluster),
+        )
         // Global storage
         .route("/import-jobs/{id}", get(ui_handlers::get_import_job))
         .route("/pool", get(ui_handlers::get_pool_stats))

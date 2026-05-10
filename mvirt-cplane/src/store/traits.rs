@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::command::{
-    NetworkData, NicData, NodeData, NodeResources, NodeStatus, OrgContact, OrgData, ProjectData,
-    RuleDirection, SecurityGroupData, TemplateData, TemplatePhase, VmData, VmDesiredState, VmSpec,
-    VmStatus, VolumeData,
+    ClusterData, NetworkData, NicData, NodeData, NodeResources, NodeStatus, OrgContact, OrgData,
+    ProjectData, RuleDirection, SecurityGroupData, TemplateData, TemplatePhase, VmData,
+    VmDesiredState, VmSpec, VmStatus, VolumeData,
 };
 use std::collections::HashMap;
 
@@ -145,6 +145,32 @@ pub struct CreateProjectRequest {
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
+}
+
+// =============================================================================
+// Cluster Request DTOs (ADR-0005)
+// =============================================================================
+
+/// Request to create a new Cluster within an Org.
+#[derive(Debug, Clone)]
+pub struct CreateClusterRequest {
+    /// Parent Org slug (resolved by the handler from the URL path).
+    pub org_slug: String,
+    /// URL identifier (kebab-case, platform-wide unique, immutable).
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub location: Option<String>,
+}
+
+/// Request to patch a Cluster's mutable fields. All fields optional;
+/// `None` leaves a field unchanged. `Some(None)` clears `description`/
+/// `location`.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateClusterRequest {
+    pub name: Option<String>,
+    pub description: Option<Option<String>>,
+    pub location: Option<Option<String>>,
 }
 
 // =============================================================================
@@ -393,6 +419,26 @@ pub trait ProjectStore: Send + Sync {
     async fn delete_project(&self, slug: &str) -> Result<()>;
 }
 
+/// Store trait for Cluster operations. Cluster is keyed by slug (platform-wide
+/// unique). See ADR-0005.
+#[async_trait]
+pub trait ClusterStore: Send + Sync {
+    async fn list_clusters(&self) -> Result<Vec<ClusterData>>;
+    async fn list_clusters_by_org(&self, org_slug: &str) -> Result<Vec<ClusterData>>;
+    async fn get_cluster(&self, slug: &str) -> Result<Option<ClusterData>>;
+    async fn create_cluster(&self, req: CreateClusterRequest) -> Result<ClusterData>;
+    async fn update_cluster(&self, slug: &str, req: UpdateClusterRequest) -> Result<ClusterData>;
+    async fn delete_cluster(&self, slug: &str) -> Result<()>;
+    /// Idempotent: noop if `node_id` is already a member of `cluster_slug`.
+    async fn add_node_to_cluster(&self, cluster_slug: &str, node_id: &str) -> Result<ClusterData>;
+    /// Idempotent: noop if `node_id` is not a member.
+    async fn remove_node_from_cluster(
+        &self,
+        cluster_slug: &str,
+        node_id: &str,
+    ) -> Result<ClusterData>;
+}
+
 /// Store trait for volume operations.
 #[async_trait]
 pub trait VolumeStore: Send + Sync {
@@ -560,6 +606,7 @@ pub trait DataStore:
     + VmStore
     + OrgStore
     + ProjectStore
+    + ClusterStore
     + VolumeStore
     + TemplateStore
     + SecurityGroupStore

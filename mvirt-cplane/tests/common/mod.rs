@@ -1,4 +1,10 @@
 //! Shared test utilities for mvirt-cplane integration tests.
+//!
+//! Each integration-test file is its own binary; if a helper is used by
+//! some but not all of them the compiler flags it `dead_code` per binary.
+//! We silence that here because the helpers are intentionally part of the
+//! shared surface.
+#![allow(dead_code)]
 
 use mraft::{NodeConfig, RaftNode, StorageBackend};
 use mvirt_cplane::rest::{AppState, create_router};

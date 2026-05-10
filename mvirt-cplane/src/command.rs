@@ -176,6 +176,49 @@ pub enum Command {
         slug: String,
     },
 
+    // Cluster operations — keyed by slug (platform-wide unique). See ADR-0005.
+    CreateCluster {
+        request_id: String,
+        timestamp: String,
+        org_slug: String,
+        slug: String,
+        name: String,
+        description: Option<String>,
+        location: Option<String>,
+    },
+    UpdateCluster {
+        request_id: String,
+        slug: String,
+        timestamp: String,
+        name: Option<String>,
+        /// `Some(value)` writes (`Some(None)` clears); `None` leaves untouched.
+        description: Option<Option<String>>,
+        /// `Some(value)` writes (`Some(None)` clears); `None` leaves untouched.
+        location: Option<Option<String>>,
+    },
+    DeleteCluster {
+        request_id: String,
+        slug: String,
+    },
+    /// Add a Node id to a Cluster's `node_ids`. Validates Cluster + Node both
+    /// exist; idempotent if the Node is already a member. See ADR-0005.
+    AddNodeToCluster {
+        request_id: String,
+        timestamp: String,
+        cluster_slug: String,
+        node_id: String,
+    },
+    /// Remove a Node id from a Cluster's `node_ids`. Idempotent if not a
+    /// member. Per ADR-0005 the apply handler does **not** check for resources
+    /// still on the Node — that gate lives at higher levels (REST handler /
+    /// reconciler) once VM placement carries `cluster_slug`.
+    RemoveNodeFromCluster {
+        request_id: String,
+        timestamp: String,
+        cluster_slug: String,
+        node_id: String,
+    },
+
     // Volume operations (node_id for data locality - Shared Nothing architecture)
     CreateVolume {
         request_id: String,
@@ -314,6 +357,11 @@ impl Command {
             Command::DeleteOrg { request_id, .. } => request_id,
             Command::CreateProject { request_id, .. } => request_id,
             Command::DeleteProject { request_id, .. } => request_id,
+            Command::CreateCluster { request_id, .. } => request_id,
+            Command::UpdateCluster { request_id, .. } => request_id,
+            Command::DeleteCluster { request_id, .. } => request_id,
+            Command::AddNodeToCluster { request_id, .. } => request_id,
+            Command::RemoveNodeFromCluster { request_id, .. } => request_id,
             Command::CreateVolume { request_id, .. } => request_id,
             Command::DeleteVolume { request_id, .. } => request_id,
             Command::UpdateVolumeStatus { request_id, .. } => request_id,
@@ -578,6 +626,22 @@ pub struct ProjectData {
     pub updated_at: String,
 }
 
+/// Cluster data — a named, explicitly-listed group of Nodes within an Org.
+/// See ADR-0005. The slug is the primary key (kebab-case, platform-unique,
+/// immutable); `org_slug` is the foreign key to the parent Org. `node_ids`
+/// is the eligibility set the scheduler picks from when placing resources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterData {
+    pub slug: String,
+    pub org_slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub node_ids: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // =============================================================================
 // Storage Types (Volumes, Templates, Import Jobs)
 // =============================================================================
@@ -721,6 +785,7 @@ pub enum Response {
     Vm(VmData),
     Org(OrgData),
     Project(ProjectData),
+    Cluster(ClusterData),
     Volume(VolumeData),
     Template(TemplateData),
     SecurityGroup(SecurityGroupData),

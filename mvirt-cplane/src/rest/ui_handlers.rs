@@ -17,12 +17,14 @@ use super::handlers::{ApiError, AppState};
 use super::ui_types::*;
 use crate::command::{VmDesiredState, VmPhase, VmSpec, VmStatus};
 use crate::store::{
+    CreateClusterRequest as StoreCreateClusterRequest,
     CreateNetworkRequest as StoreCreateNetworkRequest, CreateNicRequest as StoreCreateNicRequest,
     CreateOrgRequest as StoreCreateOrgRequest, CreateProjectRequest as StoreCreateProjectRequest,
     CreateSnapshotRequest as StoreCreateSnapshotRequest,
     CreateTemplateRequest as StoreCreateTemplateRequest, CreateVmRequest as StoreCreateVmRequest,
     CreateVolumeRequest as StoreCreateVolumeRequest,
-    ResizeVolumeRequest as StoreResizeVolumeRequest, UpdateOrgRequest as StoreUpdateOrgRequest,
+    ResizeVolumeRequest as StoreResizeVolumeRequest,
+    UpdateClusterRequest as StoreUpdateClusterRequest, UpdateOrgRequest as StoreUpdateOrgRequest,
     UpdateVmSpecRequest as StoreUpdateVmSpecRequest,
     UpdateVmStatusRequest as StoreUpdateVmStatusRequest,
 };
@@ -288,6 +290,200 @@ pub async fn delete_project(
     state.store.delete_project(&id).await?;
     state.audit.project_deleted(&id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+// =============================================================================
+// Cluster Handlers (ADR-0005)
+// =============================================================================
+
+/// List Clusters within an Org.
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{org_slug}/clusters",
+    params(("org_slug" = String, Path)),
+    responses((status = 200, body = ClusterListResponse), (status = 404, body = ApiError)),
+    tag = "clusters"
+)]
+pub async fn list_clusters_in_org(
+    State(state): State<Arc<AppState>>,
+    Path(org_slug): Path<String>,
+) -> Result<Json<ClusterListResponse>, ApiError> {
+    let org = state
+        .store
+        .get_org(&org_slug)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("Org '{}' not found", org_slug),
+            code: 404,
+        })?;
+    let clusters = state.store.list_clusters_by_org(&org.slug).await?;
+    Ok(Json(ClusterListResponse {
+        clusters: clusters.into_iter().map(UiCluster::from).collect(),
+    }))
+}
+
+/// List all Clusters across all Orgs.
+#[utoipa::path(
+    get,
+    path = "/v1/clusters",
+    responses((status = 200, body = ClusterListResponse)),
+    tag = "clusters"
+)]
+pub async fn list_clusters(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ClusterListResponse>, ApiError> {
+    let clusters = state.store.list_clusters().await?;
+    Ok(Json(ClusterListResponse {
+        clusters: clusters.into_iter().map(UiCluster::from).collect(),
+    }))
+}
+
+/// Get a Cluster by slug.
+#[utoipa::path(
+    get,
+    path = "/v1/clusters/{slug}",
+    params(("slug" = String, Path)),
+    responses((status = 200, body = UiCluster), (status = 404, body = ApiError)),
+    tag = "clusters"
+)]
+pub async fn get_cluster(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<Json<UiCluster>, ApiError> {
+    state
+        .store
+        .get_cluster(&slug)
+        .await?
+        .map(|c| Json(UiCluster::from(c)))
+        .ok_or_else(|| ApiError {
+            error: format!("Cluster '{}' not found", slug),
+            code: 404,
+        })
+}
+
+/// Create a new Cluster under the named Org.
+#[utoipa::path(
+    post,
+    path = "/v1/orgs/{org_slug}/clusters",
+    params(("org_slug" = String, Path)),
+    request_body = UiCreateClusterRequest,
+    responses(
+        (status = 200, body = UiCluster),
+        (status = 400, body = ApiError),
+        (status = 404, body = ApiError),
+        (status = 409, body = ApiError)
+    ),
+    tag = "clusters"
+)]
+pub async fn create_cluster(
+    State(state): State<Arc<AppState>>,
+    Path(org_slug): Path<String>,
+    Json(req): Json<UiCreateClusterRequest>,
+) -> Result<Json<UiCluster>, ApiError> {
+    validate_slug(&req.slug, "Cluster slug")?;
+
+    let org = state
+        .store
+        .get_org(&org_slug)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("Org '{}' not found", org_slug),
+            code: 404,
+        })?;
+
+    let store_req = StoreCreateClusterRequest {
+        org_slug: org.slug,
+        slug: req.slug,
+        name: req.name,
+        description: req.description,
+        location: req.location,
+    };
+    let data = state.store.create_cluster(store_req).await?;
+    Ok(Json(UiCluster::from(data)))
+}
+
+/// Update a Cluster.
+#[utoipa::path(
+    patch,
+    path = "/v1/clusters/{slug}",
+    params(("slug" = String, Path)),
+    request_body = UiUpdateClusterRequest,
+    responses((status = 200, body = UiCluster), (status = 404, body = ApiError)),
+    tag = "clusters"
+)]
+pub async fn update_cluster(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    Json(req): Json<UiUpdateClusterRequest>,
+) -> Result<Json<UiCluster>, ApiError> {
+    let store_req = StoreUpdateClusterRequest {
+        name: req.name,
+        description: req.description,
+        location: req.location,
+    };
+    let data = state.store.update_cluster(&slug, store_req).await?;
+    Ok(Json(UiCluster::from(data)))
+}
+
+/// Delete a Cluster. Rejects with 409 if any resource references it.
+#[utoipa::path(
+    delete,
+    path = "/v1/clusters/{slug}",
+    params(("slug" = String, Path)),
+    responses(
+        (status = 204),
+        (status = 404, body = ApiError),
+        (status = 409, body = ApiError)
+    ),
+    tag = "clusters"
+)]
+pub async fn delete_cluster(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.store.delete_cluster(&slug).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Add a Node to a Cluster's `node_ids`. Idempotent.
+#[utoipa::path(
+    post,
+    path = "/v1/clusters/{slug}/nodes/{node_id}",
+    params(("slug" = String, Path), ("node_id" = String, Path)),
+    responses(
+        (status = 200, body = UiCluster),
+        (status = 404, body = ApiError)
+    ),
+    tag = "clusters"
+)]
+pub async fn add_node_to_cluster(
+    State(state): State<Arc<AppState>>,
+    Path((slug, node_id)): Path<(String, String)>,
+) -> Result<Json<UiCluster>, ApiError> {
+    let data = state.store.add_node_to_cluster(&slug, &node_id).await?;
+    Ok(Json(UiCluster::from(data)))
+}
+
+/// Remove a Node from a Cluster's `node_ids`. Idempotent.
+#[utoipa::path(
+    delete,
+    path = "/v1/clusters/{slug}/nodes/{node_id}",
+    params(("slug" = String, Path), ("node_id" = String, Path)),
+    responses(
+        (status = 200, body = UiCluster),
+        (status = 404, body = ApiError)
+    ),
+    tag = "clusters"
+)]
+pub async fn remove_node_from_cluster(
+    State(state): State<Arc<AppState>>,
+    Path((slug, node_id)): Path<(String, String)>,
+) -> Result<Json<UiCluster>, ApiError> {
+    let data = state
+        .store
+        .remove_node_from_cluster(&slug, &node_id)
+        .await?;
+    Ok(Json(UiCluster::from(data)))
 }
 
 // =============================================================================

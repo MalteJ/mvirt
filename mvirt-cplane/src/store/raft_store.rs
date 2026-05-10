@@ -8,8 +8,8 @@ use mraft::RaftNode;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::command::{
-    Command, NetworkData, NicData, NodeData, OrgContact, OrgData, ProjectData, Response,
-    TemplateData, VmData, VmPhase, VmStatus, VolumeData,
+    ClusterData, Command, NetworkData, NicData, NodeData, OrgContact, OrgData, ProjectData,
+    Response, TemplateData, VmData, VmPhase, VmStatus, VolumeData,
 };
 use crate::scheduler::Scheduler;
 use crate::state::ApiState;
@@ -17,14 +17,15 @@ use crate::state::ApiState;
 use super::error::{Result, StoreError};
 use super::event::Event;
 use super::traits::{
-    ControlplaneInfo, ControlplaneStore, CreateNetworkRequest, CreateNicRequest, CreateOrgRequest,
-    CreateProjectRequest, CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest,
-    CreateSnapshotRequest, CreateTemplateRequest, CreateVmRequest, CreateVolumeRequest, DataStore,
-    DeleteNetworkResult, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore, OrgStore,
-    ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore, TemplateStore,
-    UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateOrgRequest,
-    UpdateSecurityGroupRequest, UpdateSecurityGroupRuleRequest, UpdateTemplateStatusRequest,
-    UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore, VolumeStore,
+    ClusterStore, ControlplaneInfo, ControlplaneStore, CreateClusterRequest, CreateNetworkRequest,
+    CreateNicRequest, CreateOrgRequest, CreateProjectRequest, CreateSecurityGroupRequest,
+    CreateSecurityGroupRuleRequest, CreateSnapshotRequest, CreateTemplateRequest, CreateVmRequest,
+    CreateVolumeRequest, DataStore, DeleteNetworkResult, Membership, MembershipPeer, NetworkStore,
+    NicStore, NodeStore, OrgStore, ProjectStore, RegisterNodeRequest, ResizeVolumeRequest,
+    SecurityGroupStore, TemplateStore, UpdateClusterRequest, UpdateNetworkRequest,
+    UpdateNicRequest, UpdateNodeStatusRequest, UpdateOrgRequest, UpdateSecurityGroupRequest,
+    UpdateSecurityGroupRuleRequest, UpdateTemplateStatusRequest, UpdateVmSpecRequest,
+    UpdateVmStatusRequest, VmStore, VolumeStore,
 };
 
 /// RaftStore wraps a RaftNode and implements the DataStore trait.
@@ -667,6 +668,116 @@ impl ProjectStore for RaftStore {
 
         match self.write_command(cmd).await? {
             Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+}
+
+#[async_trait]
+impl ClusterStore for RaftStore {
+    async fn list_clusters(&self) -> Result<Vec<ClusterData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_clusters())
+    }
+
+    async fn list_clusters_by_org(&self, org_slug: &str) -> Result<Vec<ClusterData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_clusters_by_org(org_slug))
+    }
+
+    async fn get_cluster(&self, slug: &str) -> Result<Option<ClusterData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_cluster(slug))
+    }
+
+    async fn create_cluster(&self, req: CreateClusterRequest) -> Result<ClusterData> {
+        let cmd = Command::CreateCluster {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            org_slug: req.org_slug,
+            slug: req.slug,
+            name: req.name,
+            description: req.description,
+            location: req.location,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Cluster(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn update_cluster(&self, slug: &str, req: UpdateClusterRequest) -> Result<ClusterData> {
+        let cmd = Command::UpdateCluster {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            slug: slug.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            name: req.name,
+            description: req.description,
+            location: req.location,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Cluster(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn delete_cluster(&self, slug: &str) -> Result<()> {
+        let cmd = Command::DeleteCluster {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            slug: slug.to_string(),
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn add_node_to_cluster(&self, cluster_slug: &str, node_id: &str) -> Result<ClusterData> {
+        let cmd = Command::AddNodeToCluster {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            cluster_slug: cluster_slug.to_string(),
+            node_id: node_id.to_string(),
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Cluster(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn remove_node_from_cluster(
+        &self,
+        cluster_slug: &str,
+        node_id: &str,
+    ) -> Result<ClusterData> {
+        let cmd = Command::RemoveNodeFromCluster {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            cluster_slug: cluster_slug.to_string(),
+            node_id: node_id.to_string(),
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Cluster(data) => Ok(data),
             Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
             Response::Error { message, .. } => Err(StoreError::Internal(message)),
             _ => Err(StoreError::Internal("unexpected response".into())),
