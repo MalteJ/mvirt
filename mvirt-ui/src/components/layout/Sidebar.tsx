@@ -6,12 +6,9 @@ import {
   Flame,
   ScrollText,
   Boxes,
-  Building2,
-  FolderKanban,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useApiHealth } from '@/hooks/queries'
-import { useOrg } from '@/hooks/useOrg'
 
 const navigation = [
   { name: 'Virtual Machines', path: '/vms', icon: Server },
@@ -21,8 +18,9 @@ const navigation = [
   { name: 'Logs', path: '/logs', icon: ScrollText },
 ]
 
-const adminBaseNav = [
-  { name: 'Organizations', href: '/orgs', icon: Building2 },
+const adminNavigation = [
+  // Org/Project navigation lives in the header switcher; keep this
+  // section purely for platform-level admin (Cluster, future settings).
   { name: 'Cluster', href: '/cluster', icon: Boxes },
 ]
 
@@ -39,20 +37,7 @@ export function Sidebar() {
   const { pathname } = useLocation()
   const projectMatch = pathname.match(/^\/projects\/([^/]+)/)
   const projectSlug = projectMatch?.[1]
-  const { currentOrg } = useOrg()
   const apiHealth = useApiHealth()
-
-  // The Projects entry points at the active Org's project list when one is
-  // known; otherwise it falls back to the Org list (where the user can pick).
-  const adminNavigation = [
-    adminBaseNav[0],
-    {
-      name: 'Projects',
-      href: currentOrg ? `/orgs/${currentOrg.slug}/projects` : '/orgs',
-      icon: FolderKanban,
-    },
-    adminBaseNav[1],
-  ]
 
   const apiStatus: 'connected' | 'connecting' | 'disconnected' =
     apiHealth.isSuccess ? 'connected'

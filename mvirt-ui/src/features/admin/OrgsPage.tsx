@@ -44,6 +44,25 @@ export function OrgsPage() {
   const [name, setName] = useState('')
   const [slugTouched, setSlugTouched] = useState(false)
 
+  // Delete-confirmation state. Holds the Org being deleted (or null when
+  // closed). Using the full Org row instead of just the slug so the
+  // confirmation message can show the display name even after the row
+  // disappears from the list.
+  const [orgToDelete, setOrgToDelete] = useState<Org | null>(null)
+  const closeDeleteDialog = () => {
+    setOrgToDelete(null)
+    deleteOrg.reset()
+  }
+  const handleConfirmDelete = () => {
+    if (!orgToDelete) return
+    deleteOrg.mutate(orgToDelete.slug, {
+      onSuccess: () => {
+        setOrgToDelete(null)
+        deleteOrg.reset()
+      },
+    })
+  }
+
   // Auto-derive slug from name unless user has edited it.
   const handleNameChange = (v: string) => {
     setName(v)
@@ -124,15 +143,7 @@ export function OrgsPage() {
             </DropdownMenuItem>
             <DropdownMenuItem
               className="text-destructive"
-              onClick={() => {
-                if (
-                  confirm(
-                    `Delete Org "${row.original.name}"? Rejected if any Projects still belong to it.`,
-                  )
-                ) {
-                  deleteOrg.mutate(row.original.slug)
-                }
-              }}
+              onClick={() => setOrgToDelete(row.original)}
             >
               <Trash2 className="mr-2 h-4 w-4" />
               Delete
@@ -237,6 +248,44 @@ export function OrgsPage() {
           searchPlaceholder="Filter Orgs..."
         />
       )}
+
+      <Dialog
+        open={orgToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) closeDeleteDialog()
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Organization</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete{' '}
+              <span className="font-medium text-foreground">
+                {orgToDelete?.name}
+              </span>
+              ? Will be rejected if any Projects still belong to it.
+            </DialogDescription>
+          </DialogHeader>
+          {deleteOrg.error && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {String(deleteOrg.error)}
+            </div>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={closeDeleteDialog}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={deleteOrg.isPending}
+              onClick={handleConfirmDelete}
+            >
+              {deleteOrg.isPending ? 'Deleting…' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
