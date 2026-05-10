@@ -15,8 +15,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::command::VolumePhase;
 use crate::command::{
-    Command, NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus, ProjectData, Response,
-    SecurityGroupData, SecurityGroupRuleData, SnapshotData, TemplateData, TemplatePhase,
+    Command, NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus, OrgData, ProjectData,
+    Response, SecurityGroupData, SecurityGroupRuleData, SnapshotData, TemplateData, TemplatePhase,
     TemplateSpec, TemplateStatus, VmData, VmPhase, VmStatus, VolumeData, VolumeSpec, VolumeStatus,
 };
 use crate::store::Event;
@@ -29,6 +29,7 @@ const NODES: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
 const NETWORKS: TableDefinition<&str, &[u8]> = TableDefinition::new("networks");
 const NICS: TableDefinition<&str, &[u8]> = TableDefinition::new("nics");
 const VMS: TableDefinition<&str, &[u8]> = TableDefinition::new("vms");
+const ORGS: TableDefinition<&str, &[u8]> = TableDefinition::new("orgs");
 const PROJECTS: TableDefinition<&str, &[u8]> = TableDefinition::new("projects");
 const VOLUMES: TableDefinition<&str, &[u8]> = TableDefinition::new("volumes");
 const TEMPLATES: TableDefinition<&str, &[u8]> = TableDefinition::new("templates");
@@ -39,6 +40,7 @@ const ALL_TABLES: &[TableDefinition<&str, &[u8]>] = &[
     NETWORKS,
     NICS,
     VMS,
+    ORGS,
     PROJECTS,
     VOLUMES,
     TEMPLATES,
@@ -373,6 +375,32 @@ impl ApiState {
     }
 
     // =========================================================================
+    // Org queries
+    // =========================================================================
+
+    pub fn get_org(&self, id: &str) -> Option<OrgData> {
+        read_get(&self.read_txn(), ORGS, id)
+    }
+
+    pub fn get_org_by_slug(&self, slug: &str) -> Option<OrgData> {
+        read_list::<OrgData>(&self.read_txn(), ORGS)
+            .into_iter()
+            .find(|o| o.slug == slug)
+    }
+
+    pub fn list_orgs(&self) -> Vec<OrgData> {
+        read_list(&self.read_txn(), ORGS)
+    }
+
+    pub fn org_count(&self) -> usize {
+        read_count(&self.read_txn(), ORGS)
+    }
+
+    pub fn org_ids(&self) -> Vec<String> {
+        read_keys(&self.read_txn(), ORGS)
+    }
+
+    // =========================================================================
     // Project queries
     // =========================================================================
 
@@ -380,14 +408,21 @@ impl ApiState {
         read_get(&self.read_txn(), PROJECTS, id)
     }
 
-    pub fn get_project_by_name(&self, name: &str) -> Option<ProjectData> {
+    pub fn get_project_by_slug(&self, slug: &str) -> Option<ProjectData> {
         read_list::<ProjectData>(&self.read_txn(), PROJECTS)
             .into_iter()
-            .find(|p| p.name == name)
+            .find(|p| p.slug == slug)
     }
 
     pub fn list_projects(&self) -> Vec<ProjectData> {
         read_list(&self.read_txn(), PROJECTS)
+    }
+
+    pub fn list_projects_by_org(&self, org_id: &str) -> Vec<ProjectData> {
+        read_list::<ProjectData>(&self.read_txn(), PROJECTS)
+            .into_iter()
+            .filter(|p| p.org_id == org_id)
+            .collect()
     }
 
     // =========================================================================
@@ -624,12 +659,15 @@ impl StateMachine<Command, Response> for ApiState {
                 let txn = self.db.begin_write().expect("begin");
                 if txn_list::<NetworkData>(&txn, NETWORKS)
                     .iter()
-                    .any(|n| n.name == name)
+                    .any(|n| n.project_id == project_id && n.name == name)
                 {
                     return (
                         Response::Error {
                             code: 409,
-                            message: format!("Network with name '{}' already exists", name),
+                            message: format!(
+                                "Network with name '{}' already exists in project",
+                                name
+                            ),
                         },
                         vec![],
                     );
@@ -1011,12 +1049,15 @@ impl StateMachine<Command, Response> for ApiState {
                 let txn = self.db.begin_write().expect("begin");
                 if txn_list::<VmData>(&txn, VMS)
                     .iter()
-                    .any(|v| v.spec.name == spec.name)
+                    .any(|v| v.spec.project_id == spec.project_id && v.spec.name == spec.name)
                 {
                     return (
                         Response::Error {
                             code: 409,
-                            message: format!("VM with name '{}' already exists", spec.name),
+                            message: format!(
+                                "VM with name '{}' already exists in project",
+                                spec.name
+                            ),
                         },
                         vec![],
                     );
@@ -1134,38 +1175,165 @@ impl StateMachine<Command, Response> for ApiState {
             }
 
             // =================================================================
-            // Project Commands
+            // Org Commands
             // =================================================================
-            Command::CreateProject {
+            Command::CreateOrg {
                 id,
                 timestamp,
+                slug,
                 name,
-                description,
+                default_static_key_ttl_days,
+                disallow_static_keys,
                 ..
             } => {
                 let txn = self.db.begin_write().expect("begin");
-                if txn_list::<ProjectData>(&txn, PROJECTS)
+
+                if let Some(existing) = txn_get::<OrgData>(&txn, ORGS, &id) {
+                    return (Response::Org(existing), vec![]);
+                }
+
+                if txn_list::<OrgData>(&txn, ORGS)
                     .iter()
-                    .any(|p| p.name == name)
+                    .any(|o| o.slug == slug)
                 {
                     return (
                         Response::Error {
                             code: 409,
-                            message: format!("Project with name '{}' already exists", name),
+                            message: format!("Org with slug '{}' already exists", slug),
                         },
                         vec![],
                     );
                 }
 
+                let org = OrgData {
+                    id: id.clone(),
+                    slug,
+                    name,
+                    default_static_key_ttl_days,
+                    disallow_static_keys,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                };
+
+                txn_put(&txn, ORGS, &id, &org);
+                txn.commit().expect("commit");
+                (Response::Org(org), vec![])
+            }
+
+            Command::UpdateOrg {
+                id,
+                timestamp,
+                name,
+                default_static_key_ttl_days,
+                disallow_static_keys,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut org) = txn_get::<OrgData>(&txn, ORGS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Org '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                if let Some(n) = name {
+                    org.name = n;
+                }
+                if let Some(t) = default_static_key_ttl_days {
+                    org.default_static_key_ttl_days = t;
+                }
+                if let Some(d) = disallow_static_keys {
+                    org.disallow_static_keys = d;
+                }
+                org.updated_at = timestamp;
+                txn_put(&txn, ORGS, &id, &org);
+                txn.commit().expect("commit");
+                (Response::Org(org), vec![])
+            }
+
+            Command::DeleteOrg { id, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                if !txn_has(&txn, ORGS, &id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Org '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                }
+                let project_count = txn_list::<ProjectData>(&txn, PROJECTS)
+                    .iter()
+                    .filter(|p| p.org_id == id)
+                    .count();
+                if project_count > 0 {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!(
+                                "Org '{}' has {} project(s); delete them first",
+                                id, project_count
+                            ),
+                        },
+                        vec![],
+                    );
+                }
+                txn_delete(&txn, ORGS, &id);
+                txn.commit().expect("commit");
+                (Response::Deleted { id }, vec![])
+            }
+
+            // =================================================================
+            // Project Commands
+            // =================================================================
+            Command::CreateProject {
+                id,
+                timestamp,
+                org_id,
+                slug,
+                name,
+                description,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+
                 if let Some(existing) = txn_get::<ProjectData>(&txn, PROJECTS, &id) {
                     return (Response::Project(existing), vec![]);
                 }
 
+                if !txn_has(&txn, ORGS, &org_id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Org '{}' not found", org_id),
+                        },
+                        vec![],
+                    );
+                }
+
+                if txn_list::<ProjectData>(&txn, PROJECTS)
+                    .iter()
+                    .any(|p| p.slug == slug)
+                {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Project with slug '{}' already exists", slug),
+                        },
+                        vec![],
+                    );
+                }
+
                 let project = ProjectData {
                     id: id.clone(),
+                    org_id,
+                    slug,
                     name,
                     description,
-                    created_at: timestamp,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
                 };
 
                 txn_put(&txn, PROJECTS, &id, &project);
@@ -1444,14 +1612,18 @@ impl StateMachine<Command, Response> for ApiState {
                 ..
             } => {
                 let txn = self.db.begin_write().expect("begin");
-                if txn_list::<TemplateData>(&txn, TEMPLATES)
-                    .iter()
-                    .any(|t| t.spec.name == name && t.status.phase == TemplatePhase::Ready)
-                {
+                if txn_list::<TemplateData>(&txn, TEMPLATES).iter().any(|t| {
+                    t.spec.project_id == project_id
+                        && t.spec.name == name
+                        && t.status.phase == TemplatePhase::Ready
+                }) {
                     return (
                         Response::Error {
                             code: 409,
-                            message: format!("Template with name '{}' already exists", name),
+                            message: format!(
+                                "Template with name '{}' already exists in project",
+                                name
+                            ),
                         },
                         vec![],
                     );
@@ -1713,6 +1885,7 @@ impl StateMachine<Command, Response> for ApiState {
             networks: read_list_with_keys(&txn, NETWORKS),
             nics: read_list_with_keys(&txn, NICS),
             vms: read_list_with_keys(&txn, VMS),
+            orgs: read_list_with_keys(&txn, ORGS),
             projects: read_list_with_keys(&txn, PROJECTS),
             volumes: read_list_with_keys(&txn, VOLUMES),
             templates: read_list_with_keys(&txn, TEMPLATES),
@@ -1742,6 +1915,9 @@ impl StateMachine<Command, Response> for ApiState {
         }
         for (k, v) in &envelope.vms {
             txn_put(&txn, VMS, k, v);
+        }
+        for (k, v) in &envelope.orgs {
+            txn_put(&txn, ORGS, k, v);
         }
         for (k, v) in &envelope.projects {
             txn_put(&txn, PROJECTS, k, v);
@@ -1774,6 +1950,7 @@ struct SnapshotEnvelope {
     networks: HashMap<String, NetworkData>,
     nics: HashMap<String, NicData>,
     vms: HashMap<String, VmData>,
+    orgs: HashMap<String, OrgData>,
     projects: HashMap<String, ProjectData>,
     volumes: HashMap<String, VolumeData>,
     templates: HashMap<String, TemplateData>,
@@ -1803,8 +1980,22 @@ mod tests {
     use super::*;
     use mraft::StateMachine;
 
-    /// Helper to get just the response from apply (ignoring events)
+    /// Helper to get just the response from apply (ignoring events).
+    ///
+    /// As a convenience for legacy tests, this auto-creates `TEST_ORG_ID` on
+    /// the first `CreateProject` against the shared org id — keeps tests that
+    /// predate the Org introduction working without per-test setup boilerplate.
+    /// Tests that exercise Org behavior directly (`test_create_project_org_not_found`,
+    /// `test_delete_org_with_projects_rejects`) bypass this by either not
+    /// referencing TEST_ORG_ID or by setting up Orgs explicitly.
     fn apply(state: &mut ApiState, cmd: Command) -> Response {
+        if let Command::CreateProject { org_id, .. } = &cmd
+            && org_id == TEST_ORG_ID
+            && state.get_org(TEST_ORG_ID).is_none()
+        {
+            let setup = create_org_cmd("test-org-setup", TEST_ORG_ID, TEST_ORG_SLUG);
+            state.apply(setup);
+        }
         let (response, _events) = state.apply(cmd);
         response
     }
@@ -2261,28 +2452,100 @@ mod tests {
     }
 
     // =========================================================================
-    // Project Tests
+    // Org / Project Tests
     // =========================================================================
 
+    /// Default Org id used by test helpers that don't care which Org a Project lives in.
+    const TEST_ORG_ID: &str = "org-test";
+    const TEST_ORG_SLUG: &str = "org-test";
+
+    fn create_org_cmd(request_id: &str, id: &str, slug: &str) -> Command {
+        Command::CreateOrg {
+            request_id: request_id.to_string(),
+            id: id.to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            slug: slug.to_string(),
+            name: format!("Org {}", slug),
+            default_static_key_ttl_days: 90,
+            disallow_static_keys: false,
+        }
+    }
+
+    /// Ensure the shared TEST_ORG_ID exists; idempotent.
+    fn ensure_test_org(state: &mut ApiState) {
+        if state.get_org(TEST_ORG_ID).is_none() {
+            apply(
+                state,
+                create_org_cmd("test-org-req", TEST_ORG_ID, TEST_ORG_SLUG),
+            );
+        }
+    }
+
+    /// Create a Project in TEST_ORG. `id` is also used as the slug for convenience —
+    /// existing tests pass project ids like "proj-1" which are already valid slugs.
     fn create_project_cmd(request_id: &str, id: &str, name: &str) -> Command {
         Command::CreateProject {
             request_id: request_id.to_string(),
             id: id.to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
+            org_id: TEST_ORG_ID.to_string(),
+            slug: id.to_string(),
             name: name.to_string(),
             description: Some("Test project".to_string()),
         }
     }
 
     #[test]
+    fn test_create_org() {
+        let mut state = ApiState::default();
+        let response = apply(&mut state, create_org_cmd("req-1", "org-1", "acme"));
+        match response {
+            Response::Org(data) => {
+                assert_eq!(data.id, "org-1");
+                assert_eq!(data.slug, "acme");
+                assert_eq!(data.default_static_key_ttl_days, 90);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+        assert_eq!(state.list_orgs().len(), 1);
+        assert!(state.get_org_by_slug("acme").is_some());
+    }
+
+    #[test]
+    fn test_create_org_duplicate_slug() {
+        let mut state = ApiState::default();
+        apply(&mut state, create_org_cmd("req-1", "org-1", "acme"));
+        let response = apply(&mut state, create_org_cmd("req-2", "org-2", "acme"));
+        assert!(matches!(response, Response::Error { code: 409, .. }));
+    }
+
+    #[test]
+    fn test_delete_org_with_projects_rejects() {
+        let mut state = ApiState::default();
+        ensure_test_org(&mut state);
+        apply(&mut state, create_project_cmd("req-1", "proj-1", "p"));
+        let response = apply(
+            &mut state,
+            Command::DeleteOrg {
+                request_id: "req-2".to_string(),
+                id: TEST_ORG_ID.to_string(),
+            },
+        );
+        assert!(matches!(response, Response::Error { code: 409, .. }));
+    }
+
+    #[test]
     fn test_create_project() {
         let mut state = ApiState::default();
+        ensure_test_org(&mut state);
         let cmd = create_project_cmd("req-1", "proj-1", "my-project");
         let response = apply(&mut state, cmd);
 
         match response {
             Response::Project(data) => {
                 assert_eq!(data.id, "proj-1");
+                assert_eq!(data.slug, "proj-1");
+                assert_eq!(data.org_id, TEST_ORG_ID);
                 assert_eq!(data.name, "my-project");
                 assert_eq!(data.description, Some("Test project".to_string()));
             }
@@ -2294,24 +2557,49 @@ mod tests {
     }
 
     #[test]
-    fn test_create_project_duplicate_name() {
+    fn test_create_project_org_not_found() {
         let mut state = ApiState::default();
+        let cmd = Command::CreateProject {
+            request_id: "req-1".to_string(),
+            id: "proj-1".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            org_id: "no-such-org".to_string(),
+            slug: "proj-1".to_string(),
+            name: "x".to_string(),
+            description: None,
+        };
+        let response = apply(&mut state, cmd);
+        assert!(matches!(response, Response::Error { code: 404, .. }));
+    }
+
+    #[test]
+    fn test_create_project_duplicate_slug() {
+        let mut state = ApiState::default();
+        ensure_test_org(&mut state);
 
         apply(
             &mut state,
             create_project_cmd("req-1", "proj-1", "dup-name"),
         );
 
-        let response = apply(
-            &mut state,
-            create_project_cmd("req-2", "proj-2", "dup-name"),
-        );
+        // Different id, same slug (id is also used as slug in the helper).
+        let cmd = Command::CreateProject {
+            request_id: "req-2".to_string(),
+            id: "proj-2".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            org_id: TEST_ORG_ID.to_string(),
+            slug: "proj-1".to_string(),
+            name: "second".to_string(),
+            description: None,
+        };
+        let response = apply(&mut state, cmd);
         assert!(matches!(response, Response::Error { code: 409, .. }));
     }
 
     #[test]
     fn test_delete_project() {
         let mut state = ApiState::default();
+        ensure_test_org(&mut state);
         apply(
             &mut state,
             create_project_cmd("req-1", "proj-1", "to-delete"),
@@ -2341,18 +2629,19 @@ mod tests {
     }
 
     #[test]
-    fn test_get_project_by_name() {
+    fn test_get_project_by_slug() {
         let mut state = ApiState::default();
+        ensure_test_org(&mut state);
         apply(
             &mut state,
             create_project_cmd("req-1", "proj-uuid", "findme"),
         );
 
-        let project = state.get_project_by_name("findme");
+        let project = state.get_project_by_slug("proj-uuid");
         assert!(project.is_some());
         assert_eq!(project.unwrap().id, "proj-uuid");
 
-        assert!(state.get_project_by_name("unknown").is_none());
+        assert!(state.get_project_by_slug("unknown").is_none());
     }
 
     // =========================================================================

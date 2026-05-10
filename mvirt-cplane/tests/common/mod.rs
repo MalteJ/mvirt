@@ -74,7 +74,7 @@ impl TestServer {
         });
 
         // Create router
-        let router = create_router(app_state);
+        let router = create_router(app_state, None);
 
         // Bind to REST port - use port 0 to let OS choose available port
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -99,13 +99,33 @@ impl TestServer {
 
         let client = Client::new();
 
-        Self {
+        let server = Self {
             addr: actual_addr,
             client,
             raft_node: node,
             shutdown_tx,
-        }
+        };
+
+        // Bootstrap a default Org for tests. Pre-launch state machine starts empty;
+        // every Project must live under an Org, so tests need one.
+        let org_resp = server
+            .post_json(
+                "/orgs",
+                &serde_json::json!({"slug": Self::DEFAULT_ORG_SLUG, "name": "Test Org"}),
+            )
+            .await;
+        assert_eq!(
+            org_resp.status(),
+            200,
+            "failed to bootstrap default test Org"
+        );
+
+        server
     }
+
+    /// Slug of the default Org auto-created by `spawn`. Tests POSTing Projects use
+    /// `/orgs/{DEFAULT_ORG_SLUG}/projects` and pass `{"slug": "...", "name": "..."}`.
+    pub const DEFAULT_ORG_SLUG: &'static str = "test";
 
     /// Get base URL for the REST API.
     pub fn base_url(&self) -> String {

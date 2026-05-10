@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::command::{
-    NetworkData, NicData, NodeData, NodeResources, NodeStatus, ProjectData, RuleDirection,
+    NetworkData, NicData, NodeData, NodeResources, NodeStatus, OrgData, ProjectData, RuleDirection,
     SecurityGroupData, TemplateData, TemplatePhase, VmData, VmDesiredState, VmSpec, VmStatus,
     VolumeData,
 };
@@ -114,11 +114,32 @@ pub struct UpdateVmStatusRequest {
 // Project Request DTOs
 // =============================================================================
 
+/// Request to create a new Org.
+#[derive(Debug, Clone)]
+pub struct CreateOrgRequest {
+    /// URL identifier (kebab-case, platform-wide unique, immutable).
+    pub slug: String,
+    /// Display name (mutable).
+    pub name: String,
+    pub default_static_key_ttl_days: Option<u32>,
+    pub disallow_static_keys: Option<bool>,
+}
+
+/// Request to update an Org. All fields optional; unset fields are unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateOrgRequest {
+    pub name: Option<String>,
+    pub default_static_key_ttl_days: Option<u32>,
+    pub disallow_static_keys: Option<bool>,
+}
+
 /// Request to create a new project.
 #[derive(Debug, Clone)]
 pub struct CreateProjectRequest {
-    /// User-provided project ID (must be unique, lowercase alphanumeric)
-    pub id: String,
+    /// Parent Org id (resolved by the handler from the URL path).
+    pub org_id: String,
+    /// URL identifier (kebab-case, platform-wide unique, immutable). The "namespace name".
+    pub slug: String,
     pub name: String,
     pub description: Option<String>,
 }
@@ -225,6 +246,11 @@ pub trait NodeStore: Send + Sync {
 
     /// Register a new node.
     async fn register_node(&self, req: RegisterNodeRequest) -> Result<NodeData>;
+
+    /// Idempotent register with a caller-supplied id. Used by the reverse-tunnel
+    /// handshake — the node sends its stable id in Identify and we upsert by it,
+    /// so reconnects don't fault on the name-uniqueness check.
+    async fn upsert_node(&self, id: &str, req: RegisterNodeRequest) -> Result<NodeData>;
 
     /// Update node status (heartbeat).
     async fn update_node_status(&self, id: &str, req: UpdateNodeStatusRequest) -> Result<NodeData>;
@@ -342,19 +368,44 @@ pub trait ControlplaneStore: Send + Sync {
     async fn remove_peer(&self, peer_id: u64) -> Result<()>;
 }
 
+/// Store trait for Org operations. See ADR-0004.
+#[async_trait]
+pub trait OrgStore: Send + Sync {
+    /// List all Orgs.
+    async fn list_orgs(&self) -> Result<Vec<OrgData>>;
+
+    /// Get an Org by id.
+    async fn get_org(&self, id: &str) -> Result<Option<OrgData>>;
+
+    /// Get an Org by slug.
+    async fn get_org_by_slug(&self, slug: &str) -> Result<Option<OrgData>>;
+
+    /// Create a new Org.
+    async fn create_org(&self, req: CreateOrgRequest) -> Result<OrgData>;
+
+    /// Update an Org's mutable fields.
+    async fn update_org(&self, id: &str, req: UpdateOrgRequest) -> Result<OrgData>;
+
+    /// Delete an Org. Rejects with Conflict if the Org still has Projects.
+    async fn delete_org(&self, id: &str) -> Result<()>;
+}
+
 /// Store trait for project operations.
 #[async_trait]
 pub trait ProjectStore: Send + Sync {
-    /// List all projects.
+    /// List all projects across all Orgs.
     async fn list_projects(&self) -> Result<Vec<ProjectData>>;
 
-    /// Get a project by ID.
+    /// List projects within a single Org.
+    async fn list_projects_by_org(&self, org_id: &str) -> Result<Vec<ProjectData>>;
+
+    /// Get a project by id (uuid).
     async fn get_project(&self, id: &str) -> Result<Option<ProjectData>>;
 
-    /// Get a project by name.
-    async fn get_project_by_name(&self, name: &str) -> Result<Option<ProjectData>>;
+    /// Get a project by slug (the platform-unique URL identifier / namespace name).
+    async fn get_project_by_slug(&self, slug: &str) -> Result<Option<ProjectData>>;
 
-    /// Create a new project.
+    /// Create a new project under the Org named in the request.
     async fn create_project(&self, req: CreateProjectRequest) -> Result<ProjectData>;
 
     /// Delete a project.
@@ -494,6 +545,7 @@ pub trait DataStore:
     + NetworkStore
     + NicStore
     + VmStore
+    + OrgStore
     + ProjectStore
     + VolumeStore
     + TemplateStore

@@ -20,8 +20,10 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 use tracing::{info, warn};
 
+use crate::command::{NodeResources as StoreNodeResources, NodeStatus};
 use crate::grpc::proto::node_agent_client::NodeAgentClient;
-use crate::grpc::proto::{IdentifyRequest, WatchEventsRequest};
+use crate::grpc::proto::{IdentifyRequest, IdentifyResponse, WatchEventsRequest};
+use crate::store::{DataStore, RegisterNodeRequest, UpdateNodeStatusRequest};
 
 /// Per-node connection state. All four clients share the same underlying
 /// HTTP/2 connection (the inverted tunnel socket).
@@ -68,7 +70,11 @@ impl NodeRegistry {
 /// Bind a TCP listener and accept reverse-tunnel connections from nodes.
 /// Each accepted socket spawns a task that performs the Identify handshake
 /// and registers the node.
-pub async fn listen(addr: SocketAddr, registry: Arc<NodeRegistry>) -> Result<()> {
+pub async fn listen(
+    addr: SocketAddr,
+    registry: Arc<NodeRegistry>,
+    store: Arc<dyn DataStore>,
+) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding tunnel listener on {addr}"))?;
@@ -77,8 +83,9 @@ pub async fn listen(addr: SocketAddr, registry: Arc<NodeRegistry>) -> Result<()>
     loop {
         let (sock, peer) = listener.accept().await?;
         let registry = registry.clone();
+        let store = store.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(sock, peer, registry).await {
+            if let Err(e) = handle_connection(sock, peer, registry, store).await {
                 warn!(%peer, error = %e, "tunnel connection terminated");
             }
         });
@@ -89,6 +96,7 @@ async fn handle_connection(
     sock: TcpStream,
     peer: SocketAddr,
     registry: Arc<NodeRegistry>,
+    store: Arc<dyn DataStore>,
 ) -> Result<()> {
     sock.set_nodelay(true).ok();
 
@@ -143,6 +151,38 @@ async fn handle_connection(
         "node connected via reverse tunnel"
     );
 
+    // Upsert into raft state so REST clients (UI/CLI) and the reconciler see the
+    // node. The Identify proto comment mandates this — without it /v1/nodes is
+    // empty even while the tunnel is healthy.
+    let resources = identify_resources(&identify);
+    if let Err(e) = store
+        .upsert_node(
+            &identify.node_id,
+            RegisterNodeRequest {
+                name: identify.name.clone(),
+                address: identify.address.clone(),
+                resources: resources.clone(),
+                labels: identify.labels.clone(),
+            },
+        )
+        .await
+    {
+        // Don't drop the connection — the registry insert below still lets
+        // reconcilers reach the node via the tunnel. Log and continue.
+        warn!(node_id = %identify.node_id, error = %e, "raft upsert_node failed; continuing with tunnel only");
+    } else if let Err(e) = store
+        .update_node_status(
+            &identify.node_id,
+            UpdateNodeStatusRequest {
+                status: NodeStatus::Online,
+                resources: Some(resources),
+            },
+        )
+        .await
+    {
+        warn!(node_id = %identify.node_id, error = %e, "raft update_node_status(Online) failed");
+    }
+
     let handle = Arc::new(NodeHandle {
         node_id: identify.node_id.clone(),
         name: identify.name,
@@ -189,5 +229,36 @@ async fn handle_connection(
         }
     }
     registry.remove(&node_id).await;
+
+    // Reflect the disconnect in raft state. A best-effort write — if the cplane
+    // is shutting down or has lost leadership we still want the registry-side
+    // cleanup above to succeed.
+    if let Err(e) = store
+        .update_node_status(
+            &node_id,
+            UpdateNodeStatusRequest {
+                status: NodeStatus::Offline,
+                resources: None,
+            },
+        )
+        .await
+    {
+        warn!(node_id = %node_id, error = %e, "raft update_node_status(Offline) failed");
+    }
     Ok(())
+}
+
+fn identify_resources(identify: &IdentifyResponse) -> StoreNodeResources {
+    identify
+        .resources
+        .as_ref()
+        .map(|r| StoreNodeResources {
+            cpu_cores: r.cpu_cores,
+            memory_mb: r.memory_mb,
+            storage_gb: r.storage_gb,
+            available_cpu_cores: r.available_cpu_cores,
+            available_memory_mb: r.available_memory_mb,
+            available_storage_gb: r.available_storage_gb,
+        })
+        .unwrap_or_default()
 }

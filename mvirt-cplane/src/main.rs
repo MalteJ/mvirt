@@ -9,6 +9,7 @@ use tokio::sync::{RwLock, broadcast};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+use mvirt_cplane::JwtValidator;
 use mvirt_cplane::audit::create_audit_logger;
 use mvirt_cplane::reconciler::Controller;
 use mvirt_cplane::rest::{AppState, create_router};
@@ -188,7 +189,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         log_endpoint: args.log_endpoint.clone(),
     });
 
-    let router = create_router(app_state.clone());
+    let jwt_validator = JwtValidator::from_env().await?;
+    let router = create_router(app_state.clone(), jwt_validator);
 
     // Reverse-tunnel listener: nodes dial in, we get a Channel per connection.
     let registry = Arc::new(NodeRegistry::new());
@@ -213,7 +215,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let tunnel_handle = {
         let registry = registry.clone();
-        tokio::spawn(async move { tunnel::listen(tunnel_addr, registry).await })
+        let tunnel_store: Arc<dyn DataStore> = store.clone();
+        tokio::spawn(async move { tunnel::listen(tunnel_addr, registry, tunnel_store).await })
     };
 
     let ctrl_c = signal::ctrl_c();

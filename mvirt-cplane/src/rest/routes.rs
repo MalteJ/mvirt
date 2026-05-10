@@ -1,5 +1,5 @@
 use axum::{
-    Router,
+    Router, middleware,
     routing::{delete, get, patch, post},
 };
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use super::handlers::{self, AppState};
 use super::ui_handlers;
 use super::ui_types;
+use crate::auth::{JwtValidator, require_auth};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -22,6 +23,7 @@ use super::ui_types;
         (name = "system", description = "System information"),
         (name = "controlplane", description = "Control plane management"),
         (name = "nodes", description = "Hypervisor node registration and status"),
+        (name = "orgs", description = "Organization management (tenancy container above Project)"),
         (name = "projects", description = "Project management"),
         (name = "networks", description = "Network CRUD operations"),
         (name = "nics", description = "NIC CRUD operations"),
@@ -43,6 +45,13 @@ use super::ui_types;
         handlers::list_hypervisor_nodes,
         handlers::update_hypervisor_node_status,
         handlers::deregister_hypervisor_node,
+        // Orgs
+        ui_handlers::list_orgs,
+        ui_handlers::get_org,
+        ui_handlers::create_org,
+        ui_handlers::update_org,
+        ui_handlers::delete_org,
+        ui_handlers::list_projects_in_org,
         // Projects
         ui_handlers::list_projects,
         ui_handlers::get_project,
@@ -114,6 +123,11 @@ use super::ui_types;
         handlers::UpdateNodeStatusRequest,
         handlers::DeregisterNodeResponse,
         handlers::ApiError,
+        // UI schemas - Orgs
+        ui_types::UiOrg,
+        ui_types::UiCreateOrgRequest,
+        ui_types::UiUpdateOrgRequest,
+        ui_types::OrgListResponse,
         // UI schemas - Projects
         ui_types::UiProject,
         ui_types::UiCreateProjectRequest,
@@ -170,7 +184,7 @@ use super::ui_types;
 )]
 pub struct ApiDoc;
 
-pub fn create_router(state: Arc<AppState>) -> Router {
+pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>) -> Router {
     // Internal API routes (for hypervisor nodes, cluster management)
     let internal_routes = Router::new()
         // System
@@ -198,9 +212,23 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     // Global UI routes (not project-scoped)
     let global_routes = Router::new()
-        // Projects
+        // Orgs (tenancy container)
+        .route("/orgs", get(ui_handlers::list_orgs))
+        .route("/orgs", post(ui_handlers::create_org))
+        .route("/orgs/{slug}", get(ui_handlers::get_org))
+        .route("/orgs/{slug}", patch(ui_handlers::update_org))
+        .route("/orgs/{slug}", delete(ui_handlers::delete_org))
+        // Projects within an Org (Org-scoped list + create)
+        .route(
+            "/orgs/{org_slug}/projects",
+            get(ui_handlers::list_projects_in_org),
+        )
+        .route(
+            "/orgs/{org_slug}/projects",
+            post(ui_handlers::create_project),
+        )
+        // Projects (flat: cross-org list, individual ops by slug-or-id)
         .route("/projects", get(ui_handlers::list_projects))
-        .route("/projects", post(ui_handlers::create_project))
         .route("/projects/{id}", get(ui_handlers::get_project))
         .route("/projects/{id}", delete(ui_handlers::delete_project))
         // Global storage
@@ -289,6 +317,17 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Security Groups
         .route("/security-groups", get(ui_handlers::list_security_groups))
         .route("/security-groups", post(ui_handlers::create_security_group));
+
+    // User-facing routes get JWT auth applied when a validator is configured.
+    // Internal routes are reached via the cplane-to-cplane network, not the
+    // public REST endpoint, and stay unauthenticated for now.
+    let (global_routes, project_routes) = match validator {
+        Some(v) => (
+            global_routes.layer(middleware::from_fn_with_state(v.clone(), require_auth)),
+            project_routes.layer(middleware::from_fn_with_state(v, require_auth)),
+        ),
+        None => (global_routes, project_routes),
+    };
 
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))

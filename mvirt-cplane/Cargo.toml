@@ -56,11 +56,14 @@ bincode = "1"
 redb = "2"
 parking_lot = "0.12"
 
+# OIDC: JWT validation against Zitadel's JWKS
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 [build-dependencies]
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-test = "0.4"
 portpicker = "0.1"

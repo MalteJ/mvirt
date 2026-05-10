@@ -110,6 +110,40 @@ Public surface, port 8080. Accepts user intent, returns JSON. Implemented in `re
 - Reads go directly against `ApiState` (any cplane peer can serve reads, leader or not).
 - The REST schema (`rest/ui_types.rs`) is a thin DTO layer over the state-machine types — keeps internal evolution decoupled from the wire format.
 
+**URL shape.** The API serves under `/v1` with no `/api` segment (the API gets its own domain). Routes split into two regimes:
+
+```
+# Org-scoped (Org appears in the URL — Org-management + project list/create)
+GET    /v1/orgs                              # list (filtered by membership)
+POST   /v1/orgs                              # create
+GET    /v1/orgs/:slug                        # get
+PATCH  /v1/orgs/:slug                        # update
+DELETE /v1/orgs/:slug                        # delete (rejects if Projects exist)
+
+GET    /v1/orgs/:slug/projects               # list Projects within this Org
+POST   /v1/orgs/:slug/projects               # create a Project under this Org
+
+# Flat (Project slug is platform-unique, no Org segment)
+GET    /v1/projects                          # list every Project the caller may see (across Orgs)
+GET    /v1/projects/:slug                    # get
+PATCH  /v1/projects/:slug                    # update
+DELETE /v1/projects/:slug                    # delete
+
+GET    /v1/projects/:slug/vms                # nested resource list (likewise networks, volumes, templates, security-groups, …)
+POST   /v1/projects/:slug/vms                # create
+GET    /v1/projects/:slug/vms/:id            # get
+PATCH  /v1/projects/:slug/vms/:id            # update
+DELETE /v1/projects/:slug/vms/:id            # delete
+```
+
+The Org-vs-flat split follows the K8s-namespace mental model from ADR-0004 (Project = namespace, slug platform-unique). Org appears in URLs only where the route is genuinely Org-scoped: managing the Org itself, or listing/creating its Projects. Once a Project is identified, the URL drops back to flat — the Project slug alone resolves the resource.
+
+`POST /v1/orgs/:slug/projects` is the only Project-create route; the parent Org is taken from the URL, not from a body field. `GET /v1/projects` (cross-Org) and `GET /v1/orgs/:slug/projects` (Org-scoped) are both useful — the first powers the global Projects view, the second the Org-detail page. Both filter through the Authorizer.
+
+UI routes mirror this split: Org-management pages at `/orgs/...`, Project-and-below at `/projects/:slug/...`. UI breadcrumbs reconstruct the parent Org from the Project's `org_id` so the user keeps the context even when it's not in the URL.
+
+Authorization rules per route (which roles may call which endpoint) live in ADR-0004.
+
 ### Subsystem 3: Reverse-tunnel acceptor + NodeRegistry
 
 Per-node connection management. Detailed in ADR-0003.

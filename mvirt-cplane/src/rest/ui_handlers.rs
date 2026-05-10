@@ -18,14 +18,169 @@ use super::ui_types::*;
 use crate::command::{VmDesiredState, VmPhase, VmSpec, VmStatus};
 use crate::store::{
     CreateNetworkRequest as StoreCreateNetworkRequest, CreateNicRequest as StoreCreateNicRequest,
-    CreateProjectRequest as StoreCreateProjectRequest,
+    CreateOrgRequest as StoreCreateOrgRequest, CreateProjectRequest as StoreCreateProjectRequest,
     CreateSnapshotRequest as StoreCreateSnapshotRequest,
     CreateTemplateRequest as StoreCreateTemplateRequest, CreateVmRequest as StoreCreateVmRequest,
     CreateVolumeRequest as StoreCreateVolumeRequest,
-    ResizeVolumeRequest as StoreResizeVolumeRequest,
+    ResizeVolumeRequest as StoreResizeVolumeRequest, UpdateOrgRequest as StoreUpdateOrgRequest,
     UpdateVmSpecRequest as StoreUpdateVmSpecRequest,
     UpdateVmStatusRequest as StoreUpdateVmStatusRequest,
 };
+
+// =============================================================================
+// Org Handlers
+// =============================================================================
+
+/// List all Orgs
+#[utoipa::path(
+    get,
+    path = "/v1/orgs",
+    responses((status = 200, body = OrgListResponse)),
+    tag = "orgs"
+)]
+pub async fn list_orgs(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<OrgListResponse>, ApiError> {
+    let orgs = state.store.list_orgs().await?;
+    Ok(Json(OrgListResponse {
+        orgs: orgs.into_iter().map(UiOrg::from).collect(),
+    }))
+}
+
+/// Get an Org by slug
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{slug}",
+    params(("slug" = String, Path)),
+    responses((status = 200, body = UiOrg), (status = 404, body = ApiError)),
+    tag = "orgs"
+)]
+pub async fn get_org(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<Json<UiOrg>, ApiError> {
+    state
+        .store
+        .get_org_by_slug(&slug)
+        .await?
+        .map(|o| Json(UiOrg::from(o)))
+        .ok_or_else(|| ApiError {
+            error: format!("Org '{}' not found", slug),
+            code: 404,
+        })
+}
+
+/// Create a new Org
+#[utoipa::path(
+    post,
+    path = "/v1/orgs",
+    request_body = UiCreateOrgRequest,
+    responses(
+        (status = 200, body = UiOrg),
+        (status = 400, body = ApiError),
+        (status = 409, body = ApiError)
+    ),
+    tag = "orgs"
+)]
+pub async fn create_org(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UiCreateOrgRequest>,
+) -> Result<Json<UiOrg>, ApiError> {
+    validate_slug(&req.slug, "Org slug")?;
+    let store_req = StoreCreateOrgRequest {
+        slug: req.slug,
+        name: req.name,
+        default_static_key_ttl_days: req.default_static_key_ttl_days,
+        disallow_static_keys: req.disallow_static_keys,
+    };
+    let data = state.store.create_org(store_req).await?;
+    Ok(Json(UiOrg::from(data)))
+}
+
+/// Update an Org
+#[utoipa::path(
+    patch,
+    path = "/v1/orgs/{slug}",
+    params(("slug" = String, Path)),
+    request_body = UiUpdateOrgRequest,
+    responses((status = 200, body = UiOrg), (status = 404, body = ApiError)),
+    tag = "orgs"
+)]
+pub async fn update_org(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    Json(req): Json<UiUpdateOrgRequest>,
+) -> Result<Json<UiOrg>, ApiError> {
+    let org = state
+        .store
+        .get_org_by_slug(&slug)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("Org '{}' not found", slug),
+            code: 404,
+        })?;
+    let store_req = StoreUpdateOrgRequest {
+        name: req.name,
+        default_static_key_ttl_days: req.default_static_key_ttl_days,
+        disallow_static_keys: req.disallow_static_keys,
+    };
+    let data = state.store.update_org(&org.id, store_req).await?;
+    Ok(Json(UiOrg::from(data)))
+}
+
+/// Delete an Org. Rejects with 409 if the Org still has Projects.
+#[utoipa::path(
+    delete,
+    path = "/v1/orgs/{slug}",
+    params(("slug" = String, Path)),
+    responses(
+        (status = 204),
+        (status = 404, body = ApiError),
+        (status = 409, body = ApiError)
+    ),
+    tag = "orgs"
+)]
+pub async fn delete_org(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let org = state
+        .store
+        .get_org_by_slug(&slug)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("Org '{}' not found", slug),
+            code: 404,
+        })?;
+    state.store.delete_org(&org.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// List Projects within an Org
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{org_slug}/projects",
+    params(("org_slug" = String, Path)),
+    responses((status = 200, body = ProjectListResponse), (status = 404, body = ApiError)),
+    tag = "projects"
+)]
+pub async fn list_projects_in_org(
+    State(state): State<Arc<AppState>>,
+    Path(org_slug): Path<String>,
+) -> Result<Json<ProjectListResponse>, ApiError> {
+    let org = state
+        .store
+        .get_org_by_slug(&org_slug)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("Org '{}' not found", org_slug),
+            code: 404,
+        })?;
+    let projects = state.store.list_projects_by_org(&org.id).await?;
+    Ok(Json(ProjectListResponse {
+        projects: projects.into_iter().map(UiProject::from).collect(),
+    }))
+}
 
 // =============================================================================
 // Project Handlers (global, not project-scoped)
@@ -52,7 +207,7 @@ pub async fn get_project(
         .store
         .get_project(&id)
         .await?
-        .or(state.store.get_project_by_name(&id).await?);
+        .or(state.store.get_project_by_slug(&id).await?);
 
     match project {
         Some(data) => Ok(Json(UiProject::from(data))),
@@ -63,40 +218,39 @@ pub async fn get_project(
     }
 }
 
-/// Create a new project
-#[utoipa::path(post, path = "/v1/projects", request_body = UiCreateProjectRequest, responses((status = 200, body = UiProject), (status = 400, body = ApiError), (status = 409, body = ApiError)), tag = "projects")]
+/// Create a new project under the named Org.
+#[utoipa::path(
+    post,
+    path = "/v1/orgs/{org_slug}/projects",
+    params(("org_slug" = String, Path)),
+    request_body = UiCreateProjectRequest,
+    responses(
+        (status = 200, body = UiProject),
+        (status = 400, body = ApiError),
+        (status = 404, body = ApiError),
+        (status = 409, body = ApiError)
+    ),
+    tag = "projects"
+)]
 pub async fn create_project(
     State(state): State<Arc<AppState>>,
+    Path(org_slug): Path<String>,
     Json(req): Json<UiCreateProjectRequest>,
 ) -> Result<Json<UiProject>, ApiError> {
-    // Validate project ID format: must be lowercase alphanumeric
-    if req.id.is_empty() {
-        return Err(ApiError {
-            error: "Project ID cannot be empty".to_string(),
-            code: 400,
-        });
-    }
-    if !req
-        .id
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-    {
-        return Err(ApiError {
-            error: "Project ID must contain only lowercase letters and numbers".to_string(),
-            code: 400,
-        });
-    }
+    validate_slug(&req.slug, "Project slug")?;
 
-    // Check if project ID already exists
-    if state.store.get_project(&req.id).await?.is_some() {
-        return Err(ApiError {
-            error: format!("Project ID '{}' already exists", req.id),
-            code: 409,
-        });
-    }
+    let org = state
+        .store
+        .get_org_by_slug(&org_slug)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("Org '{}' not found", org_slug),
+            code: 404,
+        })?;
 
     let store_req = StoreCreateProjectRequest {
-        id: req.id,
+        org_id: org.id,
+        slug: req.slug,
         name: req.name,
         description: req.description,
     };
@@ -104,6 +258,36 @@ pub async fn create_project(
     let data = state.store.create_project(store_req).await?;
     state.audit.project_created(&data.id, &data.name);
     Ok(Json(UiProject::from(data)))
+}
+
+fn validate_slug(slug: &str, field: &str) -> Result<(), ApiError> {
+    if slug.is_empty() {
+        return Err(ApiError {
+            error: format!("{} cannot be empty", field),
+            code: 400,
+        });
+    }
+    if slug.len() > 63 {
+        return Err(ApiError {
+            error: format!("{} must be 63 characters or fewer", field),
+            code: 400,
+        });
+    }
+    let valid = slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !slug.starts_with('-')
+        && !slug.ends_with('-');
+    if !valid {
+        return Err(ApiError {
+            error: format!(
+                "{} must be kebab-case (lowercase letters, digits, hyphens; no leading/trailing hyphen)",
+                field
+            ),
+            code: 400,
+        });
+    }
+    Ok(())
 }
 
 /// Delete a project

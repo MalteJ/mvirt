@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::command::{
-    NetworkData, NicData, ProjectData, SnapshotData, TemplateData, TemplatePhase, VmData,
+    NetworkData, NicData, OrgData, ProjectData, SnapshotData, TemplateData, TemplatePhase, VmData,
     VmDesiredState, VmPhase, VolumeData, VolumePhase,
 };
 
@@ -272,34 +272,104 @@ pub struct NicListResponse {
 // Project Types
 // =============================================================================
 
+// =============================================================================
+// Org Types
+// =============================================================================
+
+/// UI-compatible Org representation
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiOrg {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub default_static_key_ttl_days: u32,
+    pub disallow_static_keys: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<OrgData> for UiOrg {
+    fn from(data: OrgData) -> Self {
+        Self {
+            id: data.id,
+            slug: data.slug,
+            name: data.name,
+            default_static_key_ttl_days: data.default_static_key_ttl_days,
+            disallow_static_keys: data.disallow_static_keys,
+            created_at: data.created_at,
+            updated_at: data.updated_at,
+        }
+    }
+}
+
+/// Request to create an Org (UI-compatible)
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreateOrgRequest {
+    /// URL identifier — kebab-case, platform-wide unique, immutable.
+    pub slug: String,
+    pub name: String,
+    #[serde(default)]
+    pub default_static_key_ttl_days: Option<u32>,
+    #[serde(default)]
+    pub disallow_static_keys: Option<bool>,
+}
+
+/// Request to update an Org. All fields optional; unset = unchanged.
+#[derive(Debug, Clone, Deserialize, Default, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiUpdateOrgRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub default_static_key_ttl_days: Option<u32>,
+    #[serde(default)]
+    pub disallow_static_keys: Option<bool>,
+}
+
+/// Response wrapper for Org list
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgListResponse {
+    pub orgs: Vec<UiOrg>,
+}
+
 /// UI-compatible project representation
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiProject {
     pub id: String,
+    pub org_id: String,
+    pub slug: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub created_at: String,
+    pub updated_at: String,
 }
 
 impl From<ProjectData> for UiProject {
     fn from(data: ProjectData) -> Self {
         Self {
             id: data.id,
+            org_id: data.org_id,
+            slug: data.slug,
             name: data.name,
             description: data.description,
             created_at: data.created_at,
+            updated_at: data.updated_at,
         }
     }
 }
 
-/// Request to create a project (UI-compatible)
+/// Request to create a project (UI-compatible). The Org comes from the URL path
+/// (`POST /v1/orgs/:org-slug/projects`); the body carries the project slug + display fields.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateProjectRequest {
-    /// User-provided project ID (must be unique, lowercase alphanumeric)
-    pub id: String,
+    /// URL identifier — kebab-case, platform-wide unique, immutable.
+    pub slug: String,
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,

@@ -101,7 +101,7 @@ impl TestCluster {
             log_endpoint: String::new(),
         });
 
-        let router = create_router(app_state);
+        let router = create_router(app_state, None);
         let rest_addr = format!("127.0.0.1:{}", rest_port);
         let listener = TcpListener::bind(&rest_addr).await.unwrap();
         let actual_rest_addr = listener.local_addr().unwrap().to_string();
@@ -169,7 +169,7 @@ impl TestCluster {
             log_endpoint: String::new(),
         });
 
-        let router = create_router(app_state);
+        let router = create_router(app_state, None);
         let rest_addr = format!("127.0.0.1:{}", rest_port);
         let listener = TcpListener::bind(&rest_addr).await.unwrap();
         let actual_rest_addr = listener.local_addr().unwrap().to_string();

@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod auth;
 pub mod command;
 pub mod grpc;
 pub mod reconciler;
@@ -9,6 +10,7 @@ pub mod store;
 pub mod tunnel;
 
 pub use audit::{ApiAuditLogger, create_audit_logger};
+pub use auth::{AuthClaims, AuthenticatedUser, JwtValidator};
 pub use command::{Command, Response};
 pub use mraft::NodeId;
 pub use state::ApiState;

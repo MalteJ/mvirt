@@ -134,11 +134,36 @@ pub enum Command {
         id: String,
     },
 
+    // Org operations
+    CreateOrg {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        slug: String,
+        name: String,
+        default_static_key_ttl_days: u32,
+        disallow_static_keys: bool,
+    },
+    UpdateOrg {
+        request_id: String,
+        id: String,
+        timestamp: String,
+        name: Option<String>,
+        default_static_key_ttl_days: Option<u32>,
+        disallow_static_keys: Option<bool>,
+    },
+    DeleteOrg {
+        request_id: String,
+        id: String,
+    },
+
     // Project operations
     CreateProject {
         request_id: String,
         id: String,
         timestamp: String,
+        org_id: String,
+        slug: String,
         name: String,
         description: Option<String>,
     },
@@ -258,6 +283,9 @@ impl Command {
             Command::UpdateVmSpec { request_id, .. } => request_id,
             Command::UpdateVmStatus { request_id, .. } => request_id,
             Command::DeleteVm { request_id, .. } => request_id,
+            Command::CreateOrg { request_id, .. } => request_id,
+            Command::UpdateOrg { request_id, .. } => request_id,
+            Command::DeleteOrg { request_id, .. } => request_id,
             Command::CreateProject { request_id, .. } => request_id,
             Command::DeleteProject { request_id, .. } => request_id,
             Command::CreateVolume { request_id, .. } => request_id,
@@ -470,13 +498,35 @@ pub enum ResourcePhase {
 // Project Types
 // =============================================================================
 
+// =============================================================================
+// Organization Types
+// =============================================================================
+
+/// Organization data — the tenancy container above Project. See ADR-0004.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgData {
+    pub id: String,
+    /// URL identifier — kebab-case, platform-wide unique, immutable after creation.
+    pub slug: String,
+    pub name: String,
+    pub default_static_key_ttl_days: u32,
+    pub disallow_static_keys: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// Project data stored in the state machine
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectData {
     pub id: String,
+    /// Parent Org id (FK).
+    pub org_id: String,
+    /// URL identifier — kebab-case, platform-wide unique (the namespace name), immutable.
+    pub slug: String,
     pub name: String,
     pub description: Option<String>,
     pub created_at: String,
+    pub updated_at: String,
 }
 
 // =============================================================================
@@ -620,6 +670,7 @@ pub enum Response {
     Network(NetworkData),
     Nic(NicData),
     Vm(VmData),
+    Org(OrgData),
     Project(ProjectData),
     Volume(VolumeData),
     Template(TemplateData),

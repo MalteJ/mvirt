@@ -120,8 +120,8 @@ async fn test_create_network() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "createnetproj", "name": "create-net-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "createnetproj", "name": "create-net-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -157,8 +157,8 @@ async fn test_create_network_duplicate_name() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "dupnetproj", "name": "dup-net-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "dupnetproj", "name": "dup-net-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -198,8 +198,8 @@ async fn test_get_network_by_id() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "getnetidproj", "name": "get-net-id-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "getnetidproj", "name": "get-net-id-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -234,8 +234,8 @@ async fn test_get_network_by_name() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "getnetnameproj", "name": "get-net-name-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "getnetnameproj", "name": "get-net-name-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -280,8 +280,8 @@ async fn test_list_networks() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "listnetsproj", "name": "list-nets-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "listnetsproj", "name": "list-nets-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -328,8 +328,8 @@ async fn test_delete_network() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "delnetproj", "name": "del-net-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "delnetproj", "name": "del-net-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -367,8 +367,8 @@ async fn test_delete_network_with_nics() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "delnetnicsproj", "name": "del-net-nics-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "delnetnicsproj", "name": "del-net-nics-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -416,8 +416,8 @@ async fn test_create_nic() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "createnicproj", "name": "create-nic-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "createnicproj", "name": "create-nic-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -469,8 +469,8 @@ async fn test_create_nic_network_not_found() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "nicnetnotfoundproj", "name": "nic-net-notfound-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "nicnetnotfoundproj", "name": "nic-net-notfound-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -503,8 +503,8 @@ async fn test_get_nic_by_id() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "getnicidproj", "name": "get-nic-id-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "getnicidproj", "name": "get-nic-id-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -550,8 +550,8 @@ async fn test_get_nic_by_name() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "getnicnameproj", "name": "get-nic-name-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "getnicnameproj", "name": "get-nic-name-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -595,8 +595,8 @@ async fn test_list_nics() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "listnicsproj", "name": "list-nics-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "listnicsproj", "name": "list-nics-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -648,8 +648,8 @@ async fn test_list_nics_filter_by_network() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "filternicsproj", "name": "filter-nics-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "filternicsproj", "name": "filter-nics-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -736,8 +736,8 @@ async fn test_delete_nic() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "delnicproj", "name": "del-nic-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "delnicproj", "name": "del-nic-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -802,9 +802,9 @@ async fn test_create_project() {
 
     let response = server
         .post_json(
-            "/projects",
+            "/orgs/test/projects",
             &json!({
-                "id": "testproject",
+                "slug": "testproject",
                 "name": "test-project",
                 "description": "A test project"
             }),
@@ -813,7 +813,7 @@ async fn test_create_project() {
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["id"].as_str().unwrap(), "testproject");
+    assert_eq!(body["slug"].as_str().unwrap(), "testproject");
     assert_eq!(body["name"].as_str().unwrap(), "test-project");
     assert_eq!(body["description"].as_str().unwrap(), "A test project");
     assert!(body["createdAt"].is_string());
@@ -827,10 +827,16 @@ async fn test_list_projects() {
 
     // Create projects
     server
-        .post_json("/projects", &json!({"id": "project1", "name": "project-1"}))
+        .post_json(
+            "/orgs/test/projects",
+            &json!({"slug": "project1", "name": "project-1"}),
+        )
         .await;
     server
-        .post_json("/projects", &json!({"id": "project2", "name": "project-2"}))
+        .post_json(
+            "/orgs/test/projects",
+            &json!({"slug": "project2", "name": "project-2"}),
+        )
         .await;
 
     let response = server.get("/projects").await;
@@ -848,7 +854,10 @@ async fn test_get_project() {
     let server = common::TestServer::spawn().await;
 
     let create_resp = server
-        .post_json("/projects", &json!({"id": "gettest", "name": "get-test"}))
+        .post_json(
+            "/orgs/test/projects",
+            &json!({"slug": "gettest", "name": "get-test"}),
+        )
         .await;
     let created: Value = create_resp.json().await.unwrap();
     let project_id = created["id"].as_str().unwrap();
@@ -869,8 +878,8 @@ async fn test_delete_project() {
 
     let create_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "deletetest", "name": "delete-test"}),
+            "/orgs/test/projects",
+            &json!({"slug": "deletetest", "name": "delete-test"}),
         )
         .await;
     let created: Value = create_resp.json().await.unwrap();
@@ -897,8 +906,8 @@ async fn test_create_volume() {
     // Create project first
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "voltestproj", "name": "vol-test-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "voltestproj", "name": "vol-test-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -933,8 +942,8 @@ async fn test_list_volumes() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "listvolproj", "name": "list-vol-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "listvolproj", "name": "list-vol-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -980,8 +989,8 @@ async fn test_resize_volume() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "resizeproj", "name": "resize-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "resizeproj", "name": "resize-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -1020,7 +1029,10 @@ async fn test_create_snapshot() {
     let server = common::TestServer::spawn().await;
 
     let proj_resp = server
-        .post_json("/projects", &json!({"id": "snapproj", "name": "snap-proj"}))
+        .post_json(
+            "/orgs/test/projects",
+            &json!({"slug": "snapproj", "name": "snap-proj"}),
+        )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
     let project_id = proj["id"].as_str().unwrap();
@@ -1064,8 +1076,8 @@ async fn test_delete_volume() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "delvolproj", "name": "del-vol-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "delvolproj", "name": "del-vol-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -1105,8 +1117,8 @@ async fn test_list_templates() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "listtplproj", "name": "list-tpl-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "listtplproj", "name": "list-tpl-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -1130,8 +1142,8 @@ async fn test_import_template() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "importtplproj", "name": "import-tpl-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "importtplproj", "name": "import-tpl-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
@@ -1165,8 +1177,8 @@ async fn test_get_import_job() {
 
     let proj_resp = server
         .post_json(
-            "/projects",
-            &json!({"id": "importjobproj", "name": "import-job-proj"}),
+            "/orgs/test/projects",
+            &json!({"slug": "importjobproj", "name": "import-job-proj"}),
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();

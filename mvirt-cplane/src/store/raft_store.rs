@@ -8,8 +8,8 @@ use mraft::RaftNode;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::command::{
-    Command, NetworkData, NicData, NodeData, ProjectData, Response, TemplateData, VmData, VmPhase,
-    VmStatus, VolumeData,
+    Command, NetworkData, NicData, NodeData, OrgData, ProjectData, Response, TemplateData, VmData,
+    VmPhase, VmStatus, VolumeData,
 };
 use crate::scheduler::Scheduler;
 use crate::state::ApiState;
@@ -17,13 +17,13 @@ use crate::state::ApiState;
 use super::error::{Result, StoreError};
 use super::event::Event;
 use super::traits::{
-    ControlplaneInfo, ControlplaneStore, CreateNetworkRequest, CreateNicRequest,
+    ControlplaneInfo, ControlplaneStore, CreateNetworkRequest, CreateNicRequest, CreateOrgRequest,
     CreateProjectRequest, CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest,
     CreateSnapshotRequest, CreateTemplateRequest, CreateVmRequest, CreateVolumeRequest, DataStore,
-    DeleteNetworkResult, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore,
+    DeleteNetworkResult, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore, OrgStore,
     ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore, TemplateStore,
-    UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateTemplateStatusRequest,
-    UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore, VolumeStore,
+    UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateOrgRequest,
+    UpdateTemplateStatusRequest, UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore, VolumeStore,
 };
 
 /// RaftStore wraps a RaftNode and implements the DataStore trait.
@@ -103,9 +103,14 @@ impl NodeStore for RaftStore {
     }
 
     async fn register_node(&self, req: RegisterNodeRequest) -> Result<NodeData> {
+        self.upsert_node(&uuid::Uuid::new_v4().to_string(), req)
+            .await
+    }
+
+    async fn upsert_node(&self, id: &str, req: RegisterNodeRequest) -> Result<NodeData> {
         let cmd = Command::RegisterNode {
             request_id: uuid::Uuid::new_v4().to_string(),
-            id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             name: req.name,
             address: req.address,
@@ -547,11 +552,90 @@ impl ControlplaneStore for RaftStore {
 }
 
 #[async_trait]
+impl OrgStore for RaftStore {
+    async fn list_orgs(&self) -> Result<Vec<OrgData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_orgs())
+    }
+
+    async fn get_org(&self, id: &str) -> Result<Option<OrgData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_org(id))
+    }
+
+    async fn get_org_by_slug(&self, slug: &str) -> Result<Option<OrgData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_org_by_slug(slug))
+    }
+
+    async fn create_org(&self, req: CreateOrgRequest) -> Result<OrgData> {
+        let cmd = Command::CreateOrg {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            slug: req.slug,
+            name: req.name,
+            default_static_key_ttl_days: req.default_static_key_ttl_days.unwrap_or(90),
+            disallow_static_keys: req.disallow_static_keys.unwrap_or(false),
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Org(data) => Ok(data),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn update_org(&self, id: &str, req: UpdateOrgRequest) -> Result<OrgData> {
+        let cmd = Command::UpdateOrg {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            name: req.name,
+            default_static_key_ttl_days: req.default_static_key_ttl_days,
+            disallow_static_keys: req.disallow_static_keys,
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Org(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn delete_org(&self, id: &str) -> Result<()> {
+        let cmd = Command::DeleteOrg {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+        };
+
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+}
+
+#[async_trait]
 impl ProjectStore for RaftStore {
     async fn list_projects(&self) -> Result<Vec<ProjectData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
         Ok(state.list_projects())
+    }
+
+    async fn list_projects_by_org(&self, org_id: &str) -> Result<Vec<ProjectData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_projects_by_org(org_id))
     }
 
     async fn get_project(&self, id: &str) -> Result<Option<ProjectData>> {
@@ -560,23 +644,26 @@ impl ProjectStore for RaftStore {
         Ok(state.get_project(id))
     }
 
-    async fn get_project_by_name(&self, name: &str) -> Result<Option<ProjectData>> {
+    async fn get_project_by_slug(&self, slug: &str) -> Result<Option<ProjectData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_project_by_name(name))
+        Ok(state.get_project_by_slug(slug))
     }
 
     async fn create_project(&self, req: CreateProjectRequest) -> Result<ProjectData> {
         let cmd = Command::CreateProject {
             request_id: uuid::Uuid::new_v4().to_string(),
-            id: req.id,
+            id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
+            org_id: req.org_id,
+            slug: req.slug,
             name: req.name,
             description: req.description,
         };
 
         match self.write_command(cmd).await? {
             Response::Project(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
             Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
             Response::Error { message, .. } => Err(StoreError::Internal(message)),
             _ => Err(StoreError::Internal("unexpected response".into())),
