@@ -1,5 +1,5 @@
+/** Organization — the slug is the primary key. */
 export interface Org {
-  id: string
   slug: string
   name: string
   defaultStaticKeyTtlDays: number

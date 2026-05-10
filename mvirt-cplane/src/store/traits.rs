@@ -43,7 +43,7 @@ pub struct UpdateNodeStatusRequest {
 /// Request to create a new network.
 #[derive(Debug, Clone)]
 pub struct CreateNetworkRequest {
-    pub project_id: String,
+    pub project_slug: String,
     pub name: String,
     pub ipv4_enabled: bool,
     pub ipv4_prefix: Option<String>,
@@ -70,7 +70,7 @@ pub struct DeleteNetworkResult {
 /// Request to create a new NIC.
 #[derive(Debug, Clone)]
 pub struct CreateNicRequest {
-    pub project_id: String,
+    pub project_slug: String,
     pub network_id: String,
     pub name: Option<String>,
     pub mac_address: Option<String>,
@@ -137,7 +137,7 @@ pub struct UpdateOrgRequest {
 #[derive(Debug, Clone)]
 pub struct CreateProjectRequest {
     /// Parent Org id (resolved by the handler from the URL path).
-    pub org_id: String,
+    pub org_slug: String,
     /// URL identifier (kebab-case, platform-wide unique, immutable). The "namespace name".
     pub slug: String,
     pub name: String,
@@ -151,7 +151,7 @@ pub struct CreateProjectRequest {
 /// Request to create a new volume.
 #[derive(Debug, Clone)]
 pub struct CreateVolumeRequest {
-    pub project_id: String,
+    pub project_slug: String,
     pub node_id: String, // Caller picks node (Shared Nothing)
     pub name: String,
     pub size_bytes: u64,
@@ -177,7 +177,7 @@ pub struct CreateSnapshotRequest {
 /// Request to create a template (optionally with source_url for import).
 #[derive(Debug, Clone)]
 pub struct CreateTemplateRequest {
-    pub project_id: String,
+    pub project_slug: String,
     pub node_id: String,
     pub name: String,
     pub size_bytes: u64,
@@ -266,7 +266,7 @@ pub trait NetworkStore: Send + Sync {
     async fn list_networks(&self) -> Result<Vec<NetworkData>>;
 
     /// List networks by project.
-    async fn list_networks_by_project(&self, project_id: &str) -> Result<Vec<NetworkData>>;
+    async fn list_networks_by_project(&self, project_slug: &str) -> Result<Vec<NetworkData>>;
 
     /// Get a network by ID.
     async fn get_network(&self, id: &str) -> Result<Option<NetworkData>>;
@@ -291,7 +291,7 @@ pub trait NicStore: Send + Sync {
     async fn list_nics(&self, network_id: Option<&str>) -> Result<Vec<NicData>>;
 
     /// List NICs by project.
-    async fn list_nics_by_project(&self, project_id: &str) -> Result<Vec<NicData>>;
+    async fn list_nics_by_project(&self, project_slug: &str) -> Result<Vec<NicData>>;
 
     /// Get a NIC by ID.
     async fn get_nic(&self, id: &str) -> Result<Option<NicData>>;
@@ -322,7 +322,7 @@ pub trait VmStore: Send + Sync {
     async fn list_vms(&self) -> Result<Vec<VmData>>;
 
     /// List VMs by project.
-    async fn list_vms_by_project(&self, project_id: &str) -> Result<Vec<VmData>>;
+    async fn list_vms_by_project(&self, project_slug: &str) -> Result<Vec<VmData>>;
 
     /// List VMs on a specific node.
     async fn list_vms_by_node(&self, node_id: &str) -> Result<Vec<VmData>>;
@@ -368,48 +368,26 @@ pub trait ControlplaneStore: Send + Sync {
     async fn remove_peer(&self, peer_id: u64) -> Result<()>;
 }
 
-/// Store trait for Org operations. See ADR-0004.
+/// Store trait for Org operations. See ADR-0004. Org is keyed by slug.
 #[async_trait]
 pub trait OrgStore: Send + Sync {
-    /// List all Orgs.
     async fn list_orgs(&self) -> Result<Vec<OrgData>>;
-
-    /// Get an Org by id.
-    async fn get_org(&self, id: &str) -> Result<Option<OrgData>>;
-
-    /// Get an Org by slug.
-    async fn get_org_by_slug(&self, slug: &str) -> Result<Option<OrgData>>;
-
-    /// Create a new Org.
+    async fn get_org(&self, slug: &str) -> Result<Option<OrgData>>;
     async fn create_org(&self, req: CreateOrgRequest) -> Result<OrgData>;
-
-    /// Update an Org's mutable fields.
-    async fn update_org(&self, id: &str, req: UpdateOrgRequest) -> Result<OrgData>;
-
+    async fn update_org(&self, slug: &str, req: UpdateOrgRequest) -> Result<OrgData>;
     /// Delete an Org. Rejects with Conflict if the Org still has Projects.
-    async fn delete_org(&self, id: &str) -> Result<()>;
+    async fn delete_org(&self, slug: &str) -> Result<()>;
 }
 
-/// Store trait for project operations.
+/// Store trait for project operations. Project is keyed by slug (the K8s-style
+/// "namespace name").
 #[async_trait]
 pub trait ProjectStore: Send + Sync {
-    /// List all projects across all Orgs.
     async fn list_projects(&self) -> Result<Vec<ProjectData>>;
-
-    /// List projects within a single Org.
-    async fn list_projects_by_org(&self, org_id: &str) -> Result<Vec<ProjectData>>;
-
-    /// Get a project by id (uuid).
-    async fn get_project(&self, id: &str) -> Result<Option<ProjectData>>;
-
-    /// Get a project by slug (the platform-unique URL identifier / namespace name).
-    async fn get_project_by_slug(&self, slug: &str) -> Result<Option<ProjectData>>;
-
-    /// Create a new project under the Org named in the request.
+    async fn list_projects_by_org(&self, org_slug: &str) -> Result<Vec<ProjectData>>;
+    async fn get_project(&self, slug: &str) -> Result<Option<ProjectData>>;
     async fn create_project(&self, req: CreateProjectRequest) -> Result<ProjectData>;
-
-    /// Delete a project.
-    async fn delete_project(&self, id: &str) -> Result<()>;
+    async fn delete_project(&self, slug: &str) -> Result<()>;
 }
 
 /// Store trait for volume operations.
@@ -418,7 +396,7 @@ pub trait VolumeStore: Send + Sync {
     /// List all volumes, optionally filtered by project or node.
     async fn list_volumes(
         &self,
-        project_id: Option<&str>,
+        project_slug: Option<&str>,
         node_id: Option<&str>,
     ) -> Result<Vec<VolumeData>>;
 
@@ -449,7 +427,7 @@ pub trait TemplateStore: Send + Sync {
     async fn list_templates(&self, node_id: Option<&str>) -> Result<Vec<TemplateData>>;
 
     /// List templates by project.
-    async fn list_templates_by_project(&self, project_id: &str) -> Result<Vec<TemplateData>>;
+    async fn list_templates_by_project(&self, project_slug: &str) -> Result<Vec<TemplateData>>;
 
     /// Get a template by ID.
     async fn get_template(&self, id: &str) -> Result<Option<TemplateData>>;
@@ -472,7 +450,7 @@ pub trait TemplateStore: Send + Sync {
 /// Request to create a new security group.
 #[derive(Debug, Clone)]
 pub struct CreateSecurityGroupRequest {
-    pub project_id: String,
+    pub project_slug: String,
     pub name: String,
     pub description: Option<String>,
 }
@@ -494,7 +472,7 @@ pub trait SecurityGroupStore: Send + Sync {
     /// List all security groups, optionally filtered by project.
     async fn list_security_groups(
         &self,
-        project_id: Option<&str>,
+        project_slug: Option<&str>,
     ) -> Result<Vec<SecurityGroupData>>;
 
     /// Get a security group by ID.

@@ -37,7 +37,7 @@ pub enum Command {
         id: String,
         /// Timestamp when command was created (set before Raft replication)
         timestamp: String,
-        project_id: String,
+        project_slug: String,
         name: String,
         ipv4_enabled: bool,
         ipv4_prefix: Option<String>,
@@ -68,7 +68,7 @@ pub enum Command {
         id: String,
         /// Timestamp when command was created (set before Raft replication)
         timestamp: String,
-        project_id: String,
+        project_slug: String,
         network_id: String,
         name: Option<String>,
         mac_address: Option<String>,
@@ -134,10 +134,9 @@ pub enum Command {
         id: String,
     },
 
-    // Org operations
+    // Org operations — Org is identified by its slug (no separate UUID).
     CreateOrg {
         request_id: String,
-        id: String,
         timestamp: String,
         slug: String,
         name: String,
@@ -146,7 +145,7 @@ pub enum Command {
     },
     UpdateOrg {
         request_id: String,
-        id: String,
+        slug: String,
         timestamp: String,
         name: Option<String>,
         default_static_key_ttl_days: Option<u32>,
@@ -154,22 +153,21 @@ pub enum Command {
     },
     DeleteOrg {
         request_id: String,
-        id: String,
+        slug: String,
     },
 
-    // Project operations
+    // Project operations — Project is identified by its slug (no separate UUID).
     CreateProject {
         request_id: String,
-        id: String,
         timestamp: String,
-        org_id: String,
+        org_slug: String,
         slug: String,
         name: String,
         description: Option<String>,
     },
     DeleteProject {
         request_id: String,
-        id: String,
+        slug: String,
     },
 
     // Volume operations (node_id for data locality - Shared Nothing architecture)
@@ -177,7 +175,7 @@ pub enum Command {
         request_id: String,
         id: String,
         timestamp: String,
-        project_id: String,
+        project_slug: String,
         node_id: String,
         name: String,
         size_bytes: u64,
@@ -215,7 +213,7 @@ pub enum Command {
         request_id: String,
         id: String,
         timestamp: String,
-        project_id: String,
+        project_slug: String,
         node_id: String,
         name: String,
         size_bytes: u64,
@@ -237,7 +235,7 @@ pub enum Command {
         request_id: String,
         id: String,
         timestamp: String,
-        project_id: String,
+        project_slug: String,
         name: String,
         description: Option<String>,
     },
@@ -352,7 +350,7 @@ pub struct NodeResources {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkData {
     pub id: String,
-    pub project_id: String,
+    pub project_slug: String,
     pub name: String,
     pub ipv4_enabled: bool,
     pub ipv4_prefix: Option<String>,
@@ -379,7 +377,7 @@ pub struct NicData {
 /// NicSpec — desired state, written by REST.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NicSpec {
-    pub project_id: String,
+    pub project_slug: String,
     pub name: Option<String>,
     pub network_id: String,
     pub mac_address: String,
@@ -425,7 +423,7 @@ pub struct VmData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmSpec {
     pub name: String,
-    pub project_id: String,
+    pub project_slug: String,
     pub node_selector: Option<String>, // Optional: require specific node
     pub cpu_cores: u32,
     pub memory_mb: u64,
@@ -503,10 +501,9 @@ pub enum ResourcePhase {
 // =============================================================================
 
 /// Organization data — the tenancy container above Project. See ADR-0004.
+/// The slug is the primary key (kebab-case, platform-unique, immutable).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrgData {
-    pub id: String,
-    /// URL identifier — kebab-case, platform-wide unique, immutable after creation.
     pub slug: String,
     pub name: String,
     pub default_static_key_ttl_days: u32,
@@ -515,14 +512,13 @@ pub struct OrgData {
     pub updated_at: String,
 }
 
-/// Project data stored in the state machine
+/// Project data — the K8s-namespace-equivalent tenancy unit. See ADR-0004.
+/// The slug is the primary key (kebab-case, platform-unique, immutable);
+/// `org_slug` is the foreign key to the parent Org.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectData {
-    pub id: String,
-    /// Parent Org id (FK).
-    pub org_id: String,
-    /// URL identifier — kebab-case, platform-wide unique (the namespace name), immutable.
     pub slug: String,
+    pub org_slug: String,
     pub name: String,
     pub description: Option<String>,
     pub created_at: String,
@@ -546,7 +542,7 @@ pub struct VolumeData {
 /// VolumeSpec — desired state, written by REST via Create/Update*Spec commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeSpec {
-    pub project_id: String,
+    pub project_slug: String,
     pub node_id: String, // Node where the volume is stored (Shared Nothing)
     pub name: String,
     pub size_bytes: u64,
@@ -595,7 +591,7 @@ pub struct TemplateData {
 /// TemplateSpec — desired state, written by REST.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateSpec {
-    pub project_id: String,
+    pub project_slug: String,
     pub node_id: String, // Node where the template is stored
     pub name: String,
     pub source_url: Option<String>,
@@ -630,7 +626,7 @@ pub enum TemplatePhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityGroupData {
     pub id: String,
-    pub project_id: String,
+    pub project_slug: String,
     pub name: String,
     pub description: Option<String>,
     pub rules: Vec<SecurityGroupRuleData>,

@@ -125,7 +125,7 @@ async fn test_create_network() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     let response = server
         .post_json(
@@ -162,7 +162,7 @@ async fn test_create_network_duplicate_name() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create first network
     let response1 = server
@@ -203,7 +203,7 @@ async fn test_get_network_by_id() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create network
     let create_resp = server
@@ -239,7 +239,7 @@ async fn test_get_network_by_name() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create network
     server
@@ -285,7 +285,7 @@ async fn test_list_networks() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create a couple of networks
     server
@@ -333,7 +333,7 @@ async fn test_delete_network() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create network
     let create_resp = server
@@ -372,7 +372,7 @@ async fn test_delete_network_with_nics() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create network
     let create_net_resp = server
@@ -421,7 +421,7 @@ async fn test_create_nic() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create network first
     let net_resp = server
@@ -474,7 +474,7 @@ async fn test_create_nic_network_not_found() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     let response = server
         .post_json(
@@ -508,7 +508,7 @@ async fn test_get_nic_by_id() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Setup
     let net_resp = server
@@ -555,7 +555,7 @@ async fn test_get_nic_by_name() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Setup
     let net_resp = server
@@ -600,7 +600,7 @@ async fn test_list_nics() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create network and NICs
     let net_resp = server
@@ -653,7 +653,7 @@ async fn test_list_nics_filter_by_network() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create two networks
     let net1_resp = server
@@ -741,7 +741,7 @@ async fn test_delete_nic() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Setup
     let net_resp = server
@@ -860,13 +860,13 @@ async fn test_get_project() {
         )
         .await;
     let created: Value = create_resp.json().await.unwrap();
-    let project_id = created["id"].as_str().unwrap();
+    let project_id = created["slug"].as_str().unwrap();
 
     let response = server.get(&format!("/projects/{}", project_id)).await;
     assert_eq!(response.status(), 200);
 
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["id"].as_str().unwrap(), project_id);
+    assert_eq!(body["slug"].as_str().unwrap(), project_id);
     assert_eq!(body["name"].as_str().unwrap(), "get-test");
 
     server.shutdown().await;
@@ -883,7 +883,7 @@ async fn test_delete_project() {
         )
         .await;
     let created: Value = create_resp.json().await.unwrap();
-    let project_id = created["id"].as_str().unwrap();
+    let project_id = created["slug"].as_str().unwrap();
 
     let response = server.delete(&format!("/projects/{}", project_id)).await;
     assert_eq!(response.status(), 204);
@@ -911,7 +911,7 @@ async fn test_create_volume() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create volume
     let response = server
@@ -928,7 +928,7 @@ async fn test_create_volume() {
 
     let body: Value = response.json().await.unwrap();
     assert!(body["id"].is_string());
-    assert_eq!(body["projectId"].as_str().unwrap(), project_id);
+    assert_eq!(body["projectSlug"].as_str().unwrap(), project_id);
     assert_eq!(body["nodeId"].as_str().unwrap(), "node-1");
     assert_eq!(body["name"].as_str().unwrap(), "test-volume");
     assert_eq!(body["sizeBytes"].as_u64().unwrap(), 10737418240);
@@ -947,7 +947,7 @@ async fn test_list_volumes() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Create volumes
     server
@@ -994,7 +994,7 @@ async fn test_resize_volume() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     let vol_resp = server
         .post_json(
@@ -1035,7 +1035,7 @@ async fn test_create_snapshot() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     let vol_resp = server
         .post_json(
@@ -1081,7 +1081,7 @@ async fn test_delete_volume() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     let vol_resp = server
         .post_json(
@@ -1122,7 +1122,7 @@ async fn test_list_templates() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     // Templates are created via import jobs, so this just tests the list endpoint
     let response = server
@@ -1147,7 +1147,7 @@ async fn test_import_template() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     let response = server
         .post_json(
@@ -1182,7 +1182,7 @@ async fn test_get_import_job() {
         )
         .await;
     let proj: Value = proj_resp.json().await.unwrap();
-    let project_id = proj["id"].as_str().unwrap();
+    let project_id = proj["slug"].as_str().unwrap();
 
     let import_resp = server
         .post_json(

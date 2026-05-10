@@ -55,7 +55,7 @@ pub struct UiVmConfig {
 #[serde(rename_all = "camelCase")]
 pub struct UiVm {
     pub id: String,
-    pub project_id: String,
+    pub project_slug: String,
     pub name: String,
     pub state: UiVmState,
     pub config: UiVmConfig,
@@ -79,7 +79,7 @@ impl From<VmData> for UiVm {
 
         Self {
             id: data.id,
-            project_id: data.spec.project_id.clone(),
+            project_slug: data.spec.project_slug.clone(),
             name: data.spec.name.clone(),
             state,
             config: UiVmConfig {
@@ -134,7 +134,7 @@ pub struct VmListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct UiNetwork {
     pub id: String,
-    pub project_id: String,
+    pub project_slug: String,
     pub name: String,
     pub ipv4_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,7 +152,7 @@ impl From<NetworkData> for UiNetwork {
     fn from(data: NetworkData) -> Self {
         Self {
             id: data.id,
-            project_id: data.project_id,
+            project_slug: data.project_slug,
             name: data.name,
             ipv4_enabled: data.ipv4_enabled,
             ipv4_prefix: data.ipv4_prefix,
@@ -280,7 +280,6 @@ pub struct NicListResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiOrg {
-    pub id: String,
     pub slug: String,
     pub name: String,
     pub default_static_key_ttl_days: u32,
@@ -292,7 +291,6 @@ pub struct UiOrg {
 impl From<OrgData> for UiOrg {
     fn from(data: OrgData) -> Self {
         Self {
-            id: data.id,
             slug: data.slug,
             name: data.name,
             default_static_key_ttl_days: data.default_static_key_ttl_days,
@@ -339,9 +337,8 @@ pub struct OrgListResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiProject {
-    pub id: String,
-    pub org_id: String,
     pub slug: String,
+    pub org_slug: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -352,9 +349,8 @@ pub struct UiProject {
 impl From<ProjectData> for UiProject {
     fn from(data: ProjectData) -> Self {
         Self {
-            id: data.id,
-            org_id: data.org_id,
             slug: data.slug,
+            org_slug: data.org_slug,
             name: data.name,
             description: data.description,
             created_at: data.created_at,
@@ -412,7 +408,7 @@ impl From<&SnapshotData> for UiSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct UiVolume {
     pub id: String,
-    pub project_id: String,
+    pub project_slug: String,
     pub node_id: String,
     pub name: String,
     pub size_bytes: u64,
@@ -432,7 +428,7 @@ impl From<VolumeData> for UiVolume {
     fn from(data: VolumeData) -> Self {
         Self {
             id: data.id,
-            project_id: data.spec.project_id,
+            project_slug: data.spec.project_slug,
             node_id: data.spec.node_id,
             name: data.spec.name,
             size_bytes: data.spec.size_bytes,
@@ -854,7 +850,7 @@ pub struct UiContainer {
 #[serde(rename_all = "camelCase")]
 pub struct UiPod {
     pub id: String,
-    pub project_id: String,
+    pub project_slug: String,
     pub name: String,
     pub state: UiPodState,
     pub network_id: String,
@@ -891,7 +887,7 @@ pub struct UiContainerSpec {
 #[serde(rename_all = "camelCase")]
 pub struct UiCreatePodRequest {
     pub name: String,
-    pub project_id: String,
+    pub project_slug: String,
     pub network_id: String,
     pub containers: Vec<UiContainerSpec>,
 }

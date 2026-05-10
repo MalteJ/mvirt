@@ -296,7 +296,7 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
             delete(ui_handlers::delete_security_group_rule),
         );
 
-    // Project-scoped routes: /v1/projects/{project_id}/...
+    // Project-scoped routes: /v1/projects/{project_slug}/...
     // Only LIST and CREATE operations (require project context)
     let project_routes = Router::new()
         // VMs
@@ -333,7 +333,7 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .nest("/v1", internal_routes)
         .nest("/v1", global_routes)
-        .nest("/v1/projects/{project_id}", project_routes)
+        .nest("/v1/projects/{project_slug}", project_routes)
         .with_state(state)
         .layer(tower_http::cors::CorsLayer::permissive())
 }

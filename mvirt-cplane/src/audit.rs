@@ -179,19 +179,19 @@ impl ApiAuditLogger {
     }
 
     // Project events
-    pub fn project_created(&self, project_id: &str, project_name: &str) {
+    pub fn project_created(&self, project_slug: &str, project_name: &str) {
         self.log_async(
             LogLevel::Audit,
-            format!("Project created: {} ({})", project_name, project_id),
-            vec![project_id.to_string()],
+            format!("Project created: {} ({})", project_name, project_slug),
+            vec![project_slug.to_string()],
         );
     }
 
-    pub fn project_deleted(&self, project_id: &str) {
+    pub fn project_deleted(&self, project_slug: &str) {
         self.log_async(
             LogLevel::Audit,
-            format!("Project deleted: {}", project_id),
-            vec![project_id.to_string()],
+            format!("Project deleted: {}", project_slug),
+            vec![project_slug.to_string()],
         );
     }
 

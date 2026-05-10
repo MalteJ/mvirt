@@ -272,10 +272,10 @@ impl ApiState {
         read_list(&self.read_txn(), NETWORKS)
     }
 
-    pub fn list_networks_by_project(&self, project_id: &str) -> Vec<NetworkData> {
+    pub fn list_networks_by_project(&self, project_slug: &str) -> Vec<NetworkData> {
         read_list::<NetworkData>(&self.read_txn(), NETWORKS)
             .into_iter()
-            .filter(|n| n.project_id == project_id)
+            .filter(|n| n.project_slug == project_slug)
             .collect()
     }
 
@@ -312,10 +312,10 @@ impl ApiState {
         }
     }
 
-    pub fn list_nics_by_project(&self, project_id: &str) -> Vec<NicData> {
+    pub fn list_nics_by_project(&self, project_slug: &str) -> Vec<NicData> {
         read_list::<NicData>(&self.read_txn(), NICS)
             .into_iter()
-            .filter(|n| n.spec.project_id == project_id)
+            .filter(|n| n.spec.project_slug == project_slug)
             .collect()
     }
 
@@ -359,10 +359,10 @@ impl ApiState {
             .collect()
     }
 
-    pub fn list_vms_by_project(&self, project_id: &str) -> Vec<VmData> {
+    pub fn list_vms_by_project(&self, project_slug: &str) -> Vec<VmData> {
         read_list::<VmData>(&self.read_txn(), VMS)
             .into_iter()
-            .filter(|v| v.spec.project_id == project_id)
+            .filter(|v| v.spec.project_slug == project_slug)
             .collect()
     }
 
@@ -375,17 +375,11 @@ impl ApiState {
     }
 
     // =========================================================================
-    // Org queries
+    // Org queries — Org is keyed by slug (no separate UUID).
     // =========================================================================
 
-    pub fn get_org(&self, id: &str) -> Option<OrgData> {
-        read_get(&self.read_txn(), ORGS, id)
-    }
-
-    pub fn get_org_by_slug(&self, slug: &str) -> Option<OrgData> {
-        read_list::<OrgData>(&self.read_txn(), ORGS)
-            .into_iter()
-            .find(|o| o.slug == slug)
+    pub fn get_org(&self, slug: &str) -> Option<OrgData> {
+        read_get(&self.read_txn(), ORGS, slug)
     }
 
     pub fn list_orgs(&self) -> Vec<OrgData> {
@@ -396,32 +390,26 @@ impl ApiState {
         read_count(&self.read_txn(), ORGS)
     }
 
-    pub fn org_ids(&self) -> Vec<String> {
+    pub fn org_slugs(&self) -> Vec<String> {
         read_keys(&self.read_txn(), ORGS)
     }
 
     // =========================================================================
-    // Project queries
+    // Project queries — Project is keyed by slug.
     // =========================================================================
 
-    pub fn get_project(&self, id: &str) -> Option<ProjectData> {
-        read_get(&self.read_txn(), PROJECTS, id)
-    }
-
-    pub fn get_project_by_slug(&self, slug: &str) -> Option<ProjectData> {
-        read_list::<ProjectData>(&self.read_txn(), PROJECTS)
-            .into_iter()
-            .find(|p| p.slug == slug)
+    pub fn get_project(&self, slug: &str) -> Option<ProjectData> {
+        read_get(&self.read_txn(), PROJECTS, slug)
     }
 
     pub fn list_projects(&self) -> Vec<ProjectData> {
         read_list(&self.read_txn(), PROJECTS)
     }
 
-    pub fn list_projects_by_org(&self, org_id: &str) -> Vec<ProjectData> {
+    pub fn list_projects_by_org(&self, org_slug: &str) -> Vec<ProjectData> {
         read_list::<ProjectData>(&self.read_txn(), PROJECTS)
             .into_iter()
-            .filter(|p| p.org_id == org_id)
+            .filter(|p| p.org_slug == org_slug)
             .collect()
     }
 
@@ -433,17 +421,21 @@ impl ApiState {
         read_get(&self.read_txn(), VOLUMES, id)
     }
 
-    pub fn get_volume_by_name(&self, project_id: &str, name: &str) -> Option<VolumeData> {
+    pub fn get_volume_by_name(&self, project_slug: &str, name: &str) -> Option<VolumeData> {
         read_list::<VolumeData>(&self.read_txn(), VOLUMES)
             .into_iter()
-            .find(|v| v.spec.project_id == project_id && v.spec.name == name)
+            .find(|v| v.spec.project_slug == project_slug && v.spec.name == name)
     }
 
-    pub fn list_volumes(&self, project_id: Option<&str>, node_id: Option<&str>) -> Vec<VolumeData> {
+    pub fn list_volumes(
+        &self,
+        project_slug: Option<&str>,
+        node_id: Option<&str>,
+    ) -> Vec<VolumeData> {
         read_list::<VolumeData>(&self.read_txn(), VOLUMES)
             .into_iter()
             .filter(|v| {
-                project_id.is_none_or(|pid| v.spec.project_id == pid)
+                project_slug.is_none_or(|pid| v.spec.project_slug == pid)
                     && node_id.is_none_or(|nid| v.spec.node_id == nid)
             })
             .collect()
@@ -479,10 +471,10 @@ impl ApiState {
         }
     }
 
-    pub fn list_templates_by_project(&self, project_id: &str) -> Vec<TemplateData> {
+    pub fn list_templates_by_project(&self, project_slug: &str) -> Vec<TemplateData> {
         read_list::<TemplateData>(&self.read_txn(), TEMPLATES)
             .into_iter()
-            .filter(|t| t.spec.project_id == project_id)
+            .filter(|t| t.spec.project_slug == project_slug)
             .collect()
     }
 
@@ -506,10 +498,10 @@ impl ApiState {
         read_list(&self.read_txn(), SECURITY_GROUPS)
     }
 
-    pub fn list_security_groups_by_project(&self, project_id: &str) -> Vec<SecurityGroupData> {
+    pub fn list_security_groups_by_project(&self, project_slug: &str) -> Vec<SecurityGroupData> {
         read_list::<SecurityGroupData>(&self.read_txn(), SECURITY_GROUPS)
             .into_iter()
-            .filter(|sg| sg.project_id == project_id)
+            .filter(|sg| sg.project_slug == project_slug)
             .collect()
     }
 
@@ -645,7 +637,7 @@ impl StateMachine<Command, Response> for ApiState {
             Command::CreateNetwork {
                 id,
                 timestamp,
-                project_id,
+                project_slug,
                 name,
                 ipv4_enabled,
                 ipv4_prefix,
@@ -659,7 +651,7 @@ impl StateMachine<Command, Response> for ApiState {
                 let txn = self.db.begin_write().expect("begin");
                 if txn_list::<NetworkData>(&txn, NETWORKS)
                     .iter()
-                    .any(|n| n.project_id == project_id && n.name == name)
+                    .any(|n| n.project_slug == project_slug && n.name == name)
                 {
                     return (
                         Response::Error {
@@ -679,7 +671,7 @@ impl StateMachine<Command, Response> for ApiState {
 
                 let network = NetworkData {
                     id: id.clone(),
-                    project_id,
+                    project_slug,
                     name,
                     ipv4_enabled,
                     ipv4_prefix,
@@ -782,7 +774,7 @@ impl StateMachine<Command, Response> for ApiState {
             Command::CreateNic {
                 id,
                 timestamp,
-                project_id,
+                project_slug,
                 network_id,
                 name,
                 mac_address,
@@ -830,7 +822,7 @@ impl StateMachine<Command, Response> for ApiState {
                 let nic = NicData {
                     id: id.clone(),
                     spec: NicSpec {
-                        project_id,
+                        project_slug,
                         name,
                         network_id: network_id.clone(),
                         mac_address: mac,
@@ -1049,7 +1041,7 @@ impl StateMachine<Command, Response> for ApiState {
                 let txn = self.db.begin_write().expect("begin");
                 if txn_list::<VmData>(&txn, VMS)
                     .iter()
-                    .any(|v| v.spec.project_id == spec.project_id && v.spec.name == spec.name)
+                    .any(|v| v.spec.project_slug == spec.project_slug && v.spec.name == spec.name)
                 {
                     return (
                         Response::Error {
@@ -1175,10 +1167,9 @@ impl StateMachine<Command, Response> for ApiState {
             }
 
             // =================================================================
-            // Org Commands
+            // Org Commands — keyed by slug.
             // =================================================================
             Command::CreateOrg {
-                id,
                 timestamp,
                 slug,
                 name,
@@ -1188,26 +1179,12 @@ impl StateMachine<Command, Response> for ApiState {
             } => {
                 let txn = self.db.begin_write().expect("begin");
 
-                if let Some(existing) = txn_get::<OrgData>(&txn, ORGS, &id) {
+                if let Some(existing) = txn_get::<OrgData>(&txn, ORGS, &slug) {
                     return (Response::Org(existing), vec![]);
                 }
 
-                if txn_list::<OrgData>(&txn, ORGS)
-                    .iter()
-                    .any(|o| o.slug == slug)
-                {
-                    return (
-                        Response::Error {
-                            code: 409,
-                            message: format!("Org with slug '{}' already exists", slug),
-                        },
-                        vec![],
-                    );
-                }
-
                 let org = OrgData {
-                    id: id.clone(),
-                    slug,
+                    slug: slug.clone(),
                     name,
                     default_static_key_ttl_days,
                     disallow_static_keys,
@@ -1215,13 +1192,13 @@ impl StateMachine<Command, Response> for ApiState {
                     updated_at: timestamp,
                 };
 
-                txn_put(&txn, ORGS, &id, &org);
+                txn_put(&txn, ORGS, &slug, &org);
                 txn.commit().expect("commit");
                 (Response::Org(org), vec![])
             }
 
             Command::UpdateOrg {
-                id,
+                slug,
                 timestamp,
                 name,
                 default_static_key_ttl_days,
@@ -1229,11 +1206,11 @@ impl StateMachine<Command, Response> for ApiState {
                 ..
             } => {
                 let txn = self.db.begin_write().expect("begin");
-                let Some(mut org) = txn_get::<OrgData>(&txn, ORGS, &id) else {
+                let Some(mut org) = txn_get::<OrgData>(&txn, ORGS, &slug) else {
                     return (
                         Response::Error {
                             code: 404,
-                            message: format!("Org '{}' not found", id),
+                            message: format!("Org '{}' not found", slug),
                         },
                         vec![],
                     );
@@ -1248,25 +1225,25 @@ impl StateMachine<Command, Response> for ApiState {
                     org.disallow_static_keys = d;
                 }
                 org.updated_at = timestamp;
-                txn_put(&txn, ORGS, &id, &org);
+                txn_put(&txn, ORGS, &slug, &org);
                 txn.commit().expect("commit");
                 (Response::Org(org), vec![])
             }
 
-            Command::DeleteOrg { id, .. } => {
+            Command::DeleteOrg { slug, .. } => {
                 let txn = self.db.begin_write().expect("begin");
-                if !txn_has(&txn, ORGS, &id) {
+                if !txn_has(&txn, ORGS, &slug) {
                     return (
                         Response::Error {
                             code: 404,
-                            message: format!("Org '{}' not found", id),
+                            message: format!("Org '{}' not found", slug),
                         },
                         vec![],
                     );
                 }
                 let project_count = txn_list::<ProjectData>(&txn, PROJECTS)
                     .iter()
-                    .filter(|p| p.org_id == id)
+                    .filter(|p| p.org_slug == slug)
                     .count();
                 if project_count > 0 {
                     return (
@@ -1274,24 +1251,23 @@ impl StateMachine<Command, Response> for ApiState {
                             code: 409,
                             message: format!(
                                 "Org '{}' has {} project(s); delete them first",
-                                id, project_count
+                                slug, project_count
                             ),
                         },
                         vec![],
                     );
                 }
-                txn_delete(&txn, ORGS, &id);
+                txn_delete(&txn, ORGS, &slug);
                 txn.commit().expect("commit");
-                (Response::Deleted { id }, vec![])
+                (Response::Deleted { id: slug }, vec![])
             }
 
             // =================================================================
-            // Project Commands
+            // Project Commands — keyed by slug.
             // =================================================================
             Command::CreateProject {
-                id,
                 timestamp,
-                org_id,
+                org_slug,
                 slug,
                 name,
                 description,
@@ -1299,62 +1275,48 @@ impl StateMachine<Command, Response> for ApiState {
             } => {
                 let txn = self.db.begin_write().expect("begin");
 
-                if let Some(existing) = txn_get::<ProjectData>(&txn, PROJECTS, &id) {
+                if let Some(existing) = txn_get::<ProjectData>(&txn, PROJECTS, &slug) {
                     return (Response::Project(existing), vec![]);
                 }
 
-                if !txn_has(&txn, ORGS, &org_id) {
+                if !txn_has(&txn, ORGS, &org_slug) {
                     return (
                         Response::Error {
                             code: 404,
-                            message: format!("Org '{}' not found", org_id),
-                        },
-                        vec![],
-                    );
-                }
-
-                if txn_list::<ProjectData>(&txn, PROJECTS)
-                    .iter()
-                    .any(|p| p.slug == slug)
-                {
-                    return (
-                        Response::Error {
-                            code: 409,
-                            message: format!("Project with slug '{}' already exists", slug),
+                            message: format!("Org '{}' not found", org_slug),
                         },
                         vec![],
                     );
                 }
 
                 let project = ProjectData {
-                    id: id.clone(),
-                    org_id,
-                    slug,
+                    slug: slug.clone(),
+                    org_slug,
                     name,
                     description,
                     created_at: timestamp.clone(),
                     updated_at: timestamp,
                 };
 
-                txn_put(&txn, PROJECTS, &id, &project);
+                txn_put(&txn, PROJECTS, &slug, &project);
                 txn.commit().expect("commit");
                 (Response::Project(project), vec![])
             }
 
-            Command::DeleteProject { id, .. } => {
+            Command::DeleteProject { slug, .. } => {
                 let txn = self.db.begin_write().expect("begin");
-                if !txn_has(&txn, PROJECTS, &id) {
+                if !txn_has(&txn, PROJECTS, &slug) {
                     return (
                         Response::Error {
                             code: 404,
-                            message: format!("Project '{}' not found", id),
+                            message: format!("Project '{}' not found", slug),
                         },
                         vec![],
                     );
                 }
-                txn_delete(&txn, PROJECTS, &id);
+                txn_delete(&txn, PROJECTS, &slug);
                 txn.commit().expect("commit");
-                (Response::Deleted { id }, vec![])
+                (Response::Deleted { id: slug }, vec![])
             }
 
             // =================================================================
@@ -1363,7 +1325,7 @@ impl StateMachine<Command, Response> for ApiState {
             Command::CreateVolume {
                 id,
                 timestamp,
-                project_id,
+                project_slug,
                 node_id,
                 name,
                 size_bytes,
@@ -1372,11 +1334,11 @@ impl StateMachine<Command, Response> for ApiState {
             } => {
                 let txn = self.db.begin_write().expect("begin");
 
-                if !txn_has(&txn, PROJECTS, &project_id) {
+                if !txn_has(&txn, PROJECTS, &project_slug) {
                     return (
                         Response::Error {
                             code: 404,
-                            message: format!("Project '{}' not found", project_id),
+                            message: format!("Project '{}' not found", project_slug),
                         },
                         vec![],
                     );
@@ -1388,7 +1350,7 @@ impl StateMachine<Command, Response> for ApiState {
 
                 if txn_list::<VolumeData>(&txn, VOLUMES)
                     .iter()
-                    .any(|v| v.spec.project_id == project_id && v.spec.name == name)
+                    .any(|v| v.spec.project_slug == project_slug && v.spec.name == name)
                 {
                     return (
                         Response::Error {
@@ -1435,7 +1397,7 @@ impl StateMachine<Command, Response> for ApiState {
                 let volume = VolumeData {
                     id: id.clone(),
                     spec: VolumeSpec {
-                        project_id,
+                        project_slug,
                         node_id,
                         name,
                         size_bytes,
@@ -1603,7 +1565,7 @@ impl StateMachine<Command, Response> for ApiState {
             Command::CreateTemplate {
                 id,
                 timestamp,
-                project_id,
+                project_slug,
                 node_id,
                 name,
                 size_bytes,
@@ -1613,7 +1575,7 @@ impl StateMachine<Command, Response> for ApiState {
             } => {
                 let txn = self.db.begin_write().expect("begin");
                 if txn_list::<TemplateData>(&txn, TEMPLATES).iter().any(|t| {
-                    t.spec.project_id == project_id
+                    t.spec.project_slug == project_slug
                         && t.spec.name == name
                         && t.status.phase == TemplatePhase::Ready
                 }) {
@@ -1642,7 +1604,7 @@ impl StateMachine<Command, Response> for ApiState {
                 let template = TemplateData {
                     id: id.clone(),
                     spec: TemplateSpec {
-                        project_id,
+                        project_slug,
                         node_id,
                         name,
                         source_url,
@@ -1706,7 +1668,7 @@ impl StateMachine<Command, Response> for ApiState {
             Command::CreateSecurityGroup {
                 id,
                 timestamp,
-                project_id,
+                project_slug,
                 name,
                 description,
                 ..
@@ -1719,7 +1681,7 @@ impl StateMachine<Command, Response> for ApiState {
 
                 if txn_list::<SecurityGroupData>(&txn, SECURITY_GROUPS)
                     .iter()
-                    .any(|sg| sg.project_id == project_id && sg.name == name)
+                    .any(|sg| sg.project_slug == project_slug && sg.name == name)
                 {
                     return (
                         Response::Error {
@@ -1730,11 +1692,11 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                if !txn_has(&txn, PROJECTS, &project_id) {
+                if !txn_has(&txn, PROJECTS, &project_slug) {
                     return (
                         Response::Error {
                             code: 404,
-                            message: format!("Project '{}' not found", project_id),
+                            message: format!("Project '{}' not found", project_slug),
                         },
                         vec![],
                     );
@@ -1742,7 +1704,7 @@ impl StateMachine<Command, Response> for ApiState {
 
                 let sg = SecurityGroupData {
                     id: id.clone(),
-                    project_id,
+                    project_slug,
                     name,
                     description,
                     rules: vec![],
@@ -1982,18 +1944,18 @@ mod tests {
 
     /// Helper to get just the response from apply (ignoring events).
     ///
-    /// As a convenience for legacy tests, this auto-creates `TEST_ORG_ID` on
-    /// the first `CreateProject` against the shared org id — keeps tests that
+    /// As a convenience for legacy tests, this auto-creates `TEST_ORG_SLUG` on
+    /// the first `CreateProject` against the shared org slug — keeps tests that
     /// predate the Org introduction working without per-test setup boilerplate.
     /// Tests that exercise Org behavior directly (`test_create_project_org_not_found`,
     /// `test_delete_org_with_projects_rejects`) bypass this by either not
-    /// referencing TEST_ORG_ID or by setting up Orgs explicitly.
+    /// referencing TEST_ORG_SLUG or by setting up Orgs explicitly.
     fn apply(state: &mut ApiState, cmd: Command) -> Response {
-        if let Command::CreateProject { org_id, .. } = &cmd
-            && org_id == TEST_ORG_ID
-            && state.get_org(TEST_ORG_ID).is_none()
+        if let Command::CreateProject { org_slug, .. } = &cmd
+            && org_slug == TEST_ORG_SLUG
+            && state.get_org(TEST_ORG_SLUG).is_none()
         {
-            let setup = create_org_cmd("test-org-setup", TEST_ORG_ID, TEST_ORG_SLUG);
+            let setup = create_org_cmd("test-org-setup", TEST_ORG_SLUG);
             state.apply(setup);
         }
         let (response, _events) = state.apply(cmd);
@@ -2005,7 +1967,7 @@ mod tests {
             request_id: request_id.to_string(),
             id: id.to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             name: name.to_string(),
             ipv4_enabled: true,
             ipv4_prefix: Some("10.0.0.0/24".to_string()),
@@ -2022,7 +1984,7 @@ mod tests {
             request_id: request_id.to_string(),
             id: id.to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             network_id: network_id.to_string(),
             name: name.map(|s| s.to_string()),
             mac_address: None,
@@ -2455,14 +2417,12 @@ mod tests {
     // Org / Project Tests
     // =========================================================================
 
-    /// Default Org id used by test helpers that don't care which Org a Project lives in.
-    const TEST_ORG_ID: &str = "org-test";
+    /// Default Org slug used by test helpers that don't care which Org a Project lives in.
     const TEST_ORG_SLUG: &str = "org-test";
 
-    fn create_org_cmd(request_id: &str, id: &str, slug: &str) -> Command {
+    fn create_org_cmd(request_id: &str, slug: &str) -> Command {
         Command::CreateOrg {
             request_id: request_id.to_string(),
-            id: id.to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
             slug: slug.to_string(),
             name: format!("Org {}", slug),
@@ -2471,25 +2431,20 @@ mod tests {
         }
     }
 
-    /// Ensure the shared TEST_ORG_ID exists; idempotent.
+    /// Ensure the shared TEST_ORG_SLUG exists; idempotent.
     fn ensure_test_org(state: &mut ApiState) {
-        if state.get_org(TEST_ORG_ID).is_none() {
-            apply(
-                state,
-                create_org_cmd("test-org-req", TEST_ORG_ID, TEST_ORG_SLUG),
-            );
+        if state.get_org(TEST_ORG_SLUG).is_none() {
+            apply(state, create_org_cmd("test-org-req", TEST_ORG_SLUG));
         }
     }
 
-    /// Create a Project in TEST_ORG. `id` is also used as the slug for convenience —
-    /// existing tests pass project ids like "proj-1" which are already valid slugs.
-    fn create_project_cmd(request_id: &str, id: &str, name: &str) -> Command {
+    /// Create a Project in TEST_ORG. `slug` is the project slug.
+    fn create_project_cmd(request_id: &str, slug: &str, name: &str) -> Command {
         Command::CreateProject {
             request_id: request_id.to_string(),
-            id: id.to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
-            org_id: TEST_ORG_ID.to_string(),
-            slug: id.to_string(),
+            org_slug: TEST_ORG_SLUG.to_string(),
+            slug: slug.to_string(),
             name: name.to_string(),
             description: Some("Test project".to_string()),
         }
@@ -2498,25 +2453,27 @@ mod tests {
     #[test]
     fn test_create_org() {
         let mut state = ApiState::default();
-        let response = apply(&mut state, create_org_cmd("req-1", "org-1", "acme"));
+        let response = apply(&mut state, create_org_cmd("req-1", "acme"));
         match response {
             Response::Org(data) => {
-                assert_eq!(data.id, "org-1");
                 assert_eq!(data.slug, "acme");
                 assert_eq!(data.default_static_key_ttl_days, 90);
             }
             other => panic!("unexpected: {:?}", other),
         }
         assert_eq!(state.list_orgs().len(), 1);
-        assert!(state.get_org_by_slug("acme").is_some());
+        assert!(state.get_org("acme").is_some());
     }
 
     #[test]
-    fn test_create_org_duplicate_slug() {
+    fn test_create_org_duplicate_slug_is_idempotent() {
+        // With slug-as-primary-key, re-issuing CreateOrg with the same slug
+        // returns the existing record (idempotent), not 409.
         let mut state = ApiState::default();
-        apply(&mut state, create_org_cmd("req-1", "org-1", "acme"));
-        let response = apply(&mut state, create_org_cmd("req-2", "org-2", "acme"));
-        assert!(matches!(response, Response::Error { code: 409, .. }));
+        apply(&mut state, create_org_cmd("req-1", "acme"));
+        let response = apply(&mut state, create_org_cmd("req-2", "acme"));
+        assert!(matches!(response, Response::Org(_)));
+        assert_eq!(state.list_orgs().len(), 1);
     }
 
     #[test]
@@ -2528,7 +2485,7 @@ mod tests {
             &mut state,
             Command::DeleteOrg {
                 request_id: "req-2".to_string(),
-                id: TEST_ORG_ID.to_string(),
+                slug: TEST_ORG_SLUG.to_string(),
             },
         );
         assert!(matches!(response, Response::Error { code: 409, .. }));
@@ -2543,9 +2500,8 @@ mod tests {
 
         match response {
             Response::Project(data) => {
-                assert_eq!(data.id, "proj-1");
                 assert_eq!(data.slug, "proj-1");
-                assert_eq!(data.org_id, TEST_ORG_ID);
+                assert_eq!(data.org_slug, TEST_ORG_SLUG);
                 assert_eq!(data.name, "my-project");
                 assert_eq!(data.description, Some("Test project".to_string()));
             }
@@ -2561,9 +2517,8 @@ mod tests {
         let mut state = ApiState::default();
         let cmd = Command::CreateProject {
             request_id: "req-1".to_string(),
-            id: "proj-1".to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
-            org_id: "no-such-org".to_string(),
+            org_slug: "no-such-org".to_string(),
             slug: "proj-1".to_string(),
             name: "x".to_string(),
             description: None,
@@ -2573,7 +2528,9 @@ mod tests {
     }
 
     #[test]
-    fn test_create_project_duplicate_slug() {
+    fn test_create_project_duplicate_slug_is_idempotent() {
+        // Same slug → returns existing project (idempotent). Distinct payloads
+        // with the same slug are not supported because slug IS the key.
         let mut state = ApiState::default();
         ensure_test_org(&mut state);
 
@@ -2582,18 +2539,13 @@ mod tests {
             create_project_cmd("req-1", "proj-1", "dup-name"),
         );
 
-        // Different id, same slug (id is also used as slug in the helper).
-        let cmd = Command::CreateProject {
-            request_id: "req-2".to_string(),
-            id: "proj-2".to_string(),
-            timestamp: "2024-01-01T00:00:00Z".to_string(),
-            org_id: TEST_ORG_ID.to_string(),
-            slug: "proj-1".to_string(),
-            name: "second".to_string(),
-            description: None,
-        };
-        let response = apply(&mut state, cmd);
-        assert!(matches!(response, Response::Error { code: 409, .. }));
+        let response = apply(&mut state, create_project_cmd("req-2", "proj-1", "second"));
+        // Returns the originally-created project (the second create is a no-op).
+        match response {
+            Response::Project(data) => assert_eq!(data.name, "dup-name"),
+            other => panic!("Unexpected response: {:?}", other),
+        }
+        assert_eq!(state.list_projects().len(), 1);
     }
 
     #[test]
@@ -2607,7 +2559,7 @@ mod tests {
 
         let delete_cmd = Command::DeleteProject {
             request_id: "req-2".to_string(),
-            id: "proj-1".to_string(),
+            slug: "proj-1".to_string(),
         };
         let response = apply(&mut state, delete_cmd);
 
@@ -2621,7 +2573,7 @@ mod tests {
 
         let delete_cmd = Command::DeleteProject {
             request_id: "req-1".to_string(),
-            id: "non-existent".to_string(),
+            slug: "non-existent".to_string(),
         };
         let response = apply(&mut state, delete_cmd);
 
@@ -2637,11 +2589,11 @@ mod tests {
             create_project_cmd("req-1", "proj-uuid", "findme"),
         );
 
-        let project = state.get_project_by_slug("proj-uuid");
+        let project = state.get_project("proj-uuid");
         assert!(project.is_some());
-        assert_eq!(project.unwrap().id, "proj-uuid");
+        assert_eq!(project.unwrap().slug, "proj-uuid");
 
-        assert!(state.get_project_by_slug("unknown").is_none());
+        assert!(state.get_project("unknown").is_none());
     }
 
     // =========================================================================
@@ -2651,7 +2603,7 @@ mod tests {
     fn create_volume_cmd(
         request_id: &str,
         id: &str,
-        project_id: &str,
+        project_slug: &str,
         node_id: &str,
         name: &str,
         size: u64,
@@ -2660,7 +2612,7 @@ mod tests {
             request_id: request_id.to_string(),
             id: id.to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
-            project_id: project_id.to_string(),
+            project_slug: project_slug.to_string(),
             node_id: node_id.to_string(),
             name: name.to_string(),
             size_bytes: size,
@@ -2692,7 +2644,7 @@ mod tests {
         match response {
             Response::Volume(data) => {
                 assert_eq!(data.id, "vol-1");
-                assert_eq!(data.spec.project_id, "proj-1");
+                assert_eq!(data.spec.project_slug, "proj-1");
                 assert_eq!(data.spec.node_id, "node-1");
                 assert_eq!(data.spec.name, "my-volume");
                 assert_eq!(data.spec.size_bytes, 10_000_000);
@@ -2919,7 +2871,7 @@ mod tests {
             request_id: request_id.to_string(),
             id: id.to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             node_id: node_id.to_string(),
             name: name.to_string(),
             size_bytes: 1_000_000_000,
@@ -2981,7 +2933,7 @@ mod tests {
             request_id: "req-3".to_string(),
             id: "vol-1".to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
-            project_id: "proj-1".to_string(),
+            project_slug: "proj-1".to_string(),
             node_id: "node-1".to_string(),
             name: "cloned-vol".to_string(),
             size_bytes: 10_000_000,
@@ -3013,7 +2965,7 @@ mod tests {
                 request_id: "req-3".to_string(),
                 id: "vol-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
-                project_id: "proj-1".to_string(),
+                project_slug: "proj-1".to_string(),
                 node_id: "node-1".to_string(),
                 name: "cloned-vol".to_string(),
                 size_bytes: 10_000_000,
@@ -3052,7 +3004,7 @@ mod tests {
             request_id: "req-3".to_string(),
             id: "vol-1".to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
-            project_id: "proj-1".to_string(),
+            project_slug: "proj-1".to_string(),
             node_id: "node-2".to_string(), // Different node!
             name: "cloned-vol".to_string(),
             size_bytes: 10_000_000,
@@ -3075,7 +3027,7 @@ mod tests {
             request_id: "req-1".to_string(),
             id: "tmpl-1".to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             node_id: "node-1".to_string(),
             name: "ubuntu-22.04".to_string(),
             size_bytes: 0,
@@ -3111,7 +3063,7 @@ mod tests {
                 request_id: "req-1".to_string(),
                 id: "tmpl-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
-                project_id: "test-project".to_string(),
+                project_slug: "test-project".to_string(),
                 node_id: "node-1".to_string(),
                 name: "ubuntu".to_string(),
                 size_bytes: 0,
@@ -3150,7 +3102,7 @@ mod tests {
                 request_id: "req-1".to_string(),
                 id: "tmpl-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
-                project_id: "test-project".to_string(),
+                project_slug: "test-project".to_string(),
                 node_id: "node-1".to_string(),
                 name: "ubuntu".to_string(),
                 size_bytes: 0,
@@ -3189,7 +3141,7 @@ mod tests {
                 request_id: "req-1".to_string(),
                 id: "tmpl-1".to_string(),
                 timestamp: "2024-01-01T00:00:00Z".to_string(),
-                project_id: "test-project".to_string(),
+                project_slug: "test-project".to_string(),
                 node_id: "node-1".to_string(),
                 name: "ubuntu".to_string(),
                 size_bytes: 0,

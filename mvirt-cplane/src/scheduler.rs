@@ -200,7 +200,7 @@ mod tests {
     fn make_spec(cpu: u32, memory: u64, _storage: u64) -> VmSpec {
         VmSpec {
             name: "test-vm".to_string(),
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             node_selector: None,
             cpu_cores: cpu,
             memory_mb: memory,

@@ -13,7 +13,6 @@ import {
 import { cn } from '@/lib/utils'
 import { useProjects, useApiHealth } from '@/hooks/queries'
 import { useProject } from '@/hooks/useProject'
-import { OrgSwitcher } from './OrgSwitcher'
 
 const navigation = [
   { name: 'Virtual Machines', path: '/vms', icon: Server },
@@ -60,7 +59,6 @@ export function Sidebar() {
         </div>
         <span className="logo-shimmer text-lg font-semibold">mvirt</span>
       </Link>
-      <OrgSwitcher />
       <nav className="flex-1 space-y-1 p-2">
         {hasProjects && projectSlug && navigation.map((item) => (
           <NavLink

@@ -61,7 +61,7 @@ pub async fn get_org(
 ) -> Result<Json<UiOrg>, ApiError> {
     state
         .store
-        .get_org_by_slug(&slug)
+        .get_org(&slug)
         .await?
         .map(|o| Json(UiOrg::from(o)))
         .ok_or_else(|| ApiError {
@@ -111,20 +111,16 @@ pub async fn update_org(
     Path(slug): Path<String>,
     Json(req): Json<UiUpdateOrgRequest>,
 ) -> Result<Json<UiOrg>, ApiError> {
-    let org = state
-        .store
-        .get_org_by_slug(&slug)
-        .await?
-        .ok_or_else(|| ApiError {
-            error: format!("Org '{}' not found", slug),
-            code: 404,
-        })?;
+    let org = state.store.get_org(&slug).await?.ok_or_else(|| ApiError {
+        error: format!("Org '{}' not found", slug),
+        code: 404,
+    })?;
     let store_req = StoreUpdateOrgRequest {
         name: req.name,
         default_static_key_ttl_days: req.default_static_key_ttl_days,
         disallow_static_keys: req.disallow_static_keys,
     };
-    let data = state.store.update_org(&org.id, store_req).await?;
+    let data = state.store.update_org(&org.slug, store_req).await?;
     Ok(Json(UiOrg::from(data)))
 }
 
@@ -144,15 +140,11 @@ pub async fn delete_org(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let org = state
-        .store
-        .get_org_by_slug(&slug)
-        .await?
-        .ok_or_else(|| ApiError {
-            error: format!("Org '{}' not found", slug),
-            code: 404,
-        })?;
-    state.store.delete_org(&org.id).await?;
+    let org = state.store.get_org(&slug).await?.ok_or_else(|| ApiError {
+        error: format!("Org '{}' not found", slug),
+        code: 404,
+    })?;
+    state.store.delete_org(&org.slug).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -170,13 +162,13 @@ pub async fn list_projects_in_org(
 ) -> Result<Json<ProjectListResponse>, ApiError> {
     let org = state
         .store
-        .get_org_by_slug(&org_slug)
+        .get_org(&org_slug)
         .await?
         .ok_or_else(|| ApiError {
             error: format!("Org '{}' not found", org_slug),
             code: 404,
         })?;
-    let projects = state.store.list_projects_by_org(&org.id).await?;
+    let projects = state.store.list_projects_by_org(&org.slug).await?;
     Ok(Json(ProjectListResponse {
         projects: projects.into_iter().map(UiProject::from).collect(),
     }))
@@ -203,11 +195,7 @@ pub async fn get_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<UiProject>, ApiError> {
-    let project = state
-        .store
-        .get_project(&id)
-        .await?
-        .or(state.store.get_project_by_slug(&id).await?);
+    let project = state.store.get_project(&id).await?;
 
     match project {
         Some(data) => Ok(Json(UiProject::from(data))),
@@ -241,7 +229,7 @@ pub async fn create_project(
 
     let org = state
         .store
-        .get_org_by_slug(&org_slug)
+        .get_org(&org_slug)
         .await?
         .ok_or_else(|| ApiError {
             error: format!("Org '{}' not found", org_slug),
@@ -249,14 +237,14 @@ pub async fn create_project(
         })?;
 
     let store_req = StoreCreateProjectRequest {
-        org_id: org.id,
+        org_slug: org.slug,
         slug: req.slug,
         name: req.name,
         description: req.description,
     };
 
     let data = state.store.create_project(store_req).await?;
-    state.audit.project_created(&data.id, &data.name);
+    state.audit.project_created(&data.slug, &data.name);
     Ok(Json(UiProject::from(data)))
 }
 
@@ -306,13 +294,13 @@ pub async fn delete_project(
 // =============================================================================
 
 /// List VMs in a project
-#[utoipa::path(get, path = "/v1/projects/{project_id}/vms", params(("project_id" = String, Path), ("node_id" = Option<String>, Query)), responses((status = 200, body = VmListResponse)), tag = "vms")]
+#[utoipa::path(get, path = "/v1/projects/{project_slug}/vms", params(("project_slug" = String, Path), ("node_id" = Option<String>, Query)), responses((status = 200, body = VmListResponse)), tag = "vms")]
 pub async fn list_vms(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
     Query(query): Query<ListVmsQuery>,
 ) -> Result<Json<VmListResponse>, ApiError> {
-    let vms = state.store.list_vms_by_project(&project_id).await?;
+    let vms = state.store.list_vms_by_project(&project_slug).await?;
 
     // Further filter by node if specified
     let vms: Vec<UiVm> = vms
@@ -351,15 +339,15 @@ pub async fn get_vm(
 }
 
 /// Create a new VM
-#[utoipa::path(post, path = "/v1/projects/{project_id}/vms", params(("project_id" = String, Path)), request_body = UiCreateVmRequest, responses((status = 200, body = UiVm), (status = 503, body = ApiError)), tag = "vms")]
+#[utoipa::path(post, path = "/v1/projects/{project_slug}/vms", params(("project_slug" = String, Path)), request_body = UiCreateVmRequest, responses((status = 200, body = UiVm), (status = 503, body = ApiError)), tag = "vms")]
 pub async fn create_vm(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
     Json(req): Json<UiCreateVmRequest>,
 ) -> Result<Json<UiVm>, ApiError> {
     let spec = VmSpec {
         name: req.name.clone(),
-        project_id,
+        project_slug,
         node_selector: req.node_selector,
         cpu_cores: req.config.vcpus,
         memory_mb: req.config.memory_mb,
@@ -484,7 +472,7 @@ pub async fn kill_vm(
 /// SSE stream for VM events
 pub async fn vm_events(
     State(state): State<Arc<AppState>>,
-    Path(_project_id): Path<String>,
+    Path(_project_slug): Path<String>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let mut rx = state.store.subscribe();
 
@@ -518,12 +506,12 @@ pub async fn vm_events(
 // =============================================================================
 
 /// List networks in a project
-#[utoipa::path(get, path = "/v1/projects/{project_id}/networks", params(("project_id" = String, Path)), responses((status = 200, body = NetworkListResponse)), tag = "networks")]
+#[utoipa::path(get, path = "/v1/projects/{project_slug}/networks", params(("project_slug" = String, Path)), responses((status = 200, body = NetworkListResponse)), tag = "networks")]
 pub async fn list_networks(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
 ) -> Result<Json<NetworkListResponse>, ApiError> {
-    let networks = state.store.list_networks_by_project(&project_id).await?;
+    let networks = state.store.list_networks_by_project(&project_slug).await?;
     Ok(Json(NetworkListResponse {
         networks: networks.into_iter().map(UiNetwork::from).collect(),
     }))
@@ -551,14 +539,14 @@ pub async fn get_network(
 }
 
 /// Create a new network
-#[utoipa::path(post, path = "/v1/projects/{project_id}/networks", params(("project_id" = String, Path)), request_body = UiCreateNetworkRequest, responses((status = 200, body = UiNetwork), (status = 409, body = ApiError)), tag = "networks")]
+#[utoipa::path(post, path = "/v1/projects/{project_slug}/networks", params(("project_slug" = String, Path)), request_body = UiCreateNetworkRequest, responses((status = 200, body = UiNetwork), (status = 409, body = ApiError)), tag = "networks")]
 pub async fn create_network(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
     Json(req): Json<UiCreateNetworkRequest>,
 ) -> Result<Json<UiNetwork>, ApiError> {
     let store_req = StoreCreateNetworkRequest {
-        project_id,
+        project_slug,
         name: req.name.clone(),
         ipv4_enabled: req.ipv4_enabled,
         ipv4_prefix: req.ipv4_prefix,
@@ -590,13 +578,13 @@ pub async fn delete_network(
 // =============================================================================
 
 /// List NICs in a project
-#[utoipa::path(get, path = "/v1/projects/{project_id}/nics", params(("project_id" = String, Path), ("network_id" = Option<String>, Query)), responses((status = 200, body = NicListResponse)), tag = "nics")]
+#[utoipa::path(get, path = "/v1/projects/{project_slug}/nics", params(("project_slug" = String, Path), ("network_id" = Option<String>, Query)), responses((status = 200, body = NicListResponse)), tag = "nics")]
 pub async fn list_nics(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
     Query(query): Query<ListNicsQuery>,
 ) -> Result<Json<NicListResponse>, ApiError> {
-    let nics = state.store.list_nics_by_project(&project_id).await?;
+    let nics = state.store.list_nics_by_project(&project_slug).await?;
     // Further filter by network if specified
     let nics: Vec<UiNic> = nics
         .into_iter()
@@ -633,14 +621,14 @@ pub async fn get_nic(
 }
 
 /// Create a new NIC
-#[utoipa::path(post, path = "/v1/projects/{project_id}/nics", params(("project_id" = String, Path)), request_body = UiCreateNicRequest, responses((status = 200, body = UiNic), (status = 404, body = ApiError)), tag = "nics")]
+#[utoipa::path(post, path = "/v1/projects/{project_slug}/nics", params(("project_slug" = String, Path)), request_body = UiCreateNicRequest, responses((status = 200, body = UiNic), (status = 404, body = ApiError)), tag = "nics")]
 pub async fn create_nic(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
     Json(req): Json<UiCreateNicRequest>,
 ) -> Result<Json<UiNic>, ApiError> {
     let store_req = StoreCreateNicRequest {
-        project_id,
+        project_slug,
         network_id: req.network_id,
         name: req.name,
         mac_address: req.mac_address,
@@ -695,15 +683,15 @@ pub async fn detach_nic(
 // =============================================================================
 
 /// List volumes in a project
-#[utoipa::path(get, path = "/v1/projects/{project_id}/volumes", params(("project_id" = String, Path), ("node_id" = Option<String>, Query)), responses((status = 200, body = VolumeListResponse)), tag = "storage")]
+#[utoipa::path(get, path = "/v1/projects/{project_slug}/volumes", params(("project_slug" = String, Path), ("node_id" = Option<String>, Query)), responses((status = 200, body = VolumeListResponse)), tag = "storage")]
 pub async fn list_volumes(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
     Query(query): Query<ListVolumesQuery>,
 ) -> Result<Json<VolumeListResponse>, ApiError> {
     let volumes = state
         .store
-        .list_volumes(Some(&project_id), query.node_id.as_deref())
+        .list_volumes(Some(&project_slug), query.node_id.as_deref())
         .await?;
     Ok(Json(VolumeListResponse {
         volumes: volumes.into_iter().map(UiVolume::from).collect(),
@@ -726,14 +714,14 @@ pub async fn get_volume(
 }
 
 /// Create a new volume
-#[utoipa::path(post, path = "/v1/projects/{project_id}/volumes", params(("project_id" = String, Path)), request_body = UiCreateVolumeRequest, responses((status = 200, body = UiVolume), (status = 503, body = ApiError)), tag = "storage")]
+#[utoipa::path(post, path = "/v1/projects/{project_slug}/volumes", params(("project_slug" = String, Path)), request_body = UiCreateVolumeRequest, responses((status = 200, body = UiVolume), (status = 503, body = ApiError)), tag = "storage")]
 pub async fn create_volume(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
     Json(req): Json<UiCreateVolumeRequest>,
 ) -> Result<Json<UiVolume>, ApiError> {
     let store_req = StoreCreateVolumeRequest {
-        project_id,
+        project_slug,
         node_id: req.node_id,
         name: req.name,
         size_bytes: req.size_bytes,
@@ -787,26 +775,26 @@ pub async fn create_snapshot(
 }
 
 /// List templates in a project
-#[utoipa::path(get, path = "/v1/projects/{project_id}/templates", params(("project_id" = String, Path)), responses((status = 200, body = TemplateListResponse)), tag = "storage")]
+#[utoipa::path(get, path = "/v1/projects/{project_slug}/templates", params(("project_slug" = String, Path)), responses((status = 200, body = TemplateListResponse)), tag = "storage")]
 pub async fn list_templates(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
 ) -> Result<Json<TemplateListResponse>, ApiError> {
-    let templates = state.store.list_templates_by_project(&project_id).await?;
+    let templates = state.store.list_templates_by_project(&project_slug).await?;
     Ok(Json(TemplateListResponse {
         templates: templates.into_iter().map(UiTemplate::from).collect(),
     }))
 }
 
 /// Import a template
-#[utoipa::path(post, path = "/v1/projects/{project_id}/templates/import", params(("project_id" = String, Path)), request_body = UiImportTemplateRequest, responses((status = 200, body = UiImportJob), (status = 503, body = ApiError)), tag = "storage")]
+#[utoipa::path(post, path = "/v1/projects/{project_slug}/templates/import", params(("project_slug" = String, Path)), request_body = UiImportTemplateRequest, responses((status = 200, body = UiImportJob), (status = 503, body = ApiError)), tag = "storage")]
 pub async fn import_template(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
     Json(req): Json<UiImportTemplateRequest>,
 ) -> Result<Json<UiImportJob>, ApiError> {
     let store_req = StoreCreateTemplateRequest {
-        project_id,
+        project_slug,
         node_id: req.node_id,
         name: req.name,
         size_bytes: 0,
@@ -1022,12 +1010,15 @@ pub async fn console_ws(
 // =============================================================================
 
 /// List security groups in a project
-#[utoipa::path(get, path = "/v1/projects/{project_id}/security-groups", params(("project_id" = String, Path)), responses((status = 200, body = SecurityGroupListResponse)), tag = "security-groups")]
+#[utoipa::path(get, path = "/v1/projects/{project_slug}/security-groups", params(("project_slug" = String, Path)), responses((status = 200, body = SecurityGroupListResponse)), tag = "security-groups")]
 pub async fn list_security_groups(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
 ) -> Result<Json<SecurityGroupListResponse>, ApiError> {
-    let groups = state.store.list_security_groups(Some(&project_id)).await?;
+    let groups = state
+        .store
+        .list_security_groups(Some(&project_slug))
+        .await?;
     Ok(Json(SecurityGroupListResponse {
         security_groups: groups.into_iter().map(UiSecurityGroup::from).collect(),
     }))
@@ -1047,10 +1038,10 @@ pub async fn get_security_group(
 }
 
 /// Create a new security group
-#[utoipa::path(post, path = "/v1/projects/{project_id}/security-groups", params(("project_id" = String, Path)), request_body = UiCreateSecurityGroupRequest, responses((status = 200, body = UiSecurityGroup), (status = 409, body = ApiError)), tag = "security-groups")]
+#[utoipa::path(post, path = "/v1/projects/{project_slug}/security-groups", params(("project_slug" = String, Path)), request_body = UiCreateSecurityGroupRequest, responses((status = 200, body = UiSecurityGroup), (status = 409, body = ApiError)), tag = "security-groups")]
 pub async fn create_security_group(
     State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
     Json(req): Json<UiCreateSecurityGroupRequest>,
 ) -> Result<Json<UiSecurityGroup>, ApiError> {
     use crate::store::CreateSecurityGroupRequest;
@@ -1058,7 +1049,7 @@ pub async fn create_security_group(
     let sg = state
         .store
         .create_security_group(CreateSecurityGroupRequest {
-            project_id,
+            project_slug,
             name: req.name,
             description: req.description,
         })
@@ -1166,7 +1157,7 @@ pub async fn list_pods(
 #[serde(rename_all = "camelCase")]
 pub struct ListPodsQuery {
     #[serde(default)]
-    pub project_id: Option<String>,
+    pub project_slug: Option<String>,
 }
 
 /// Get a pod by ID (stub)

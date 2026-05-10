@@ -166,10 +166,10 @@ impl NetworkStore for RaftStore {
         Ok(state.list_networks())
     }
 
-    async fn list_networks_by_project(&self, project_id: &str) -> Result<Vec<NetworkData>> {
+    async fn list_networks_by_project(&self, project_slug: &str) -> Result<Vec<NetworkData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_networks_by_project(project_id))
+        Ok(state.list_networks_by_project(project_slug))
     }
 
     async fn get_network(&self, id: &str) -> Result<Option<NetworkData>> {
@@ -191,7 +191,7 @@ impl NetworkStore for RaftStore {
             timestamp: Utc::now().to_rfc3339(),
             name: req.name,
             ipv4_enabled: req.ipv4_enabled,
-            project_id: req.project_id,
+            project_slug: req.project_slug,
             ipv4_prefix: req.ipv4_prefix,
             ipv6_enabled: req.ipv6_enabled,
             ipv6_prefix: req.ipv6_prefix,
@@ -253,10 +253,10 @@ impl NicStore for RaftStore {
         Ok(state.list_nics(network_id))
     }
 
-    async fn list_nics_by_project(&self, project_id: &str) -> Result<Vec<NicData>> {
+    async fn list_nics_by_project(&self, project_slug: &str) -> Result<Vec<NicData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_nics_by_project(project_id))
+        Ok(state.list_nics_by_project(project_slug))
     }
 
     async fn get_nic(&self, id: &str) -> Result<Option<NicData>> {
@@ -276,7 +276,7 @@ impl NicStore for RaftStore {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
-            project_id: req.project_id,
+            project_slug: req.project_slug,
             network_id: req.network_id,
             name: req.name,
             mac_address: req.mac_address,
@@ -366,10 +366,10 @@ impl VmStore for RaftStore {
         Ok(state.list_vms(None))
     }
 
-    async fn list_vms_by_project(&self, project_id: &str) -> Result<Vec<VmData>> {
+    async fn list_vms_by_project(&self, project_slug: &str) -> Result<Vec<VmData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_vms_by_project(project_id))
+        Ok(state.list_vms_by_project(project_slug))
     }
 
     async fn list_vms_by_node(&self, node_id: &str) -> Result<Vec<VmData>> {
@@ -559,22 +559,15 @@ impl OrgStore for RaftStore {
         Ok(state.list_orgs())
     }
 
-    async fn get_org(&self, id: &str) -> Result<Option<OrgData>> {
+    async fn get_org(&self, slug: &str) -> Result<Option<OrgData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_org(id))
-    }
-
-    async fn get_org_by_slug(&self, slug: &str) -> Result<Option<OrgData>> {
-        let node = self.node.read().await;
-        let state = node.get_state().await;
-        Ok(state.get_org_by_slug(slug))
+        Ok(state.get_org(slug))
     }
 
     async fn create_org(&self, req: CreateOrgRequest) -> Result<OrgData> {
         let cmd = Command::CreateOrg {
             request_id: uuid::Uuid::new_v4().to_string(),
-            id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
             slug: req.slug,
             name: req.name,
@@ -590,10 +583,10 @@ impl OrgStore for RaftStore {
         }
     }
 
-    async fn update_org(&self, id: &str, req: UpdateOrgRequest) -> Result<OrgData> {
+    async fn update_org(&self, slug: &str, req: UpdateOrgRequest) -> Result<OrgData> {
         let cmd = Command::UpdateOrg {
             request_id: uuid::Uuid::new_v4().to_string(),
-            id: id.to_string(),
+            slug: slug.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             name: req.name,
             default_static_key_ttl_days: req.default_static_key_ttl_days,
@@ -608,10 +601,10 @@ impl OrgStore for RaftStore {
         }
     }
 
-    async fn delete_org(&self, id: &str) -> Result<()> {
+    async fn delete_org(&self, slug: &str) -> Result<()> {
         let cmd = Command::DeleteOrg {
             request_id: uuid::Uuid::new_v4().to_string(),
-            id: id.to_string(),
+            slug: slug.to_string(),
         };
 
         match self.write_command(cmd).await? {
@@ -632,30 +625,23 @@ impl ProjectStore for RaftStore {
         Ok(state.list_projects())
     }
 
-    async fn list_projects_by_org(&self, org_id: &str) -> Result<Vec<ProjectData>> {
+    async fn list_projects_by_org(&self, org_slug: &str) -> Result<Vec<ProjectData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_projects_by_org(org_id))
+        Ok(state.list_projects_by_org(org_slug))
     }
 
-    async fn get_project(&self, id: &str) -> Result<Option<ProjectData>> {
+    async fn get_project(&self, slug: &str) -> Result<Option<ProjectData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.get_project(id))
-    }
-
-    async fn get_project_by_slug(&self, slug: &str) -> Result<Option<ProjectData>> {
-        let node = self.node.read().await;
-        let state = node.get_state().await;
-        Ok(state.get_project_by_slug(slug))
+        Ok(state.get_project(slug))
     }
 
     async fn create_project(&self, req: CreateProjectRequest) -> Result<ProjectData> {
         let cmd = Command::CreateProject {
             request_id: uuid::Uuid::new_v4().to_string(),
-            id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
-            org_id: req.org_id,
+            org_slug: req.org_slug,
             slug: req.slug,
             name: req.name,
             description: req.description,
@@ -670,10 +656,10 @@ impl ProjectStore for RaftStore {
         }
     }
 
-    async fn delete_project(&self, id: &str) -> Result<()> {
+    async fn delete_project(&self, slug: &str) -> Result<()> {
         let cmd = Command::DeleteProject {
             request_id: uuid::Uuid::new_v4().to_string(),
-            id: id.to_string(),
+            slug: slug.to_string(),
         };
 
         match self.write_command(cmd).await? {
@@ -689,12 +675,12 @@ impl ProjectStore for RaftStore {
 impl VolumeStore for RaftStore {
     async fn list_volumes(
         &self,
-        project_id: Option<&str>,
+        project_slug: Option<&str>,
         node_id: Option<&str>,
     ) -> Result<Vec<VolumeData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_volumes(project_id, node_id))
+        Ok(state.list_volumes(project_slug, node_id))
     }
 
     async fn get_volume(&self, id: &str) -> Result<Option<VolumeData>> {
@@ -708,7 +694,7 @@ impl VolumeStore for RaftStore {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
-            project_id: req.project_id,
+            project_slug: req.project_slug,
             node_id: req.node_id,
             name: req.name,
             size_bytes: req.size_bytes,
@@ -786,10 +772,10 @@ impl TemplateStore for RaftStore {
         Ok(state.list_templates(node_id))
     }
 
-    async fn list_templates_by_project(&self, project_id: &str) -> Result<Vec<TemplateData>> {
+    async fn list_templates_by_project(&self, project_slug: &str) -> Result<Vec<TemplateData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        Ok(state.list_templates_by_project(project_id))
+        Ok(state.list_templates_by_project(project_slug))
     }
 
     async fn get_template(&self, id: &str) -> Result<Option<TemplateData>> {
@@ -803,7 +789,7 @@ impl TemplateStore for RaftStore {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
-            project_id: req.project_id,
+            project_slug: req.project_slug,
             node_id: req.node_id,
             name: req.name,
             size_bytes: req.size_bytes,
@@ -847,11 +833,11 @@ impl TemplateStore for RaftStore {
 impl SecurityGroupStore for RaftStore {
     async fn list_security_groups(
         &self,
-        project_id: Option<&str>,
+        project_slug: Option<&str>,
     ) -> Result<Vec<crate::command::SecurityGroupData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;
-        match project_id {
+        match project_slug {
             Some(pid) => Ok(state.list_security_groups_by_project(pid)),
             None => Ok(state.list_security_groups()),
         }
@@ -874,7 +860,7 @@ impl SecurityGroupStore for RaftStore {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
-            project_id: req.project_id,
+            project_slug: req.project_slug,
             name: req.name,
             description: req.description,
         };

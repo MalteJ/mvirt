@@ -1,7 +1,7 @@
+/** Project — the slug is the primary key (the "namespace name" per ADR-0004). */
 export interface Project {
-  id: string
-  orgId: string
   slug: string
+  orgSlug: string
   name: string
   description?: string
   createdAt: string

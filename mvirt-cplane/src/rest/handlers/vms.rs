@@ -20,7 +20,7 @@ pub struct CreateVmRequest {
     /// VM name
     pub name: String,
     /// Project ID
-    pub project_id: String,
+    pub project_slug: String,
     /// Optional: require specific node (by ID or name)
     pub node_selector: Option<String>,
     /// CPU cores
@@ -61,7 +61,7 @@ pub struct UpdateVmStatusRequestBody {
 #[derive(Serialize, ToSchema)]
 pub struct VmSpecResponse {
     pub name: String,
-    pub project_id: String,
+    pub project_slug: String,
     pub node_selector: Option<String>,
     pub cpu_cores: u32,
     pub memory_mb: u64,
@@ -75,7 +75,7 @@ impl From<VmSpec> for VmSpecResponse {
     fn from(spec: VmSpec) -> Self {
         Self {
             name: spec.name,
-            project_id: spec.project_id,
+            project_slug: spec.project_slug,
             node_selector: spec.node_selector,
             cpu_cores: spec.cpu_cores,
             memory_mb: spec.memory_mb,
@@ -153,7 +153,7 @@ pub async fn create_vm(
 
     let spec = VmSpec {
         name: req.name.clone(),
-        project_id: req.project_id,
+        project_slug: req.project_slug,
         node_selector: req.node_selector,
         cpu_cores: req.cpu_cores,
         memory_mb: req.memory_mb,

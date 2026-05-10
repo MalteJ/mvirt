@@ -14,8 +14,8 @@ export const podKeys = {
 export function usePods() {
   const { currentProject } = useProject()
   return useQuery({
-    queryKey: podKeys.list(currentProject?.id),
-    queryFn: () => listPods(currentProject?.id),
+    queryKey: podKeys.list(currentProject?.slug),
+    queryFn: () => listPods(currentProject?.slug),
     refetchInterval: 5000,
     enabled: !!currentProject,
   })

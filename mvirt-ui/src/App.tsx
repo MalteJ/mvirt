@@ -71,7 +71,7 @@ function ProjectRedirect({ path }: { path: string }) {
 
   // Prefer projects within the active Org if one is set.
   const candidates = currentOrg
-    ? projects?.filter((p) => p.orgId === currentOrg.id)
+    ? projects?.filter((p) => p.orgSlug === currentOrg.slug)
     : projects
 
   if (candidates && candidates.length > 0) {
@@ -90,7 +90,7 @@ function LegacyProjectRedirect() {
   if (!projectId || !projects) {
     return null
   }
-  const project = projects.find((p) => p.id === projectId || p.slug === projectId)
+  const project = projects.find((p) => p.slug === projectId || p.slug === projectId)
   if (!project) {
     return <Navigate to="/projects" replace />
   }

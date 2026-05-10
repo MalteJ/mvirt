@@ -91,7 +91,7 @@ pub async fn create_nic(
     Json(req): Json<CreateNicRequest>,
 ) -> Result<Json<Nic>, ApiError> {
     let store_req = StoreCreateNicRequest {
-        project_id: String::new(), // Legacy handler — no project_id
+        project_slug: String::new(), // Legacy handler — no project_slug
         network_id: req.network_id,
         name: req.name,
         mac_address: req.mac_address,

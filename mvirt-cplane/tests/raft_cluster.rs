@@ -264,7 +264,7 @@ async fn test_log_replication() {
     let network_id = uuid::Uuid::new_v4().to_string();
     let response = leader
         .write(Command::CreateNetwork {
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             request_id: "req-1".to_string(),
             id: network_id.clone(),
             timestamp: Utc::now().to_rfc3339(),
@@ -359,7 +359,7 @@ async fn test_read_from_follower() {
     let network_id = uuid::Uuid::new_v4().to_string();
     let response = leader
         .write(Command::CreateNetwork {
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             request_id: "req-follower-read".to_string(),
             id: network_id.clone(),
             timestamp: Utc::now().to_rfc3339(),
@@ -429,7 +429,7 @@ async fn test_majority_write_during_minority_failure() {
     let before_id = uuid::Uuid::new_v4().to_string();
     let response = leader
         .write(Command::CreateNetwork {
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             request_id: "req-before-failure".to_string(),
             id: before_id.clone(),
             timestamp: Utc::now().to_rfc3339(),
@@ -519,7 +519,7 @@ async fn test_majority_write_during_minority_failure() {
     let during_id = uuid::Uuid::new_v4().to_string();
     let response = leader
         .write(Command::CreateNetwork {
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             request_id: "req-during-failure".to_string(),
             id: during_id.clone(),
             timestamp: Utc::now().to_rfc3339(),
@@ -598,7 +598,7 @@ async fn test_write_or_forward() {
     let network_id = uuid::Uuid::new_v4().to_string();
     let response = follower
         .write_or_forward(Command::CreateNetwork {
-            project_id: "test-project".to_string(),
+            project_slug: "test-project".to_string(),
             request_id: "req-forwarded".to_string(),
             id: network_id.clone(),
             timestamp: Utc::now().to_rfc3339(),

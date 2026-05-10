@@ -107,7 +107,7 @@ pub async fn create_network(
     Json(req): Json<CreateNetworkRequest>,
 ) -> Result<Json<Network>, ApiError> {
     let store_req = StoreCreateNetworkRequest {
-        project_id: String::new(), // Legacy handler — no project_id
+        project_slug: String::new(), // Legacy handler — no project_slug
         name: req.name.clone(),
         ipv4_enabled: req.ipv4_enabled.unwrap_or(true),
         ipv4_prefix: req.ipv4_prefix,

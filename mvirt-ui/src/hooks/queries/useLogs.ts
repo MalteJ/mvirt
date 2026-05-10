@@ -13,7 +13,7 @@ export function useLogs(params: Omit<LogQueryRequest, 'projectId'> = {}) {
   const { currentProject } = useProject()
   const fullParams: LogQueryRequest = {
     ...params,
-    projectId: currentProject?.id,
+    projectId: currentProject?.slug,
   }
   return useQuery({
     queryKey: logKeys.query(fullParams),

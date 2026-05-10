@@ -115,7 +115,7 @@ export function ProjectsPage() {
               {row.original.slug}
             </div>
           </div>
-          {currentProject?.id === row.original.id && (
+          {currentProject?.slug === row.original.slug && (
             <Badge variant="running">Active</Badge>
           )}
         </div>
@@ -125,10 +125,10 @@ export function ProjectsPage() {
       id: 'org',
       header: 'Org',
       cell: ({ row }) => {
-        const org = orgs?.find((o) => o.id === row.original.orgId)
+        const org = orgs?.find((o) => o.slug === row.original.orgSlug)
         return (
           <span className="text-sm font-mono text-muted-foreground">
-            {org?.slug ?? row.original.orgId}
+            {org?.slug ?? row.original.orgSlug}
           </span>
         )
       },
@@ -166,7 +166,7 @@ export function ProjectsPage() {
                 setCurrentProject(row.original)
                 navigate(`/projects/${row.original.slug}/vms`)
               }}
-              disabled={currentProject?.id === row.original.id}
+              disabled={currentProject?.slug === row.original.slug}
             >
               <FolderOpen className="mr-2 h-4 w-4" />
               Set as Active
@@ -179,10 +179,10 @@ export function ProjectsPage() {
                     `Delete project "${row.original.name}"? This will also delete all resources in this project.`,
                   )
                 ) {
-                  deleteProject.mutate(row.original.id)
+                  deleteProject.mutate(row.original.slug)
                 }
               }}
-              disabled={currentProject?.id === row.original.id}
+              disabled={currentProject?.slug === row.original.slug}
             >
               <Trash2 className="mr-2 h-4 w-4" />
               Delete
@@ -227,7 +227,7 @@ export function ProjectsPage() {
                   </SelectTrigger>
                   <SelectContent>
                     {orgs?.map((o) => (
-                      <SelectItem key={o.id} value={o.slug}>
+                      <SelectItem key={o.slug} value={o.slug}>
                         {o.name} <span className="text-muted-foreground">({o.slug})</span>
                       </SelectItem>
                     ))}

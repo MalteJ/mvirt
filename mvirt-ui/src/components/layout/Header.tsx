@@ -1,6 +1,5 @@
-import { useEffect } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
-import { Bell, Moon, Sun, LogOut, User, Check, AlertTriangle, Info, AlertCircle, CheckCircle, ChevronDown, FolderKanban, Settings } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Bell, Moon, Sun, LogOut, User, Check, AlertTriangle, Info, AlertCircle, CheckCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -11,10 +10,10 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useTheme } from '@/hooks/useTheme'
 import { useAuth } from '@/hooks/useAuth'
-import { useProject } from '@/hooks/useProject'
-import { useNotifications, useMarkAllNotificationsRead, useProjects } from '@/hooks/queries'
+import { useNotifications, useMarkAllNotificationsRead } from '@/hooks/queries'
 import { NotificationType } from '@/types'
 import { cn } from '@/lib/utils'
+import { OrgProjectSwitcher } from './OrgProjectSwitcher'
 
 const notificationIcons: Record<NotificationType, typeof Info> = {
   [NotificationType.INFO]: Info,
@@ -34,17 +33,8 @@ export function Header() {
   const navigate = useNavigate()
   const { theme, toggleTheme } = useTheme()
   const { user, logout } = useAuth()
-  const { currentProject, setCurrentProject } = useProject()
-  const { data: projects } = useProjects()
   const { data: notifications } = useNotifications()
   const markAllRead = useMarkAllNotificationsRead()
-
-  // Auto-select first project if none selected
-  useEffect(() => {
-    if (!currentProject && projects && projects.length > 0) {
-      setCurrentProject(projects[0])
-    }
-  }, [currentProject, projects, setCurrentProject])
 
   const unreadCount = notifications?.filter((n) => !n.read).length ?? 0
 
@@ -68,48 +58,7 @@ export function Header() {
 
   return (
     <header className="flex h-14 items-center justify-between border-b border-border bg-card/80 backdrop-blur-xl px-6">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" className="gap-2 hover:bg-purple/20 hover:text-purple-light">
-            <FolderKanban className="h-4 w-4" />
-            <span className="font-medium">{currentProject?.name ?? 'Select Project'}</span>
-            <ChevronDown className="h-4 w-4 opacity-50" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-56">
-          <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
-            Projects
-          </div>
-          <DropdownMenuSeparator />
-          {projects?.map((project) => (
-            <DropdownMenuItem
-              key={project.id}
-              onClick={() => setCurrentProject(project)}
-              className={cn(
-                currentProject?.id === project.id && 'bg-purple/20 text-purple-light'
-              )}
-            >
-              <FolderKanban className="mr-2 h-4 w-4" />
-              <div className="flex-1">
-                <div>{project.name}</div>
-                {project.description && (
-                  <div className="text-xs text-muted-foreground">{project.description}</div>
-                )}
-              </div>
-              {currentProject?.id === project.id && (
-                <Check className="h-4 w-4 ml-2" />
-              )}
-            </DropdownMenuItem>
-          ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem asChild>
-            <Link to="/projects" className="cursor-pointer">
-              <Settings className="mr-2 h-4 w-4" />
-              Manage Projects
-            </Link>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <OrgProjectSwitcher />
 
       <div className="flex items-center gap-2">
         <DropdownMenu>
