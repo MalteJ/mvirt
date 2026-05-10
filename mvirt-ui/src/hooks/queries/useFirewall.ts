@@ -4,8 +4,10 @@ import {
   getSecurityGroup,
   createSecurityGroup,
   deleteSecurityGroup,
+  updateSecurityGroup,
   createSecurityGroupRule,
   deleteSecurityGroupRule,
+  updateSecurityGroupRule,
 } from '@/api/endpoints'
 import type { CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest } from '@/types'
 import { RuleDirection, RuleProtocol } from '@/types'
@@ -86,6 +88,42 @@ export function useDeleteSecurityGroupRule(projectId: string) {
   return useMutation({
     mutationFn: ({ securityGroupId, ruleId }: { securityGroupId: string; ruleId: string }) =>
       deleteSecurityGroupRule(securityGroupId, ruleId),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: firewallKeys.securityGroup(variables.securityGroupId) })
+      queryClient.invalidateQueries({ queryKey: firewallKeys.securityGroupList(projectId) })
+    },
+  })
+}
+
+export function useUpdateSecurityGroup(projectId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      id,
+      patch,
+    }: {
+      id: string
+      patch: { name?: string; description?: string | null }
+    }) => updateSecurityGroup(id, patch),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: firewallKeys.securityGroup(variables.id) })
+      queryClient.invalidateQueries({ queryKey: firewallKeys.securityGroupList(projectId) })
+    },
+  })
+}
+
+export function useUpdateSecurityGroupRule(projectId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      securityGroupId,
+      ruleId,
+      patch,
+    }: {
+      securityGroupId: string
+      ruleId: string
+      patch: { description?: string | null }
+    }) => updateSecurityGroupRule(securityGroupId, ruleId, patch),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: firewallKeys.securityGroup(variables.securityGroupId) })
       queryClient.invalidateQueries({ queryKey: firewallKeys.securityGroupList(projectId) })

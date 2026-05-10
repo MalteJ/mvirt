@@ -487,6 +487,13 @@ pub trait SecurityGroupStore: Send + Sync {
         req: CreateSecurityGroupRequest,
     ) -> Result<SecurityGroupData>;
 
+    /// Patch a security group's mutable fields. Currently name and description.
+    async fn update_security_group(
+        &self,
+        id: &str,
+        req: UpdateSecurityGroupRequest,
+    ) -> Result<SecurityGroupData>;
+
     /// Delete a security group.
     async fn delete_security_group(&self, id: &str) -> Result<()>;
 
@@ -503,6 +510,31 @@ pub trait SecurityGroupStore: Send + Sync {
         security_group_id: &str,
         rule_id: &str,
     ) -> Result<SecurityGroupData>;
+
+    /// Update a rule's mutable fields. Currently only the description is
+    /// editable; everything else is immutable (delete + recreate to change).
+    async fn update_security_group_rule(
+        &self,
+        security_group_id: &str,
+        rule_id: &str,
+        req: UpdateSecurityGroupRuleRequest,
+    ) -> Result<SecurityGroupData>;
+}
+
+/// Request to patch a security group's mutable fields.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateSecurityGroupRequest {
+    pub name: Option<String>,
+    /// `Some(value)` writes (`Some(None)` clears); `None` leaves untouched.
+    pub description: Option<Option<String>>,
+}
+
+/// Request to patch a single rule in a security group.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateSecurityGroupRuleRequest {
+    /// `Some(value)` writes that value (`Some(None)` clears the description),
+    /// `None` leaves it untouched.
+    pub description: Option<Option<String>>,
 }
 
 // =============================================================================

@@ -1745,6 +1745,35 @@ impl StateMachine<Command, Response> for ApiState {
                 )
             }
 
+            Command::UpdateSecurityGroup {
+                timestamp,
+                id,
+                name,
+                description,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut sg) = txn_get::<SecurityGroupData>(&txn, SECURITY_GROUPS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Security group '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                if let Some(n) = name {
+                    sg.name = n;
+                }
+                if let Some(d) = description {
+                    sg.description = d;
+                }
+                sg.updated_at = timestamp;
+                txn_put(&txn, SECURITY_GROUPS, &id, &sg);
+                txn.commit().expect("commit");
+                (Response::SecurityGroup(sg), vec![])
+            }
+
             Command::DeleteSecurityGroup { id, .. } => {
                 let txn = self.db.begin_write().expect("begin");
                 let nic_refs = txn_list::<NicData>(&txn, NICS)
@@ -1849,6 +1878,43 @@ impl StateMachine<Command, Response> for ApiState {
                         vec![],
                     );
                 }
+                txn_put(&txn, SECURITY_GROUPS, &security_group_id, &sg);
+                txn.commit().expect("commit");
+                (Response::SecurityGroup(sg), vec![])
+            }
+
+            Command::UpdateSecurityGroupRule {
+                timestamp,
+                security_group_id,
+                rule_id,
+                description,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut sg) =
+                    txn_get::<SecurityGroupData>(&txn, SECURITY_GROUPS, &security_group_id)
+                else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Security group '{}' not found", security_group_id),
+                        },
+                        vec![],
+                    );
+                };
+                let Some(rule) = sg.rules.iter_mut().find(|r| r.id == rule_id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Rule '{}' not found", rule_id),
+                        },
+                        vec![],
+                    );
+                };
+                if let Some(d) = description {
+                    rule.description = d;
+                }
+                sg.updated_at = timestamp;
                 txn_put(&txn, SECURITY_GROUPS, &security_group_id, &sg);
                 txn.commit().expect("commit");
                 (Response::SecurityGroup(sg), vec![])

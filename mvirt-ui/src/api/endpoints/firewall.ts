@@ -1,4 +1,4 @@
-import { get, post, del } from '../client'
+import { get, post, patch, del } from '../client'
 import type {
   SecurityGroup,
   CreateSecurityGroupRequest,
@@ -29,4 +29,24 @@ export async function createSecurityGroupRule(request: CreateSecurityGroupRuleRe
 
 export async function deleteSecurityGroupRule(securityGroupId: string, ruleId: string): Promise<void> {
   await del<void>(`/security-groups/${securityGroupId}/rules/${ruleId}`)
+}
+
+/** Patch a Security Group's mutable fields (name, description). */
+export async function updateSecurityGroup(
+  id: string,
+  patchBody: { name?: string; description?: string | null },
+): Promise<SecurityGroup> {
+  return patch<SecurityGroup>(`/security-groups/${id}`, patchBody)
+}
+
+/** Patch a single rule in a Security Group. Currently only description is mutable. */
+export async function updateSecurityGroupRule(
+  securityGroupId: string,
+  ruleId: string,
+  patchBody: { description?: string | null },
+): Promise<SecurityGroup> {
+  return patch<SecurityGroup>(
+    `/security-groups/${securityGroupId}/rules/${ruleId}`,
+    patchBody,
+  )
 }

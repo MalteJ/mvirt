@@ -15,8 +15,11 @@ import {
   useSecurityGroup,
   useCreateSecurityGroupRule,
   useDeleteSecurityGroupRule,
+  useUpdateSecurityGroup,
+  useUpdateSecurityGroupRule,
 } from '@/hooks/queries'
 import { DataTable } from '@/components/data-display/DataTable'
+import { InlineEditableText } from '@/components/data-display/InlineEditableText'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -58,6 +61,8 @@ export function SecurityGroupDetailPage() {
   const { data: securityGroup, isLoading, error } = useSecurityGroup(id || '')
   const createRule = useCreateSecurityGroupRule(projectId)
   const deleteRule = useDeleteSecurityGroupRule(projectId)
+  const updateSg = useUpdateSecurityGroup(projectId)
+  const updateRule = useUpdateSecurityGroupRule(projectId)
 
   const [ruleDialogOpen, setRuleDialogOpen] = useState(false)
   const [deleteRuleId, setDeleteRuleId] = useState<string | null>(null)
@@ -178,9 +183,20 @@ export function SecurityGroupDetailPage() {
       accessorKey: 'description',
       header: 'Description',
       cell: ({ row }) => (
-        <span className="text-muted-foreground">
-          {row.original.description || '-'}
-        </span>
+        <InlineEditableText
+          value={row.original.description}
+          placeholder="Click to add description"
+          ariaLabel={`Edit description for rule ${row.original.id}`}
+          onSave={async (value) => {
+            if (!id) return
+            await updateRule.mutateAsync({
+              securityGroupId: id,
+              ruleId: row.original.id,
+              // Empty input clears the description (sent as null on the wire).
+              patch: { description: value === '' ? null : value },
+            })
+          }}
+        />
       ),
     },
     {
@@ -208,9 +224,19 @@ export function SecurityGroupDetailPage() {
         </div>
         <div className="flex-1">
           <h2 className="text-2xl font-bold tracking-tight">{securityGroup.name}</h2>
-          <p className="text-muted-foreground">
-            {securityGroup.description || 'No description'}
-          </p>
+          <div className="text-sm">
+            <InlineEditableText
+              value={securityGroup.description}
+              placeholder="Click to add description"
+              ariaLabel="Edit security group description"
+              onSave={async (value) => {
+                await updateSg.mutateAsync({
+                  id: securityGroup.id,
+                  patch: { description: value === '' ? null : value },
+                })
+              }}
+            />
+          </div>
         </div>
         <div className="flex items-center gap-4 text-sm text-muted-foreground">
           <span>{ingressCount} inbound</span>

@@ -842,6 +842,34 @@ pub struct UiCreateSecurityGroupRequest {
     pub description: Option<String>,
 }
 
+/// Request to patch a security group's mutable fields.
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiUpdateSecurityGroupRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `description` follows the same `Option<Option<_>>` shape as elsewhere:
+    /// key absent → untouched; key present → set (null clears).
+    #[serde(default)]
+    pub description: Option<Option<String>>,
+}
+
+/// Request to update a single rule's mutable fields. Currently only the
+/// description is mutable. The wire shape always replaces description —
+/// send the new string (or null to clear). To keep the field untouched,
+/// don't call this endpoint; create/delete the rule instead for the
+/// non-editable parts.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiUpdateSecurityGroupRuleRequest {
+    /// The double-Option lets the cplane patch carry "set" vs "untouched".
+    /// On the wire we collapse this to "always set" — the inner Option is
+    /// the value (null = clear). The handler maps to the internal patch
+    /// shape with `Some(req.description)`.
+    #[serde(default)]
+    pub description: Option<Option<String>>,
+}
+
 /// Request to create a security group rule
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]

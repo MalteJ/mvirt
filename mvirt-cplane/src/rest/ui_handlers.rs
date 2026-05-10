@@ -1061,6 +1061,38 @@ pub async fn create_security_group(
     Ok(Json(UiSecurityGroup::from(sg)))
 }
 
+/// Update a security group's mutable fields.
+#[utoipa::path(
+    patch,
+    path = "/v1/security-groups/{id}",
+    params(("id" = String, Path)),
+    request_body = UiUpdateSecurityGroupRequest,
+    responses(
+        (status = 200, body = UiSecurityGroup),
+        (status = 404, body = ApiError)
+    ),
+    tag = "security-groups"
+)]
+pub async fn update_security_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UiUpdateSecurityGroupRequest>,
+) -> Result<Json<UiSecurityGroup>, ApiError> {
+    use crate::store::UpdateSecurityGroupRequest;
+
+    let sg = state
+        .store
+        .update_security_group(
+            &id,
+            UpdateSecurityGroupRequest {
+                name: req.name,
+                description: req.description,
+            },
+        )
+        .await?;
+    Ok(Json(UiSecurityGroup::from(sg)))
+}
+
 /// Delete a security group
 #[utoipa::path(delete, path = "/v1/security-groups/{id}", params(("id" = String, Path)), responses((status = 204), (status = 404, body = ApiError), (status = 409, body = ApiError)), tag = "security-groups")]
 pub async fn delete_security_group(
@@ -1117,6 +1149,41 @@ pub async fn delete_security_group_rule(
     state.audit.security_group_rule_deleted(&sg_id, &rule_id);
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Update a rule's mutable fields (currently description only).
+#[utoipa::path(
+    patch,
+    path = "/v1/security-groups/{sg_id}/rules/{rule_id}",
+    params(("sg_id" = String, Path), ("rule_id" = String, Path)),
+    request_body = UiUpdateSecurityGroupRuleRequest,
+    responses(
+        (status = 200, body = UiSecurityGroup),
+        (status = 404, body = ApiError)
+    ),
+    tag = "security-groups"
+)]
+pub async fn update_security_group_rule(
+    State(state): State<Arc<AppState>>,
+    Path((sg_id, rule_id)): Path<(String, String)>,
+    Json(req): Json<UiUpdateSecurityGroupRuleRequest>,
+) -> Result<Json<UiSecurityGroup>, ApiError> {
+    use crate::store::UpdateSecurityGroupRuleRequest;
+
+    // The wire shape uses a sentinel: send `description: null` to clear the
+    // field, omit the key to leave it untouched. Serde turns "key present
+    // with null" into `Some(None)` thanks to `default + skip_if_none`.
+    let sg = state
+        .store
+        .update_security_group_rule(
+            &sg_id,
+            &rule_id,
+            UpdateSecurityGroupRuleRequest {
+                description: req.description,
+            },
+        )
+        .await?;
+    Ok(Json(UiSecurityGroup::from(sg)))
 }
 
 // =============================================================================

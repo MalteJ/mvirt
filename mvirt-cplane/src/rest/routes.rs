@@ -93,8 +93,10 @@ use crate::auth::{JwtValidator, require_auth};
         ui_handlers::get_security_group,
         ui_handlers::create_security_group,
         ui_handlers::delete_security_group,
+        ui_handlers::update_security_group,
         ui_handlers::create_security_group_rule,
         ui_handlers::delete_security_group_rule,
+        ui_handlers::update_security_group_rule,
         // Pods (stub)
         ui_handlers::list_pods,
         ui_handlers::get_pod,
@@ -168,7 +170,9 @@ use crate::auth::{JwtValidator, require_auth};
         ui_types::UiRuleDirection,
         ui_types::UiRuleProtocol,
         ui_types::UiCreateSecurityGroupRequest,
+        ui_types::UiUpdateSecurityGroupRequest,
         ui_types::UiCreateSecurityGroupRuleRequest,
+        ui_types::UiUpdateSecurityGroupRuleRequest,
         ui_types::SecurityGroupListResponse,
         // UI schemas - Pods
         ui_types::UiPod,
@@ -286,7 +290,7 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
         )
         .route(
             "/security-groups/{id}",
-            delete(ui_handlers::delete_security_group),
+            delete(ui_handlers::delete_security_group).patch(ui_handlers::update_security_group),
         )
         .route(
             "/security-groups/{id}/rules",
@@ -294,7 +298,8 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
         )
         .route(
             "/security-groups/{sg_id}/rules/{rule_id}",
-            delete(ui_handlers::delete_security_group_rule),
+            delete(ui_handlers::delete_security_group_rule)
+                .patch(ui_handlers::update_security_group_rule),
         );
 
     // Project-scoped routes: /v1/projects/{project_slug}/...

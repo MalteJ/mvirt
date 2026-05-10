@@ -245,6 +245,17 @@ pub enum Command {
         name: String,
         description: Option<String>,
     },
+    /// Patch an existing security group's mutable fields.
+    UpdateSecurityGroup {
+        request_id: String,
+        timestamp: String,
+        id: String,
+        /// `Some(value)` writes the new name; `None` leaves it unchanged.
+        name: Option<String>,
+        /// `Some(value)` writes the new description (`Some(None)` clears it);
+        /// `None` leaves it unchanged.
+        description: Option<Option<String>>,
+    },
     DeleteSecurityGroup {
         request_id: String,
         id: String,
@@ -265,6 +276,17 @@ pub enum Command {
         request_id: String,
         security_group_id: String,
         rule_id: String,
+    },
+    /// Update a single rule's mutable fields. Only `description` is mutable
+    /// today; protocol/ports/cidr/direction are immutable (use delete +
+    /// create for those). Each `Option` distinguishes "no change" from
+    /// "set to this value (including null to clear)".
+    UpdateSecurityGroupRule {
+        request_id: String,
+        timestamp: String,
+        security_group_id: String,
+        rule_id: String,
+        description: Option<Option<String>>,
     },
 }
 
@@ -300,9 +322,11 @@ impl Command {
             Command::CreateTemplate { request_id, .. } => request_id,
             Command::UpdateTemplateStatus { request_id, .. } => request_id,
             Command::CreateSecurityGroup { request_id, .. } => request_id,
+            Command::UpdateSecurityGroup { request_id, .. } => request_id,
             Command::DeleteSecurityGroup { request_id, .. } => request_id,
             Command::CreateSecurityGroupRule { request_id, .. } => request_id,
             Command::DeleteSecurityGroupRule { request_id, .. } => request_id,
+            Command::UpdateSecurityGroupRule { request_id, .. } => request_id,
         }
     }
 }

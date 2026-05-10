@@ -23,7 +23,8 @@ use super::traits::{
     DeleteNetworkResult, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore, OrgStore,
     ProjectStore, RegisterNodeRequest, ResizeVolumeRequest, SecurityGroupStore, TemplateStore,
     UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateOrgRequest,
-    UpdateTemplateStatusRequest, UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore, VolumeStore,
+    UpdateSecurityGroupRequest, UpdateSecurityGroupRuleRequest, UpdateTemplateStatusRequest,
+    UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore, VolumeStore,
 };
 
 /// RaftStore wraps a RaftNode and implements the DataStore trait.
@@ -877,6 +878,28 @@ impl SecurityGroupStore for RaftStore {
         }
     }
 
+    async fn update_security_group(
+        &self,
+        id: &str,
+        req: UpdateSecurityGroupRequest,
+    ) -> Result<crate::command::SecurityGroupData> {
+        let cmd = Command::UpdateSecurityGroup {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            id: id.to_string(),
+            name: req.name,
+            description: req.description,
+        };
+        match self.write_command(cmd).await? {
+            Response::SecurityGroup(sg) => Ok(sg),
+            Response::Error { code, message } => match code {
+                404 => Err(StoreError::NotFound(message)),
+                _ => Err(StoreError::Internal(message)),
+            },
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
     async fn delete_security_group(&self, id: &str) -> Result<()> {
         let cmd = Command::DeleteSecurityGroup {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -936,6 +959,29 @@ impl SecurityGroupStore for RaftStore {
             Response::Error { code, message } => match code {
                 404 => Err(StoreError::NotFound(message)),
                 409 => Err(StoreError::Conflict(message)),
+                _ => Err(StoreError::Internal(message)),
+            },
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn update_security_group_rule(
+        &self,
+        security_group_id: &str,
+        rule_id: &str,
+        req: UpdateSecurityGroupRuleRequest,
+    ) -> Result<crate::command::SecurityGroupData> {
+        let cmd = Command::UpdateSecurityGroupRule {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            security_group_id: security_group_id.to_string(),
+            rule_id: rule_id.to_string(),
+            description: req.description,
+        };
+        match self.write_command(cmd).await? {
+            Response::SecurityGroup(sg) => Ok(sg),
+            Response::Error { code, message } => match code {
+                404 => Err(StoreError::NotFound(message)),
                 _ => Err(StoreError::Internal(message)),
             },
             _ => Err(StoreError::Internal("unexpected response".into())),
