@@ -1,5 +1,6 @@
 export * from './vm'
 export * from './pod'
+export * from './org'
 export * from './project'
 export * from './storage'
 export * from './network'

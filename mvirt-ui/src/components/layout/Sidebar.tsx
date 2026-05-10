@@ -7,9 +7,11 @@ import {
   Flame,
   ScrollText,
   Boxes,
+  Building2,
+  FolderKanban,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useProjects } from '@/hooks/queries'
+import { useProjects, useApiHealth } from '@/hooks/queries'
 import { useProject } from '@/hooks/useProject'
 
 const navigation = [
@@ -22,14 +24,32 @@ const navigation = [
 ]
 
 const adminNavigation = [
+  { name: 'Organizations', href: '/orgs', icon: Building2 },
+  { name: 'Projects', href: '/projects', icon: FolderKanban },
   { name: 'Cluster', href: '/cluster', icon: Boxes },
 ]
 
 export function Sidebar() {
   const { data: projects } = useProjects()
   const { currentProject } = useProject()
+  const apiHealth = useApiHealth()
   const hasProjects = projects && projects.length > 0
   const projectId = currentProject?.id
+
+  const apiStatus: 'connected' | 'connecting' | 'disconnected' =
+    apiHealth.isSuccess ? 'connected'
+    : apiHealth.isError ? 'disconnected'
+    : 'connecting'
+
+  const dotClass =
+    apiStatus === 'connected' ? 'bg-state-running animate-pulse'
+    : apiStatus === 'disconnected' ? 'bg-state-error'
+    : 'bg-state-starting animate-pulse'
+
+  const statusLabel =
+    apiStatus === 'connected' ? 'Connected'
+    : apiStatus === 'disconnected' ? 'Disconnected'
+    : 'Connecting…'
 
   return (
     <div className="relative z-10 flex w-64 flex-col border-r border-border bg-card/80 backdrop-blur-xl">
@@ -79,8 +99,8 @@ export function Sidebar() {
       </div>
       <div className="border-t border-border p-4">
         <div className="flex items-center gap-2 text-xs text-foreground/60">
-          <div className="h-2 w-2 rounded-full bg-state-running animate-pulse" />
-          <span>Connected to localhost</span>
+          <div className={cn('h-2 w-2 rounded-full', dotClass)} />
+          <span>{statusLabel}</span>
         </div>
       </div>
     </div>

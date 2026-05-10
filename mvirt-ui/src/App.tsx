@@ -2,6 +2,7 @@ import { Routes, Route, Navigate, useParams } from 'react-router-dom'
 import { Layout } from './components/layout/Layout'
 import { LoginPage } from './features/auth/LoginPage'
 import { TermsPage } from './features/auth/TermsPage'
+import { AuthCallback } from './features/auth/AuthCallback'
 import { DashboardPage } from './features/dashboard/DashboardPage'
 import { ClusterPage } from './features/cluster/ClusterPage'
 import { NodeDetailPage } from './features/cluster/NodeDetailPage'
@@ -13,14 +14,22 @@ import { StoragePage } from './features/storage/StoragePage'
 import { NetworkPage } from './features/network/NetworkPage'
 import { FirewallPage, SecurityGroupDetailPage } from './features/firewall'
 import { LogsPage } from './features/logs/LogsPage'
-import { ProjectsPage } from './features/admin'
+import { OrgsPage, ProjectsPage } from './features/admin'
 import { useAuth } from './hooks/useAuth'
 import { useProject } from './hooks/useProject'
 import { useProjects } from './hooks/queries'
 import { useEffect } from 'react'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated } = useAuth()
+  const { isAuthenticated, isLoading } = useAuth()
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background text-muted-foreground">
+        Loading…
+      </div>
+    )
+  }
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />
@@ -73,6 +82,7 @@ function App() {
         path="/login"
         element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <LoginPage />}
       />
+      <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/terms" element={<TermsPage />} />
       <Route
         path="/*"
@@ -84,6 +94,7 @@ function App() {
                 <Route path="/dashboard" element={<ProjectRedirect path="/dashboard" />} />
                 <Route path="/cluster" element={<ClusterPage />} />
                 <Route path="/cluster/:id" element={<NodeDetailPage />} />
+                <Route path="/orgs" element={<OrgsPage />} />
                 <Route path="/projects" element={<ProjectsPage />} />
 
                 {/* Project-scoped routes */}

@@ -1,5 +1,5 @@
-import { get, post, del } from '../client'
-import type { Project, ProjectListResponse, CreateProjectRequest } from '@/types'
+import { get, del } from '../client'
+import type { Project, ProjectListResponse } from '@/types'
 
 export async function listProjects(): Promise<Project[]> {
   const response = await get<ProjectListResponse>('/projects')
@@ -10,10 +10,8 @@ export async function getProject(id: string): Promise<Project> {
   return get<Project>(`/projects/${id}`)
 }
 
-export async function createProject(request: CreateProjectRequest): Promise<Project> {
-  return post<Project>('/projects', request)
-}
-
 export async function deleteProject(id: string): Promise<void> {
   await del<void>(`/projects/${id}`)
 }
+
+// Project creation is org-scoped — see api/endpoints/org.ts → createProjectInOrg.

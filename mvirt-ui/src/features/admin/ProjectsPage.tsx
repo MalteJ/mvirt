@@ -2,7 +2,12 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ColumnDef } from '@tanstack/react-table'
 import { MoreHorizontal, Plus, Trash2, FolderOpen } from 'lucide-react'
-import { useProjects, useCreateProject, useDeleteProject } from '@/hooks/queries'
+import {
+  useProjects,
+  useDeleteProject,
+  useOrgs,
+  useCreateProjectInOrg,
+} from '@/hooks/queries'
 import { useProject } from '@/hooks/useProject'
 import { DataTable } from '@/components/data-display/DataTable'
 import { Button } from '@/components/ui/button'
@@ -19,6 +24,13 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -27,49 +39,62 @@ import {
 import { formatDate } from '@/lib/utils'
 import { Project } from '@/types'
 
-// Convert name to a valid project ID (lowercase alphanumeric)
+// Convert a free-text name to a kebab-case slug suitable for the URL
+// identifier. Per ADR-0004, slugs are lowercase letters/digits/hyphens, no
+// leading/trailing hyphen, ≤63 chars.
 function slugify(name: string): string {
   return name
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '')
-    .slice(0, 32)
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 63)
 }
 
 export function ProjectsPage() {
   const navigate = useNavigate()
   const { data: projects, isLoading } = useProjects()
+  const { data: orgs } = useOrgs()
   const { currentProject, setCurrentProject } = useProject()
-  const createProject = useCreateProject()
   const deleteProject = useDeleteProject()
 
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [id, setId] = useState('')
+  const [orgSlug, setOrgSlug] = useState<string>('')
+  const [slug, setSlug] = useState('')
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [idTouched, setIdTouched] = useState(false)
+  const [slugTouched, setSlugTouched] = useState(false)
 
-  // Auto-generate ID from name unless user has manually edited it
+  const createProject = useCreateProjectInOrg(orgSlug)
+
+  // Default to the first Org if none chosen yet.
   useEffect(() => {
-    if (!idTouched) {
-      setId(slugify(name))
+    if (!orgSlug && orgs && orgs.length > 0) {
+      setOrgSlug(orgs[0].slug)
     }
-  }, [name, idTouched])
+  }, [orgSlug, orgs])
+
+  // Auto-generate slug from name unless the user has manually edited it.
+  useEffect(() => {
+    if (!slugTouched) {
+      setSlug(slugify(name))
+    }
+  }, [name, slugTouched])
 
   const handleCreate = () => {
-    if (!id.trim() || !name.trim()) return
+    if (!slug.trim() || !name.trim() || !orgSlug) return
     createProject.mutate(
       {
-        id: id.trim(),
+        slug: slug.trim(),
         name: name.trim(),
         description: description.trim() || undefined,
       },
       {
         onSuccess: (project) => {
           setDialogOpen(false)
-          setId('')
+          setSlug('')
           setName('')
           setDescription('')
-          setIdTouched(false)
+          setSlugTouched(false)
           // Switch to the new project
           setCurrentProject(project)
           navigate(`/p/${project.id}/vms`)
@@ -87,7 +112,7 @@ export function ProjectsPage() {
           <div>
             <div className="font-medium">{row.original.name}</div>
             <div className="text-xs text-muted-foreground font-mono">
-              {row.original.id}
+              {row.original.slug}
             </div>
           </div>
           {currentProject?.id === row.original.id && (
@@ -95,6 +120,18 @@ export function ProjectsPage() {
           )}
         </div>
       ),
+    },
+    {
+      id: 'org',
+      header: 'Org',
+      cell: ({ row }) => {
+        const org = orgs?.find((o) => o.id === row.original.orgId)
+        return (
+          <span className="text-sm font-mono text-muted-foreground">
+            {org?.slug ?? row.original.orgId}
+          </span>
+        )
+      },
     },
     {
       accessorKey: 'description',
@@ -137,7 +174,11 @@ export function ProjectsPage() {
             <DropdownMenuItem
               className="text-destructive"
               onClick={() => {
-                if (confirm(`Delete project "${row.original.name}"? This will also delete all resources in this project.`)) {
+                if (
+                  confirm(
+                    `Delete project "${row.original.name}"? This will also delete all resources in this project.`,
+                  )
+                ) {
                   deleteProject.mutate(row.original.id)
                 }
               }}
@@ -152,7 +193,7 @@ export function ProjectsPage() {
     },
   ]
 
-  const isIdValid = /^[a-z0-9]+$/.test(id) && id.length > 0
+  const isSlugValid = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(slug) && slug.length > 0
 
   return (
     <div className="space-y-6">
@@ -165,7 +206,7 @@ export function ProjectsPage() {
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>
-            <Button>
+            <Button disabled={!orgs || orgs.length === 0}>
               <Plus className="mr-2 h-4 w-4" />
               Create Project
             </Button>
@@ -179,6 +220,21 @@ export function ProjectsPage() {
             </DialogHeader>
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
+                <Label htmlFor="org">Organization</Label>
+                <Select value={orgSlug} onValueChange={setOrgSlug}>
+                  <SelectTrigger id="org">
+                    <SelectValue placeholder="Select an Org" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {orgs?.map((o) => (
+                      <SelectItem key={o.id} value={o.slug}>
+                        {o.name} <span className="text-muted-foreground">({o.slug})</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
                 <Label htmlFor="name">Name</Label>
                 <Input
                   id="name"
@@ -188,19 +244,23 @@ export function ProjectsPage() {
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="id">Project ID</Label>
+                <Label htmlFor="slug">Project Slug</Label>
                 <Input
-                  id="id"
-                  placeholder="myproject"
+                  id="slug"
+                  placeholder="my-project"
                   className="font-mono"
-                  value={id}
+                  value={slug}
                   onChange={(e) => {
-                    setId(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))
-                    setIdTouched(true)
+                    setSlug(
+                      e.target.value
+                        .toLowerCase()
+                        .replace(/[^a-z0-9-]/g, ''),
+                    )
+                    setSlugTouched(true)
                   }}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Unique identifier for URLs. Only lowercase letters and numbers.
+                  URL identifier — kebab-case, platform-wide unique, immutable.
                 </p>
               </div>
               <div className="grid gap-2">
@@ -219,7 +279,12 @@ export function ProjectsPage() {
               </Button>
               <Button
                 onClick={handleCreate}
-                disabled={!name.trim() || !isIdValid || createProject.isPending}
+                disabled={
+                  !name.trim() ||
+                  !isSlugValid ||
+                  !orgSlug ||
+                  createProject.isPending
+                }
               >
                 {createProject.isPending ? 'Creating...' : 'Create'}
               </Button>

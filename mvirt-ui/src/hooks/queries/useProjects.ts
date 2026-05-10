@@ -1,6 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { listProjects, createProject, deleteProject } from '@/api/endpoints'
-import type { CreateProjectRequest } from '@/types'
+import { listProjects, deleteProject } from '@/api/endpoints'
 
 export const projectKeys = {
   all: ['projects'] as const,
@@ -8,20 +7,11 @@ export const projectKeys = {
   list: () => [...projectKeys.lists()] as const,
 }
 
+/** List every Project the caller may see (filtered by membership server-side). */
 export function useProjects() {
   return useQuery({
     queryKey: projectKeys.list(),
     queryFn: listProjects,
-  })
-}
-
-export function useCreateProject() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (request: CreateProjectRequest) => createProject(request),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: projectKeys.all })
-    },
   })
 }
 
@@ -34,3 +24,6 @@ export function useDeleteProject() {
     },
   })
 }
+
+// Project creation is org-scoped: import `useCreateProjectInOrg` from `useOrgs`
+// and pass the parent Org's slug.
