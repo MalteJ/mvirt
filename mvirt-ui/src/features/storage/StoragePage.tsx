@@ -270,7 +270,12 @@ export function StoragePage() {
               </DialogHeader>
 
               {!importJobId ? (
-                <>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    handleImport()
+                  }}
+                >
                   <div className="grid gap-4 py-4">
                     <div className="grid gap-2">
                       <Label>Node</Label>
@@ -311,17 +316,17 @@ export function StoragePage() {
                     </div>
                   </div>
                   <DialogFooter>
-                    <Button variant="outline" onClick={handleCloseImportDialog}>
+                    <Button type="button" variant="outline" onClick={handleCloseImportDialog}>
                       Cancel
                     </Button>
                     <Button
-                      onClick={handleImport}
+                      type="submit"
                       disabled={!importNodeId || !templateName.trim() || !templateUrl.trim() || importTemplate.isPending}
                     >
                       {importTemplate.isPending ? 'Starting...' : 'Import'}
                     </Button>
                   </DialogFooter>
-                </>
+                </form>
               ) : (
                 <div className="py-4 space-y-4">
                   <div className="flex items-center gap-3">
@@ -383,6 +388,12 @@ export function StoragePage() {
               </Button>
             </DialogTrigger>
             <DialogContent>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  handleCreateVolume()
+                }}
+              >
               <DialogHeader>
                 <DialogTitle>Create Volume</DialogTitle>
                 <DialogDescription>
@@ -470,16 +481,17 @@ export function StoragePage() {
                 </div>
               </div>
               <DialogFooter>
-                <Button variant="outline" onClick={() => setVolumeDialogOpen(false)}>
+                <Button type="button" variant="outline" onClick={() => setVolumeDialogOpen(false)}>
                   Cancel
                 </Button>
                 <Button
-                  onClick={handleCreateVolume}
+                  type="submit"
                   disabled={!effectiveNodeId || !volumeName.trim() || !volumeSize || createVolume.isPending}
                 >
                   {createVolume.isPending ? 'Creating...' : 'Create'}
                 </Button>
               </DialogFooter>
+              </form>
             </DialogContent>
           </Dialog>
         </div>

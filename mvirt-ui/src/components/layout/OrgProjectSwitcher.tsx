@@ -89,10 +89,11 @@ export function OrgProjectSwitcher() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-[640px] p-0">
+        {/* Two-column body — fixed max height, each column scrolls independently. */}
         <div className="flex">
           {/* Left 40% — Orgs */}
           <div className="w-2/5 border-r border-border max-h-96 overflow-y-auto">
-            <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-card/40">
+            <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-card/40 sticky top-0">
               Organizations
             </div>
             {orgs && orgs.length > 0 ? (
@@ -126,19 +127,11 @@ export function OrgProjectSwitcher() {
             ) : (
               <div className="px-3 py-4 text-xs text-muted-foreground">No Orgs</div>
             )}
-            <Link
-              to="/orgs"
-              onClick={() => setOpen(false)}
-              className="flex items-center gap-2 border-t border-border px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
-            >
-              <Settings className="h-3 w-3" />
-              Manage Orgs
-            </Link>
           </div>
 
           {/* Right 60% — Projects in focused Org */}
           <div className="w-3/5 max-h-96 overflow-y-auto">
-            <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-card/40">
+            <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-card/40 sticky top-0">
               {focusedOrg ? `Projects in ${focusedOrg.slug}` : 'Projects'}
             </div>
             {focusedOrg && focusedProjects.length > 0 ? (
@@ -173,15 +166,34 @@ export function OrgProjectSwitcher() {
                   : 'Select an Org on the left.'}
               </div>
             )}
-            <Link
-              to="/projects"
-              onClick={() => setOpen(false)}
-              className="flex items-center gap-2 border-t border-border px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
-            >
-              <Plus className="h-3 w-3" />
-              Manage Projects
-            </Link>
           </div>
+        </div>
+
+        {/* Shared bottom action row — stays at the dialog edge regardless of
+            either column's content height. Manage Projects scopes to the
+            currently focused Org. */}
+        <div className="flex border-t border-border bg-card/40">
+          <Link
+            to="/orgs"
+            onClick={() => setOpen(false)}
+            className="flex w-2/5 items-center gap-2 border-r border-border px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
+          >
+            <Settings className="h-3 w-3" />
+            Manage Orgs
+          </Link>
+          <Link
+            to="/projects"
+            onClick={() => {
+              if (focusedOrg) setCurrentOrg(focusedOrg)
+              setOpen(false)
+            }}
+            className="flex w-3/5 items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
+          >
+            <Plus className="h-3 w-3" />
+            {focusedOrg
+              ? `Manage Projects in ${focusedOrg.slug}`
+              : 'Manage Projects'}
+          </Link>
         </div>
       </DropdownMenuContent>
     </DropdownMenu>

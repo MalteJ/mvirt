@@ -9,6 +9,7 @@ import {
   useCreateProjectInOrg,
 } from '@/hooks/queries'
 import { useProject } from '@/hooks/useProject'
+import { useOrg } from '@/hooks/useOrg'
 import { DataTable } from '@/components/data-display/DataTable'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -52,12 +53,15 @@ function slugify(name: string): string {
 
 export function ProjectsPage() {
   const navigate = useNavigate()
-  const { data: projects, isLoading } = useProjects()
+  const { data: allProjects, isLoading } = useProjects()
   const { data: orgs } = useOrgs()
   const { currentProject, setCurrentProject } = useProject()
+  const { currentOrg } = useOrg()
   const deleteProject = useDeleteProject()
 
   const [dialogOpen, setDialogOpen] = useState(false)
+  // The create dialog defaults to the active Org from the switcher; user can
+  // still override per-create if they want.
   const [orgSlug, setOrgSlug] = useState<string>('')
   const [slug, setSlug] = useState('')
   const [name, setName] = useState('')
@@ -66,12 +70,20 @@ export function ProjectsPage() {
 
   const createProject = useCreateProjectInOrg(orgSlug)
 
-  // Default to the first Org if none chosen yet.
+  // Page is scoped to the active Org from the global switcher.
+  // Falls back to all projects only if no Org is active (shouldn't normally happen).
+  const projects = currentOrg
+    ? allProjects?.filter((p) => p.orgSlug === currentOrg.slug)
+    : allProjects
+
+  // Pre-fill the create dialog with the active Org.
   useEffect(() => {
-    if (!orgSlug && orgs && orgs.length > 0) {
+    if (!orgSlug && currentOrg) {
+      setOrgSlug(currentOrg.slug)
+    } else if (!orgSlug && orgs && orgs.length > 0) {
       setOrgSlug(orgs[0].slug)
     }
-  }, [orgSlug, orgs])
+  }, [orgSlug, currentOrg, orgs])
 
   // Auto-generate slug from name unless the user has manually edited it.
   useEffect(() => {
@@ -199,9 +211,18 @@ export function ProjectsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">Projects</h2>
+          <h2 className="text-2xl font-bold tracking-tight">
+            Projects
+            {currentOrg && (
+              <span className="ml-2 font-mono text-base font-normal text-muted-foreground">
+                in {currentOrg.slug}
+              </span>
+            )}
+          </h2>
           <p className="text-muted-foreground">
-            Manage projects to organize your resources
+            {currentOrg
+              ? `Projects scoped to ${currentOrg.name}. Switch Org in the header to view projects elsewhere.`
+              : 'Pick an Org from the header switcher to scope this view.'}
           </p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -212,83 +233,93 @@ export function ProjectsPage() {
             </Button>
           </DialogTrigger>
           <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Create Project</DialogTitle>
-              <DialogDescription>
-                Projects help organize VMs, containers, networks, and storage.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-4 py-4">
-              <div className="grid gap-2">
-                <Label htmlFor="org">Organization</Label>
-                <Select value={orgSlug} onValueChange={setOrgSlug}>
-                  <SelectTrigger id="org">
-                    <SelectValue placeholder="Select an Org" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {orgs?.map((o) => (
-                      <SelectItem key={o.slug} value={o.slug}>
-                        {o.name} <span className="text-muted-foreground">({o.slug})</span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                handleCreate()
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>Create Project</DialogTitle>
+                <DialogDescription>
+                  Projects help organize VMs, containers, networks, and storage.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="org">Organization</Label>
+                  <Select value={orgSlug} onValueChange={setOrgSlug}>
+                    <SelectTrigger id="org">
+                      <SelectValue placeholder="Select an Org" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {orgs?.map((o) => (
+                        <SelectItem key={o.slug} value={o.slug}>
+                          {o.name}{' '}
+                          <span className="text-muted-foreground">({o.slug})</span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="name">Name</Label>
+                  <Input
+                    id="name"
+                    placeholder="My Project"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="slug">Project Slug</Label>
+                  <Input
+                    id="slug"
+                    placeholder="my-project"
+                    className="font-mono"
+                    value={slug}
+                    onChange={(e) => {
+                      setSlug(
+                        e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''),
+                      )
+                      setSlugTouched(true)
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    URL identifier — kebab-case, platform-wide unique, immutable.
+                  </p>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="description">Description (optional)</Label>
+                  <Input
+                    id="description"
+                    placeholder="Project description"
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                  />
+                </div>
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="name">Name</Label>
-                <Input
-                  id="name"
-                  placeholder="My Project"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="slug">Project Slug</Label>
-                <Input
-                  id="slug"
-                  placeholder="my-project"
-                  className="font-mono"
-                  value={slug}
-                  onChange={(e) => {
-                    setSlug(
-                      e.target.value
-                        .toLowerCase()
-                        .replace(/[^a-z0-9-]/g, ''),
-                    )
-                    setSlugTouched(true)
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">
-                  URL identifier — kebab-case, platform-wide unique, immutable.
-                </p>
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="description">Description (optional)</Label>
-                <Input
-                  id="description"
-                  placeholder="Project description"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                />
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setDialogOpen(false)}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleCreate}
-                disabled={
-                  !name.trim() ||
-                  !isSlugValid ||
-                  !orgSlug ||
-                  createProject.isPending
-                }
-              >
-                {createProject.isPending ? 'Creating...' : 'Create'}
-              </Button>
-            </DialogFooter>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={
+                    !name.trim() ||
+                    !isSlugValid ||
+                    !orgSlug ||
+                    createProject.isPending
+                  }
+                >
+                  {createProject.isPending ? 'Creating...' : 'Create'}
+                </Button>
+              </DialogFooter>
+            </form>
           </DialogContent>
         </Dialog>
       </div>

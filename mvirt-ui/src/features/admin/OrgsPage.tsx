@@ -153,55 +153,66 @@ export function OrgsPage() {
             </Button>
           </DialogTrigger>
           <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Create Organization</DialogTitle>
-              <DialogDescription>
-                The Org slug becomes the URL identifier and is immutable.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-4 py-4">
-              <div className="grid gap-2">
-                <Label htmlFor="name">Name</Label>
-                <Input
-                  id="name"
-                  placeholder="Acme Corp"
-                  value={name}
-                  onChange={(e) => handleNameChange(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="slug">Slug</Label>
-                <Input
-                  id="slug"
-                  placeholder="acme"
-                  className="font-mono"
-                  value={slug}
-                  onChange={(e) => {
-                    setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
-                    setSlugTouched(true)
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Kebab-case, platform-wide unique, immutable.
-                </p>
-              </div>
-              {createOrg.error && (
-                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                  {String(createOrg.error)}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                handleCreate()
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>Create Organization</DialogTitle>
+                <DialogDescription>
+                  The Org slug becomes the URL identifier and is immutable.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="name">Name</Label>
+                  <Input
+                    id="name"
+                    placeholder="Acme Corp"
+                    value={name}
+                    onChange={(e) => handleNameChange(e.target.value)}
+                  />
                 </div>
-              )}
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setDialogOpen(false)}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleCreate}
-                disabled={!name.trim() || !isSlugValid || createOrg.isPending}
-              >
-                {createOrg.isPending ? 'Creating...' : 'Create'}
-              </Button>
-            </DialogFooter>
+                <div className="grid gap-2">
+                  <Label htmlFor="slug">Slug</Label>
+                  <Input
+                    id="slug"
+                    placeholder="acme"
+                    className="font-mono"
+                    value={slug}
+                    onChange={(e) => {
+                      setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
+                      setSlugTouched(true)
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Kebab-case, platform-wide unique, immutable.
+                  </p>
+                </div>
+                {createOrg.error && (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    {String(createOrg.error)}
+                  </div>
+                )}
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={!name.trim() || !isSlugValid || createOrg.isPending}
+                >
+                  {createOrg.isPending ? 'Creating...' : 'Create'}
+                </Button>
+              </DialogFooter>
+            </form>
           </DialogContent>
         </Dialog>
       </div>

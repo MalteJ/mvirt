@@ -185,43 +185,54 @@ export function FirewallPage() {
             </Button>
           </DialogTrigger>
           <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Create Security Group</DialogTitle>
-              <DialogDescription>
-                Security groups act as a virtual firewall for your NICs.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-4 py-4">
-              <div className="grid gap-2">
-                <Label htmlFor="sg-name">Name</Label>
-                <Input
-                  id="sg-name"
-                  placeholder="web-servers"
-                  value={sgName}
-                  onChange={(e) => setSgName(e.target.value)}
-                />
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                handleCreateSecurityGroup()
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>Create Security Group</DialogTitle>
+                <DialogDescription>
+                  Security groups act as a virtual firewall for your NICs.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="sg-name">Name</Label>
+                  <Input
+                    id="sg-name"
+                    placeholder="web-servers"
+                    value={sgName}
+                    onChange={(e) => setSgName(e.target.value)}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="sg-description">Description (optional)</Label>
+                  <Input
+                    id="sg-description"
+                    placeholder="Allow HTTP/HTTPS traffic"
+                    value={sgDescription}
+                    onChange={(e) => setSgDescription(e.target.value)}
+                  />
+                </div>
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="sg-description">Description (optional)</Label>
-                <Input
-                  id="sg-description"
-                  placeholder="Allow HTTP/HTTPS traffic"
-                  value={sgDescription}
-                  onChange={(e) => setSgDescription(e.target.value)}
-                />
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setSgDialogOpen(false)}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleCreateSecurityGroup}
-                disabled={!sgName.trim() || createSecurityGroup.isPending}
-              >
-                {createSecurityGroup.isPending ? 'Creating...' : 'Create'}
-              </Button>
-            </DialogFooter>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setSgDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={!sgName.trim() || createSecurityGroup.isPending}
+                >
+                  {createSecurityGroup.isPending ? 'Creating...' : 'Create'}
+                </Button>
+              </DialogFooter>
+            </form>
           </DialogContent>
         </Dialog>
       </div>

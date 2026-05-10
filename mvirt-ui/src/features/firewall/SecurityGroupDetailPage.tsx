@@ -229,6 +229,12 @@ export function SecurityGroupDetailPage() {
             </Button>
           </DialogTrigger>
           <DialogContent>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                handleCreateRule()
+              }}
+            >
             <DialogHeader>
               <DialogTitle>Add Firewall Rule</DialogTitle>
               <DialogDescription>
@@ -329,16 +335,17 @@ export function SecurityGroupDetailPage() {
               </div>
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setRuleDialogOpen(false)}>
+              <Button type="button" variant="outline" onClick={() => setRuleDialogOpen(false)}>
                 Cancel
               </Button>
               <Button
-                onClick={handleCreateRule}
+                type="submit"
                 disabled={createRule.isPending || !ruleCidr.trim()}
               >
                 {createRule.isPending ? 'Adding...' : 'Add Rule'}
               </Button>
             </DialogFooter>
+            </form>
           </DialogContent>
         </Dialog>
       </div>

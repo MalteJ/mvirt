@@ -263,59 +263,70 @@ export function NetworkPage() {
               </Button>
             </DialogTrigger>
             <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Create NIC</DialogTitle>
-                <DialogDescription>
-                  Create a new network interface card.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="grid gap-4 py-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="nic-name">Name</Label>
-                  <Input
-                    id="nic-name"
-                    placeholder="my-nic"
-                    value={nicName}
-                    onChange={(e) => setNicName(e.target.value)}
-                  />
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  handleCreateNic()
+                }}
+              >
+                <DialogHeader>
+                  <DialogTitle>Create NIC</DialogTitle>
+                  <DialogDescription>
+                    Create a new network interface card.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="grid gap-4 py-4">
+                  <div className="grid gap-2">
+                    <Label htmlFor="nic-name">Name</Label>
+                    <Input
+                      id="nic-name"
+                      placeholder="my-nic"
+                      value={nicName}
+                      onChange={(e) => setNicName(e.target.value)}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="nic-network">Network</Label>
+                    <Select value={nicNetworkId} onValueChange={setNicNetworkId}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select a network" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {networks?.map((net) => (
+                          <SelectItem key={net.id} value={net.id}>
+                            {net.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="nic-mac">MAC Address (optional)</Label>
+                    <Input
+                      id="nic-mac"
+                      placeholder="Auto-generated if empty"
+                      className="font-mono"
+                      value={nicMacAddress}
+                      onChange={(e) => setNicMacAddress(e.target.value)}
+                    />
+                  </div>
                 </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="nic-network">Network</Label>
-                  <Select value={nicNetworkId} onValueChange={setNicNetworkId}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select a network" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {networks?.map((net) => (
-                        <SelectItem key={net.id} value={net.id}>
-                          {net.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="nic-mac">MAC Address (optional)</Label>
-                  <Input
-                    id="nic-mac"
-                    placeholder="Auto-generated if empty"
-                    className="font-mono"
-                    value={nicMacAddress}
-                    onChange={(e) => setNicMacAddress(e.target.value)}
-                  />
-                </div>
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setNicDialogOpen(false)}>
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleCreateNic}
-                  disabled={!nicName.trim() || !nicNetworkId || createNic.isPending}
-                >
-                  {createNic.isPending ? 'Creating...' : 'Create'}
-                </Button>
-              </DialogFooter>
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setNicDialogOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="submit"
+                    disabled={!nicName.trim() || !nicNetworkId || createNic.isPending}
+                  >
+                    {createNic.isPending ? 'Creating...' : 'Create'}
+                  </Button>
+                </DialogFooter>
+              </form>
             </DialogContent>
           </Dialog>
 
@@ -327,54 +338,65 @@ export function NetworkPage() {
               </Button>
             </DialogTrigger>
             <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Create Network</DialogTitle>
-                <DialogDescription>
-                  Create a new virtual network for your VMs and containers.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="grid gap-4 py-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="network-name">Name</Label>
-                  <Input
-                    id="network-name"
-                    placeholder="my-network"
-                    value={networkName}
-                    onChange={(e) => setNetworkName(e.target.value)}
-                  />
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  handleCreateNetwork()
+                }}
+              >
+                <DialogHeader>
+                  <DialogTitle>Create Network</DialogTitle>
+                  <DialogDescription>
+                    Create a new virtual network for your VMs and containers.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="grid gap-4 py-4">
+                  <div className="grid gap-2">
+                    <Label htmlFor="network-name">Name</Label>
+                    <Input
+                      id="network-name"
+                      placeholder="my-network"
+                      value={networkName}
+                      onChange={(e) => setNetworkName(e.target.value)}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="ipv4-subnet">IPv4 Subnet (optional)</Label>
+                    <Input
+                      id="ipv4-subnet"
+                      placeholder="10.0.0.0/24"
+                      className="font-mono"
+                      value={ipv4Subnet}
+                      onChange={(e) => setIpv4Subnet(e.target.value)}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="ipv6-prefix">IPv6 Prefix (optional)</Label>
+                    <Input
+                      id="ipv6-prefix"
+                      placeholder="2001:db8::/64"
+                      className="font-mono"
+                      value={ipv6Prefix}
+                      onChange={(e) => setIpv6Prefix(e.target.value)}
+                    />
+                  </div>
                 </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="ipv4-subnet">IPv4 Subnet (optional)</Label>
-                  <Input
-                    id="ipv4-subnet"
-                    placeholder="10.0.0.0/24"
-                    className="font-mono"
-                    value={ipv4Subnet}
-                    onChange={(e) => setIpv4Subnet(e.target.value)}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="ipv6-prefix">IPv6 Prefix (optional)</Label>
-                  <Input
-                    id="ipv6-prefix"
-                    placeholder="2001:db8::/64"
-                    className="font-mono"
-                    value={ipv6Prefix}
-                    onChange={(e) => setIpv6Prefix(e.target.value)}
-                  />
-                </div>
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setNetworkDialogOpen(false)}>
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleCreateNetwork}
-                  disabled={!networkName.trim() || createNetwork.isPending}
-                >
-                  {createNetwork.isPending ? 'Creating...' : 'Create'}
-                </Button>
-              </DialogFooter>
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setNetworkDialogOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="submit"
+                    disabled={!networkName.trim() || createNetwork.isPending}
+                  >
+                    {createNetwork.isPending ? 'Creating...' : 'Create'}
+                  </Button>
+                </DialogFooter>
+              </form>
             </DialogContent>
           </Dialog>
         </div>
