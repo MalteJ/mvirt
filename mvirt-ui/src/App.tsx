@@ -14,6 +14,7 @@ import { NetworkPage } from './features/network/NetworkPage'
 import { FirewallPage, SecurityGroupDetailPage } from './features/firewall'
 import { LogsPage } from './features/logs/LogsPage'
 import { OrgsPage, ProjectsPage } from './features/admin'
+import { WelcomePage } from './features/welcome'
 import { useAuth } from './hooks/useAuth'
 import { useProject } from './hooks/useProject'
 import { useProjects } from './hooks/queries'
@@ -150,7 +151,8 @@ function App() {
             <ProjectScopeSync />
             <Layout>
               <Routes>
-                <Route path="/" element={<Navigate to="/orgs" replace />} />
+                <Route path="/" element={<WelcomePage />} />
+                <Route path="/welcome" element={<WelcomePage />} />
                 <Route path="/dashboard" element={<ProjectRedirect path="/dashboard" />} />
                 <Route path="/cluster" element={<ClusterPage />} />
                 <Route path="/cluster/:id" element={<NodeDetailPage />} />

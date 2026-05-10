@@ -63,6 +63,8 @@ export function Layout({ children }: LayoutProps) {
   // overlay traps the user on a CTA that points at the very page it's
   // hiding.
   const isAdminPage =
+    location.pathname === '/' ||
+    location.pathname === '/welcome' ||
     location.pathname === '/orgs' ||
     location.pathname.startsWith('/orgs/') ||
     location.pathname === '/projects' ||
