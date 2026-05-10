@@ -1179,8 +1179,14 @@ impl StateMachine<Command, Response> for ApiState {
             } => {
                 let txn = self.db.begin_write().expect("begin");
 
-                if let Some(existing) = txn_get::<OrgData>(&txn, ORGS, &slug) {
-                    return (Response::Org(existing), vec![]);
+                if txn_has(&txn, ORGS, &slug) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Org with slug '{}' already exists", slug),
+                        },
+                        vec![],
+                    );
                 }
 
                 let org = OrgData {
@@ -1275,8 +1281,17 @@ impl StateMachine<Command, Response> for ApiState {
             } => {
                 let txn = self.db.begin_write().expect("begin");
 
-                if let Some(existing) = txn_get::<ProjectData>(&txn, PROJECTS, &slug) {
-                    return (Response::Project(existing), vec![]);
+                if txn_has(&txn, PROJECTS, &slug) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!(
+                                "Project with slug '{}' already exists",
+                                slug
+                            ),
+                        },
+                        vec![],
+                    );
                 }
 
                 if !txn_has(&txn, ORGS, &org_slug) {
@@ -2466,13 +2481,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_org_duplicate_slug_is_idempotent() {
-        // With slug-as-primary-key, re-issuing CreateOrg with the same slug
-        // returns the existing record (idempotent), not 409.
+    fn test_create_org_duplicate_slug_rejects() {
+        // Same slug from a different request_id is a name collision, not a
+        // retry — return 409 so the user sees the conflict. Same-request_id
+        // retries are caught earlier by the applied_requests cache.
         let mut state = ApiState::default();
         apply(&mut state, create_org_cmd("req-1", "acme"));
         let response = apply(&mut state, create_org_cmd("req-2", "acme"));
-        assert!(matches!(response, Response::Org(_)));
+        assert!(matches!(response, Response::Error { code: 409, .. }));
         assert_eq!(state.list_orgs().len(), 1);
     }
 
@@ -2528,9 +2544,11 @@ mod tests {
     }
 
     #[test]
-    fn test_create_project_duplicate_slug_is_idempotent() {
-        // Same slug → returns existing project (idempotent). Distinct payloads
-        // with the same slug are not supported because slug IS the key.
+    fn test_create_project_duplicate_slug_rejects() {
+        // Project slugs are platform-wide unique. A second create with the
+        // same slug — even from a different request_id — is a collision,
+        // not a retry; reply 409. Same-request_id retries are caught
+        // earlier by the applied_requests cache.
         let mut state = ApiState::default();
         ensure_test_org(&mut state);
 
@@ -2540,12 +2558,32 @@ mod tests {
         );
 
         let response = apply(&mut state, create_project_cmd("req-2", "proj-1", "second"));
-        // Returns the originally-created project (the second create is a no-op).
-        match response {
-            Response::Project(data) => assert_eq!(data.name, "dup-name"),
-            other => panic!("Unexpected response: {:?}", other),
-        }
+        assert!(matches!(response, Response::Error { code: 409, .. }));
         assert_eq!(state.list_projects().len(), 1);
+    }
+
+    #[test]
+    fn test_create_project_duplicate_slug_across_orgs_rejects() {
+        // Even when the second create targets a different Org, the slug is
+        // still globally unique — collision, 409.
+        let mut state = ApiState::default();
+        ensure_test_org(&mut state);
+        apply(&mut state, create_org_cmd("req-org2", "other-org"));
+        apply(
+            &mut state,
+            create_project_cmd("req-1", "shared-slug", "first"),
+        );
+
+        let cmd = Command::CreateProject {
+            request_id: "req-2".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            org_slug: "other-org".to_string(),
+            slug: "shared-slug".to_string(),
+            name: "second".to_string(),
+            description: None,
+        };
+        let response = apply(&mut state, cmd);
+        assert!(matches!(response, Response::Error { code: 409, .. }));
     }
 
     #[test]
