@@ -8,8 +8,8 @@
 
 use mraft::{NodeConfig, RaftNode, StorageBackend};
 use mvirt_cplane::rest::{AppState, create_router};
-use mvirt_cplane::store::{Event, RaftStore};
-use mvirt_cplane::{ApiAuditLogger, ApiState, Command, Response};
+use mvirt_cplane::store::{DataStore, Event, RaftStore};
+use mvirt_cplane::{ApiAuditLogger, ApiState, Command, NodeRegistry, Response, ca, tunnel};
 use reqwest::{Client, Response as ReqwestResponse};
 use serde::Serialize;
 use std::net::SocketAddr;
@@ -25,6 +25,9 @@ pub fn allocate_port() -> u16 {
 /// Test server wrapper that manages a single-node cluster with REST API.
 pub struct TestServer {
     pub addr: SocketAddr,
+    /// Local TCP address of the mTLS reverse-tunnel listener. `None` when
+    /// the server was spawned with the simpler `spawn()` helper.
+    pub tunnel_addr: Option<SocketAddr>,
     pub client: Client,
     pub raft_node: Arc<RwLock<RaftNode<Command, Response, ApiState>>>,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
@@ -107,6 +110,7 @@ impl TestServer {
 
         let server = Self {
             addr: actual_addr,
+            tunnel_addr: None,
             client,
             raft_node: node,
             shutdown_tx,
@@ -126,6 +130,49 @@ impl TestServer {
             "failed to bootstrap default test Org"
         );
 
+        server
+    }
+
+    /// Spawn variant that additionally binds the mTLS reverse-tunnel
+    /// listener on an ephemeral port. Used by the onboarding e2e tests
+    /// that need to verify the tunnel handshake end-to-end.
+    pub async fn spawn_with_tunnel() -> Self {
+        let mut server = Self::spawn().await;
+
+        ca::install_default_crypto_provider();
+        // Reuse the same Raft node as the REST listener. A fresh broadcast
+        // channel is fine — the tunnel doesn't subscribe.
+        let (event_tx, _) = broadcast::channel::<Event>(256);
+        let store: Arc<dyn DataStore> =
+            Arc::new(RaftStore::new(server.raft_node.clone(), event_tx, 1));
+        let ca_material = store
+            .ensure_internal_ca("test")
+            .await
+            .expect("ensure_internal_ca");
+        let server_cert = match store.get_server_cert().await.expect("get_server_cert") {
+            Some(c) => c,
+            None => store
+                .rotate_server_cert(vec!["localhost".into(), "127.0.0.1".into()])
+                .await
+                .expect("rotate_server_cert"),
+        };
+        let cfg = ca::build_server_config(
+            &ca_material.ca_cert_pem,
+            &server_cert.cert_pem,
+            &server_cert.key_pem,
+        )
+        .expect("build_server_config");
+        let acceptor = Arc::new(tokio_rustls::TlsAcceptor::from(Arc::new(cfg)));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tunnel");
+        let actual_addr = listener.local_addr().unwrap();
+        let registry = Arc::new(NodeRegistry::new());
+        let tunnel_store = store.clone();
+        tokio::spawn(async move {
+            let _ = tunnel::serve(listener, acceptor, registry, tunnel_store).await;
+        });
+
+        server.tunnel_addr = Some(actual_addr);
         server
     }
 

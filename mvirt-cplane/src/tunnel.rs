@@ -87,7 +87,20 @@ pub async fn listen(
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding tunnel listener on {addr}"))?;
-    info!(%addr, "tunnel listener up (mTLS)");
+    serve(listener, acceptor, registry, store).await
+}
+
+/// Serve a pre-bound listener. Same as `listen` but lets the caller decide
+/// when the bind happens — used by integration tests that need to know the
+/// ephemeral port without racing against accept.
+pub async fn serve(
+    listener: TcpListener,
+    acceptor: Arc<TlsAcceptor>,
+    registry: Arc<NodeRegistry>,
+    store: Arc<dyn DataStore>,
+) -> Result<()> {
+    let addr = listener.local_addr().ok();
+    info!(?addr, "tunnel listener up (mTLS)");
 
     loop {
         let (sock, peer) = listener.accept().await?;
