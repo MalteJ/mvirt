@@ -101,7 +101,6 @@ export function OrgProjectSwitcher() {
                 <button
                   key={org.slug}
                   type="button"
-                  onMouseEnter={() => setFocusedOrgSlug(org.slug)}
                   onClick={() => setFocusedOrgSlug(org.slug)}
                   className={cn(
                     'flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors',
