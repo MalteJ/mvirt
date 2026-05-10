@@ -18,6 +18,7 @@ import { OrgsPage, ProjectsPage } from './features/admin'
 import { useAuth } from './hooks/useAuth'
 import { useProject } from './hooks/useProject'
 import { useProjects } from './hooks/queries'
+import { useOrg } from './hooks/useOrg'
 import { useEffect } from 'react'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -38,39 +39,62 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-// Component to sync URL projectId with store
+// Sync the URL slug into the project store so pages downstream can read
+// `useProject().currentProject` without re-resolving the slug themselves.
 function ProjectSync({ children }: { children: React.ReactNode }) {
-  const { projectId } = useParams<{ projectId: string }>()
+  const { projectSlug } = useParams<{ projectSlug: string }>()
   const { currentProject, setCurrentProject } = useProject()
   const { data: projects } = useProjects()
 
   useEffect(() => {
-    if (projectId && projects) {
-      const project = projects.find(p => p.id === projectId)
-      if (project && (!currentProject || currentProject.id !== projectId)) {
+    if (projectSlug && projects) {
+      const project = projects.find((p) => p.slug === projectSlug)
+      if (project && (!currentProject || currentProject.slug !== projectSlug)) {
         setCurrentProject(project)
       }
     }
-  }, [projectId, projects, currentProject, setCurrentProject])
+  }, [projectSlug, projects, currentProject, setCurrentProject])
 
   return <>{children}</>
 }
 
-// Redirect to current project or first available project
+// Redirect to the active project (or first one in the active Org). Falls
+// through to /projects if neither exists.
 function ProjectRedirect({ path }: { path: string }) {
   const { currentProject } = useProject()
+  const { currentOrg } = useOrg()
   const { data: projects } = useProjects()
 
   if (currentProject) {
-    return <Navigate to={`/p/${currentProject.id}${path}`} replace />
+    return <Navigate to={`/projects/${currentProject.slug}${path}`} replace />
   }
 
-  if (projects && projects.length > 0) {
-    return <Navigate to={`/p/${projects[0].id}${path}`} replace />
+  // Prefer projects within the active Org if one is set.
+  const candidates = currentOrg
+    ? projects?.filter((p) => p.orgId === currentOrg.id)
+    : projects
+
+  if (candidates && candidates.length > 0) {
+    return <Navigate to={`/projects/${candidates[0].slug}${path}`} replace />
   }
 
-  // No projects, go to projects page
   return <Navigate to="/projects" replace />
+}
+
+// Backward-compat redirect: old `/p/:projectId/*` URLs (UUID-based) bounce to
+// the new slug-based shape. Bookmarks keep working for one cycle.
+function LegacyProjectRedirect() {
+  const { projectId, '*': rest = '' } = useParams<{ projectId: string; '*': string }>()
+  const { data: projects } = useProjects()
+
+  if (!projectId || !projects) {
+    return null
+  }
+  const project = projects.find((p) => p.id === projectId || p.slug === projectId)
+  if (!project) {
+    return <Navigate to="/projects" replace />
+  }
+  return <Navigate to={`/projects/${project.slug}${rest ? '/' + rest : ''}`} replace />
 }
 
 function App() {
@@ -97,27 +121,33 @@ function App() {
                 <Route path="/orgs" element={<OrgsPage />} />
                 <Route path="/projects" element={<ProjectsPage />} />
 
-                {/* Project-scoped routes */}
-                <Route path="/p/:projectId/*" element={
-                  <ProjectSync>
-                    <Routes>
-                      <Route path="/dashboard" element={<DashboardPage />} />
-                      <Route path="/vms" element={<VmsPage />} />
-                      <Route path="/vms/new" element={<CreateVmPage />} />
-                      <Route path="/vms/:id" element={<VmDetailPage />} />
-                      <Route path="/containers" element={<ContainersPage />} />
-                      <Route path="/containers/new" element={<CreatePodPage />} />
-                      <Route path="/containers/:id" element={<PodDetailPage />} />
-                      <Route path="/storage" element={<StoragePage />} />
-                      <Route path="/network" element={<NetworkPage />} />
-                      <Route path="/firewall" element={<FirewallPage />} />
-                      <Route path="/firewall/:id" element={<SecurityGroupDetailPage />} />
-                      <Route path="/logs" element={<LogsPage />} />
-                    </Routes>
-                  </ProjectSync>
-                } />
+                {/* Project-scoped routes — slug-based per ADR-0004 */}
+                <Route
+                  path="/projects/:projectSlug/*"
+                  element={
+                    <ProjectSync>
+                      <Routes>
+                        <Route path="/dashboard" element={<DashboardPage />} />
+                        <Route path="/vms" element={<VmsPage />} />
+                        <Route path="/vms/new" element={<CreateVmPage />} />
+                        <Route path="/vms/:id" element={<VmDetailPage />} />
+                        <Route path="/containers" element={<ContainersPage />} />
+                        <Route path="/containers/new" element={<CreatePodPage />} />
+                        <Route path="/containers/:id" element={<PodDetailPage />} />
+                        <Route path="/storage" element={<StoragePage />} />
+                        <Route path="/network" element={<NetworkPage />} />
+                        <Route path="/firewall" element={<FirewallPage />} />
+                        <Route path="/firewall/:id" element={<SecurityGroupDetailPage />} />
+                        <Route path="/logs" element={<LogsPage />} />
+                      </Routes>
+                    </ProjectSync>
+                  }
+                />
 
-                {/* Redirects for old routes */}
+                {/* Backward-compat: old /p/:projectId/* paths redirect to /projects/:slug/*. */}
+                <Route path="/p/:projectId/*" element={<LegacyProjectRedirect />} />
+
+                {/* Bare-path redirects pick a default project. */}
                 <Route path="/vms" element={<ProjectRedirect path="/vms" />} />
                 <Route path="/vms/*" element={<ProjectRedirect path="/vms" />} />
                 <Route path="/containers" element={<ProjectRedirect path="/containers" />} />

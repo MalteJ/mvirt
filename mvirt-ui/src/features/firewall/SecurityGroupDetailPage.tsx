@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useProjectId } from '@/hooks/useProjectId'
+import { useProject } from '@/hooks/useProject'
 import { ColumnDef } from '@tanstack/react-table'
 import {
   ArrowLeft,
@@ -49,6 +50,8 @@ const protocolLabels: Record<RuleProtocol, string> = {
 export function SecurityGroupDetailPage() {
   const { id } = useParams<{ id: string }>()
   const projectId = useProjectId()
+  const { currentProject } = useProject()
+  const projectSlug = currentProject?.slug ?? ''
   const navigate = useNavigate()
 
   // All hooks must be called before any early returns
@@ -117,7 +120,7 @@ export function SecurityGroupDetailPage() {
       <div className="flex flex-col items-center justify-center h-64 gap-4">
         <p className="text-destructive">Failed to load security group</p>
         <p className="text-sm text-muted-foreground">{String(error)}</p>
-        <Button variant="outline" onClick={() => navigate(`/p/${projectId}/firewall`)}>
+        <Button variant="outline" onClick={() => navigate(`/projects/${projectSlug}/firewall`)}>
           Back to Firewall
         </Button>
       </div>
@@ -197,7 +200,7 @@ export function SecurityGroupDetailPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate(`/p/${projectId}/firewall`)}>
+        <Button variant="ghost" size="icon" onClick={() => navigate(`/projects/${projectSlug}/firewall`)}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
         <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-purple/20">

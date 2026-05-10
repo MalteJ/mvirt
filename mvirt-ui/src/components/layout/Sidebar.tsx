@@ -13,6 +13,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useProjects, useApiHealth } from '@/hooks/queries'
 import { useProject } from '@/hooks/useProject'
+import { OrgSwitcher } from './OrgSwitcher'
 
 const navigation = [
   { name: 'Virtual Machines', path: '/vms', icon: Server },
@@ -34,7 +35,7 @@ export function Sidebar() {
   const { currentProject } = useProject()
   const apiHealth = useApiHealth()
   const hasProjects = projects && projects.length > 0
-  const projectId = currentProject?.id
+  const projectSlug = currentProject?.slug
 
   const apiStatus: 'connected' | 'connecting' | 'disconnected' =
     apiHealth.isSuccess ? 'connected'
@@ -59,11 +60,12 @@ export function Sidebar() {
         </div>
         <span className="logo-shimmer text-lg font-semibold">mvirt</span>
       </Link>
+      <OrgSwitcher />
       <nav className="flex-1 space-y-1 p-2">
-        {hasProjects && projectId && navigation.map((item) => (
+        {hasProjects && projectSlug && navigation.map((item) => (
           <NavLink
             key={item.name}
-            to={`/p/${projectId}${item.path}`}
+            to={`/projects/${projectSlug}${item.path}`}
             className={({ isActive }) =>
               cn(
                 'flex items-center rounded-md px-3 py-2 text-sm font-medium transition-all duration-200 border',

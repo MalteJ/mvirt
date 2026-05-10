@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useProjectId } from '@/hooks/useProjectId'
+import { useProject } from '@/hooks/useProject'
 import { ColumnDef } from '@tanstack/react-table'
 import {
   MoreHorizontal,
@@ -40,6 +41,8 @@ import { SecurityGroup, RuleDirection } from '@/types'
 
 export function FirewallPage() {
   const projectId = useProjectId()
+  const { currentProject } = useProject()
+  const projectSlug = currentProject?.slug ?? ''
   const navigate = useNavigate()
   const { data: securityGroups, isLoading, error } = useSecurityGroups(projectId)
   const createSecurityGroup = useCreateSecurityGroup(projectId)
@@ -65,7 +68,7 @@ export function FirewallPage() {
           setSgDialogOpen(false)
           setSgName('')
           setSgDescription('')
-          navigate(`/p/${projectId}/firewall/${sg.id}`)
+          navigate(`/projects/${projectSlug}/firewall/${sg.id}`)
         },
       }
     )
@@ -229,7 +232,7 @@ export function FirewallPage() {
           data={securityGroups}
           searchColumn="name"
           searchPlaceholder="Filter security groups..."
-          onRowClick={(sg) => navigate(`/p/${projectId}/firewall/${sg.id}`)}
+          onRowClick={(sg) => navigate(`/projects/${projectSlug}/firewall/${sg.id}`)}
         />
       ) : (
         <div className="flex flex-col items-center justify-center h-48 border border-dashed border-border rounded-lg">

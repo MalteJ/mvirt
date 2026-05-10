@@ -97,7 +97,7 @@ export function ProjectsPage() {
           setSlugTouched(false)
           // Switch to the new project
           setCurrentProject(project)
-          navigate(`/p/${project.id}/vms`)
+          navigate(`/projects/${project.slug}/vms`)
         },
       }
     )
@@ -164,7 +164,7 @@ export function ProjectsPage() {
             <DropdownMenuItem
               onClick={() => {
                 setCurrentProject(row.original)
-                navigate(`/p/${row.original.id}/vms`)
+                navigate(`/projects/${row.original.slug}/vms`)
               }}
               disabled={currentProject?.id === row.original.id}
             >
