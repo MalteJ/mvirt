@@ -64,17 +64,7 @@ export function OrgProjectSwitcher() {
         </>
       )
     }
-    if (currentOrg) {
-      return (
-        <>
-          <span className="font-medium">{currentOrg.name}</span>
-          <span className="text-muted-foreground ml-2 font-mono text-xs">
-            {currentOrg.slug}
-          </span>
-        </>
-      )
-    }
-    return <span className="text-muted-foreground">Select Org / Project</span>
+    return <span className="text-muted-foreground">Select Project</span>
   })()
 
   const activate = (org: Org, projectSlug: string) => {

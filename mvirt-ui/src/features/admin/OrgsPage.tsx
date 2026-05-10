@@ -61,6 +61,9 @@ export function OrgsPage() {
           setName('')
           setSlugTouched(false)
         },
+        onError: () => {
+          // Surfaced inline below the form via createOrg.error.
+        },
       },
     )
   }
@@ -182,6 +185,11 @@ export function OrgsPage() {
                   Kebab-case, platform-wide unique, immutable.
                 </p>
               </div>
+              {createOrg.error && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {String(createOrg.error)}
+                </div>
+              )}
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setDialogOpen(false)}>
