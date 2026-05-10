@@ -92,7 +92,7 @@ export function OrgProjectSwitcher() {
         {/* Two-column body — fixed max height, each column scrolls independently. */}
         <div className="flex">
           {/* Left 40% — Orgs */}
-          <div className="w-2/5 border-r border-border max-h-96 overflow-y-auto">
+          <div className="w-2/5 border-r border-border h-96 overflow-y-auto">
             <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-card/40 sticky top-0">
               Organizations
             </div>
@@ -130,7 +130,7 @@ export function OrgProjectSwitcher() {
           </div>
 
           {/* Right 60% — Projects in focused Org */}
-          <div className="w-3/5 max-h-96 overflow-y-auto">
+          <div className="w-3/5 h-96 overflow-y-auto">
             <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-card/40 sticky top-0">
               {focusedOrg ? `Projects in ${focusedOrg.slug}` : 'Projects'}
             </div>
