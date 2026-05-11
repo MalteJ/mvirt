@@ -10,7 +10,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useTheme } from '@/hooks/useTheme'
 import { useAuth } from '@/hooks/useAuth'
-import { useNotifications, useMarkAllNotificationsRead } from '@/hooks/queries'
+import { useMe, useNotifications, useMarkAllNotificationsRead } from '@/hooks/queries'
 import { NotificationType } from '@/types'
 import { cn } from '@/lib/utils'
 import { OrgProjectSwitcher } from './OrgProjectSwitcher'
@@ -33,6 +33,7 @@ export function Header() {
   const navigate = useNavigate()
   const { theme, toggleTheme } = useTheme()
   const { user, logout } = useAuth()
+  const { data: me } = useMe()
   const { data: notifications } = useNotifications()
   const markAllRead = useMarkAllNotificationsRead()
 
@@ -149,6 +150,27 @@ export function Header() {
             <div className="px-2 py-1.5">
               <p className="text-sm font-medium">{user?.name}</p>
               <p className="text-xs text-muted-foreground">{user?.email}</p>
+              {me && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {me.isPlatformAdmin && (
+                    <span className="rounded bg-purple/20 px-1.5 py-0.5 font-mono text-[10px] text-purple-light">
+                      platform-admin
+                    </span>
+                  )}
+                  {me.memberships
+                    .filter((m) => m.role !== 'platform-admin')
+                    .slice(0, 4)
+                    .map((m) => (
+                      <span
+                        key={m.id}
+                        className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                        title={`${m.role} in ${m.scope}/${m.scopeSlug ?? '*'}`}
+                      >
+                        {m.role}@{m.scopeSlug ?? m.scope}
+                      </span>
+                    ))}
+                </div>
+              )}
             </div>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={handleLogout} className="text-destructive">
