@@ -254,6 +254,82 @@ mod state_tests {
     }
 
     #[test]
+    fn invite_by_email_then_first_oidc_login_links_account() {
+        // Operator pre-creates an Account by email. The user later logs in
+        // via OIDC with the same email; the apply must link `(iss, sub)`
+        // to the existing row rather than minting a duplicate.
+        let mut s = fresh_state();
+        let (resp, _) = s.apply(Command::CreateAccountByEmail {
+            request_id: "r0".into(),
+            timestamp: "t".into(),
+            id: "acc_invited".into(),
+            email: "Malte@example.com".into(), // mixed case → normalised
+            display_name: Some("Malte".into()),
+        });
+        let invited = match resp {
+            Response::Account(a) => a,
+            other => panic!("expected Account, got {other:?}"),
+        };
+        assert_eq!(invited.id, "acc_invited");
+        assert!(invited.external_iss.is_none(), "no iss yet — invite state");
+
+        // First OIDC login from this email.
+        let (resp, _) = s.apply(Command::EnsureAccountFromOidc {
+            request_id: "r1".into(),
+            timestamp: "t".into(),
+            new_id: "acc_should_not_be_used".into(),
+            iss: "https://idp.example".into(),
+            sub: "sub-123".into(),
+            email: Some("malte@example.com".into()),
+            display_name: None,
+        });
+        let linked = match resp {
+            Response::Account(a) => a,
+            other => panic!("expected Account, got {other:?}"),
+        };
+        assert_eq!(linked.id, "acc_invited", "linked the existing invite row");
+        assert_eq!(linked.external_sub.as_deref(), Some("sub-123"));
+        assert_eq!(s.list_accounts().len(), 1, "no duplicate row");
+
+        // Subsequent logins take the (iss, sub) fast path and stay stable.
+        let (resp, _) = s.apply(Command::EnsureAccountFromOidc {
+            request_id: "r2".into(),
+            timestamp: "t".into(),
+            new_id: "acc_unused".into(),
+            iss: "https://idp.example".into(),
+            sub: "sub-123".into(),
+            email: Some("malte@example.com".into()),
+            display_name: None,
+        });
+        match resp {
+            Response::Account(a) => assert_eq!(a.id, "acc_invited"),
+            other => panic!("expected Account, got {other:?}"),
+        };
+        assert_eq!(s.list_accounts().len(), 1);
+    }
+
+    #[test]
+    fn invite_by_email_rejects_duplicate_email() {
+        let mut s = fresh_state();
+        let (r1, _) = s.apply(Command::CreateAccountByEmail {
+            request_id: "r1".into(),
+            timestamp: "t".into(),
+            id: "a1".into(),
+            email: "x@example".into(),
+            display_name: None,
+        });
+        assert!(matches!(r1, Response::Account(_)));
+        let (r2, _) = s.apply(Command::CreateAccountByEmail {
+            request_id: "r2".into(),
+            timestamp: "t".into(),
+            id: "a2".into(),
+            email: "X@Example".into(), // case-insensitive
+            display_name: None,
+        });
+        assert!(matches!(r2, Response::Error { code: 409, .. }));
+    }
+
+    #[test]
     fn create_membership_rejects_unknown_scope_target() {
         let mut s = fresh_state();
         let a = ensure_account(&mut s, "u1");

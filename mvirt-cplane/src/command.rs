@@ -252,6 +252,19 @@ pub enum Command {
     },
 
     // -- Accounts + Memberships (ADR-0004) ---------------------------------
+    /// Operator-initiated Account pre-creation by email — the
+    /// invite-by-email path. The Account is written with `email` but no
+    /// `(external_iss, external_sub)`; the OIDC apply reconciles by email
+    /// on first login and links the identity then. Rejects with 409 if
+    /// the email is already taken.
+    CreateAccountByEmail {
+        request_id: String,
+        timestamp: String,
+        id: String,
+        email: String,
+        display_name: Option<String>,
+    },
+
     /// Lazy-create or refresh an Account from an OIDC login. Idempotent —
     /// returns the existing row if `(iss, sub)` already matches. The
     /// authoritative identity key is `(iss, sub)`; email/display_name are
@@ -488,6 +501,7 @@ impl Command {
             Command::DeleteOnboardingToken { request_id, .. } => request_id,
             Command::RedeemOnboardingToken { request_id, .. } => request_id,
             Command::RevokeNodeCert { request_id, .. } => request_id,
+            Command::CreateAccountByEmail { request_id, .. } => request_id,
             Command::EnsureAccountFromOidc { request_id, .. } => request_id,
             Command::CreateMembership { request_id, .. } => request_id,
             Command::DeleteMembership { request_id, .. } => request_id,

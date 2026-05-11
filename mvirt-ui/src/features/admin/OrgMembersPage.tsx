@@ -4,6 +4,7 @@ import { Plus, Trash2, Users } from 'lucide-react'
 import {
   useAccounts,
   useGrantOrgMember,
+  useInviteAccount,
   useOrgMembers,
   useRevokeOrgMember,
 } from '@/hooks/queries'
@@ -17,14 +18,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { formatDate } from '@/lib/utils'
 
 export function OrgMembersPage() {
@@ -33,29 +28,34 @@ export function OrgMembersPage() {
   const { data: accounts } = useAccounts()
   const grant = useGrantOrgMember(orgSlug ?? '')
   const revoke = useRevokeOrgMember(orgSlug ?? '')
+  const invite = useInviteAccount()
 
   const [open, setOpen] = useState(false)
-  const [selectedAccount, setSelectedAccount] = useState<string>('')
+  const [email, setEmail] = useState('')
 
-  const handleGrant = () => {
-    if (!selectedAccount) return
+  // Single email-driven flow: look up the Account by email, fall back to
+  // creating an invite Account, then grant org-admin on it.
+  const handleSubmit = async () => {
+    const normalized = email.trim().toLowerCase()
+    if (!normalized) return
+    const existing = accounts?.find(
+      (a) => a.email?.toLowerCase() === normalized,
+    )
+    const accountId = existing
+      ? existing.id
+      : (await invite.mutateAsync({ email: normalized })).id
     grant.mutate(
-      { accountId: selectedAccount, role: 'org-admin' },
+      { accountId, role: 'org-admin' },
       {
         onSuccess: () => {
           setOpen(false)
-          setSelectedAccount('')
+          setEmail('')
         },
       },
     )
   }
 
-  // Accounts not already in this org's member list (so we don't show
-  // duplicates in the picker).
-  const availableAccounts =
-    accounts?.filter(
-      (a) => !members?.some((m) => m.accountId === a.id),
-    ) ?? []
+  const submitting = invite.isPending || grant.isPending
 
   return (
     <div className="space-y-6">
@@ -68,10 +68,7 @@ export function OrgMembersPage() {
           </p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
-          <Button
-            disabled={availableAccounts.length === 0}
-            onClick={() => setOpen(true)}
-          >
+          <Button onClick={() => setOpen(true)}>
             <Plus className="mr-2 h-4 w-4" />
             Add Member
           </Button>
@@ -79,40 +76,29 @@ export function OrgMembersPage() {
             <form
               onSubmit={(e) => {
                 e.preventDefault()
-                handleGrant()
+                handleSubmit()
               }}
             >
               <DialogHeader>
-                <DialogTitle>Grant Org Membership</DialogTitle>
+                <DialogTitle>Add Org Member</DialogTitle>
                 <DialogDescription>
-                  The Account must already exist — it gets created
-                  automatically on the user's first OIDC login. Until they've
-                  logged in once, they won't show up in the picker.
+                  Enter the user's email. If they already exist in mvirt the
+                  membership is granted immediately. If not, an invite-Account
+                  is created and gets linked to their OIDC identity on first
+                  login — the role grant takes effect right away either way.
                 </DialogDescription>
               </DialogHeader>
               <div className="grid gap-4 py-4">
                 <div className="grid gap-2">
-                  <Label htmlFor="account">Account</Label>
-                  <Select
-                    value={selectedAccount}
-                    onValueChange={setSelectedAccount}
-                  >
-                    <SelectTrigger id="account">
-                      <SelectValue placeholder="Pick an Account" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableAccounts.map((a) => (
-                        <SelectItem key={a.id} value={a.id}>
-                          {a.displayName ?? a.email ?? a.id}{' '}
-                          {a.email && (
-                            <span className="ml-1 text-xs text-muted-foreground">
-                              {a.email}
-                            </span>
-                          )}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Label htmlFor="email">Email</Label>
+                  <Input
+                    id="email"
+                    type="email"
+                    placeholder="user@example.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    autoFocus
+                  />
                 </div>
                 <div className="grid gap-2">
                   <Label>Role</Label>
@@ -123,9 +109,9 @@ export function OrgMembersPage() {
                     </span>
                   </div>
                 </div>
-                {grant.error && (
+                {(invite.error || grant.error) && (
                   <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                    {String(grant.error)}
+                    {String(invite.error ?? grant.error)}
                   </div>
                 )}
               </div>
@@ -139,9 +125,9 @@ export function OrgMembersPage() {
                 </Button>
                 <Button
                   type="submit"
-                  disabled={!selectedAccount || grant.isPending}
+                  disabled={!email.trim() || submitting}
                 >
-                  {grant.isPending ? 'Granting...' : 'Grant'}
+                  {submitting ? 'Adding...' : 'Add'}
                 </Button>
               </DialogFooter>
             </form>

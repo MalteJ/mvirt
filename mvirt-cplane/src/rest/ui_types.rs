@@ -728,6 +728,16 @@ pub struct MembershipListResponse {
     pub memberships: Vec<UiMembership>,
 }
 
+/// Body for inviting a user by email — pre-creates an Account that gets
+/// linked to OIDC on first login.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiInviteAccountRequest {
+    pub email: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateOrgMembershipRequest {

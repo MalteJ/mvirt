@@ -9,6 +9,13 @@ export async function listAccounts(): Promise<Account[]> {
   return get<Account[]>('/accounts')
 }
 
+export async function inviteAccountByEmail(
+  email: string,
+  displayName?: string,
+): Promise<Account> {
+  return post<Account>('/accounts', { email, displayName })
+}
+
 export interface OrgMemberListResponse {
   memberships: Membership[]
 }

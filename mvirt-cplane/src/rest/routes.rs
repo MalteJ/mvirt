@@ -78,6 +78,7 @@ use crate::auth::require_auth;
         // Auth + Members (ADR-0004)
         ui_handlers::get_me,
         ui_handlers::list_accounts,
+        ui_handlers::invite_account,
         ui_handlers::list_org_members,
         ui_handlers::create_org_member,
         ui_handlers::delete_org_member,
@@ -178,6 +179,7 @@ use crate::auth::require_auth;
         ui_types::UiMe,
         ui_types::MembershipListResponse,
         ui_types::UiCreateOrgMembershipRequest,
+        ui_types::UiInviteAccountRequest,
         // UI schemas - VMs
         ui_types::UiVm,
         ui_types::UiVmState,
@@ -323,7 +325,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/nodes/{id}/revoke", post(ui_handlers::revoke_node))
         // Auth (ADR-0004): current user + accounts + org members
         .route("/me", get(ui_handlers::get_me))
-        .route("/accounts", get(ui_handlers::list_accounts))
+        .route(
+            "/accounts",
+            get(ui_handlers::list_accounts).post(ui_handlers::invite_account),
+        )
         .route(
             "/orgs/{org_slug}/members",
             get(ui_handlers::list_org_members).post(ui_handlers::create_org_member),

@@ -842,6 +842,37 @@ pub async fn get_me(
     }))
 }
 
+/// Invite-by-email: pre-create an Account with just the email. The OIDC
+/// apply reconciles by email on first login → links (iss, sub) to this
+/// row. Platform-admin only.
+#[utoipa::path(
+    post,
+    path = "/v1/accounts",
+    request_body = UiInviteAccountRequest,
+    responses(
+        (status = 200, body = UiAccount),
+        (status = 400, body = ApiError),
+        (status = 403, body = ApiError),
+        (status = 409, body = ApiError)
+    ),
+    tag = "auth"
+)]
+pub async fn invite_account(
+    State(state): State<Arc<AppState>>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+    Json(req): Json<UiInviteAccountRequest>,
+) -> Result<Json<UiAccount>, ApiError> {
+    require_platform_admin(&state, &auth)?;
+    let data = state
+        .store
+        .create_account_by_email(crate::store::CreateAccountByEmailRequest {
+            email: req.email,
+            display_name: req.display_name,
+        })
+        .await?;
+    Ok(Json(UiAccount::from(data)))
+}
+
 /// List all Accounts. Platform-admin only — cross-Org visibility.
 #[utoipa::path(
     get,

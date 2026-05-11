@@ -2040,6 +2040,53 @@ impl StateMachine<Command, Response> for ApiState {
             // =================================================================
             // Account + Membership (ADR-0004).
             // =================================================================
+            Command::CreateAccountByEmail {
+                timestamp,
+                id,
+                email,
+                display_name,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let normalized = email.trim().to_lowercase();
+                if normalized.is_empty() {
+                    return (
+                        Response::Error {
+                            code: 400,
+                            message: "email is required".into(),
+                        },
+                        vec![],
+                    );
+                }
+                let dup = txn_list::<AccountData>(&txn, ACCOUNTS)
+                    .into_iter()
+                    .any(|a| {
+                        a.email.as_deref().map(|e| e.to_lowercase()) == Some(normalized.clone())
+                    });
+                if dup {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Account with email '{}' already exists", normalized),
+                        },
+                        vec![],
+                    );
+                }
+                let acc = AccountData {
+                    id: id.clone(),
+                    kind: AccountKind::User,
+                    external_iss: None,
+                    external_sub: None,
+                    email: Some(normalized),
+                    display_name,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                };
+                txn_put(&txn, ACCOUNTS, &id, &acc);
+                txn.commit().expect("commit");
+                (Response::Account(acc), vec![])
+            }
+
             Command::EnsureAccountFromOidc {
                 timestamp,
                 new_id,
@@ -2050,15 +2097,14 @@ impl StateMachine<Command, Response> for ApiState {
                 ..
             } => {
                 let txn = self.db.begin_write().expect("begin");
-                // Existing match: optionally refresh email/display_name (UI
-                // sees newest claim value) but keep the id stable.
-                let existing = txn_list::<AccountData>(&txn, ACCOUNTS)
-                    .into_iter()
-                    .find(|a| {
-                        a.external_iss.as_deref() == Some(iss.as_str())
-                            && a.external_sub.as_deref() == Some(sub.as_str())
-                    });
-                let account = if let Some(mut acc) = existing {
+                let all = txn_list::<AccountData>(&txn, ACCOUNTS);
+                // 1. Match on (iss, sub) → already linked.
+                let existing = all.iter().find(|a| {
+                    a.external_iss.as_deref() == Some(iss.as_str())
+                        && a.external_sub.as_deref() == Some(sub.as_str())
+                });
+                let account = if let Some(acc) = existing {
+                    let mut acc = acc.clone();
                     let mut changed = false;
                     if email.is_some() && acc.email != email {
                         acc.email = email;
@@ -2074,7 +2120,30 @@ impl StateMachine<Command, Response> for ApiState {
                         txn_put(&txn, ACCOUNTS, &id, &acc);
                     }
                     acc
+                } else if let Some(invited) = email.as_ref().and_then(|e| {
+                    let lc = e.to_lowercase();
+                    // 2. Email-match on a pre-invite Account (no iss/sub yet)
+                    //    → link the OIDC identity to that row. Next time the
+                    //    user logs in, path #1 wins.
+                    all.iter().find(|a| {
+                        a.external_iss.is_none()
+                            && a.external_sub.is_none()
+                            && a.email.as_deref().map(|s| s.to_lowercase()) == Some(lc.clone())
+                    })
+                }) {
+                    let mut acc = invited.clone();
+                    acc.external_iss = Some(iss);
+                    acc.external_sub = Some(sub);
+                    acc.email = email;
+                    if display_name.is_some() {
+                        acc.display_name = display_name;
+                    }
+                    acc.updated_at = timestamp;
+                    let id = acc.id.clone();
+                    txn_put(&txn, ACCOUNTS, &id, &acc);
+                    acc
                 } else {
+                    // 3. Brand-new Account — first time we've seen this user.
                     let acc = AccountData {
                         id: new_id.clone(),
                         kind: AccountKind::User,

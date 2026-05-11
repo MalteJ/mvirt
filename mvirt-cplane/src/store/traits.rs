@@ -489,6 +489,15 @@ pub struct EnsureAccountRequest {
     pub display_name: Option<String>,
 }
 
+/// Operator-supplied inputs for the invite-by-email path. The created
+/// Account has email but no `(iss, sub)`; the OIDC apply links the
+/// identity on first login.
+#[derive(Debug, Clone)]
+pub struct CreateAccountByEmailRequest {
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
 /// Inputs for granting a membership.
 #[derive(Debug, Clone)]
 pub struct CreateMembershipRequest {
@@ -506,6 +515,12 @@ pub trait AccountStore: Send + Sync {
     /// Lazy-create or refresh a User Account from an OIDC login. Returns
     /// the persisted row.
     async fn ensure_account_from_oidc(&self, req: EnsureAccountRequest) -> Result<AccountData>;
+    /// Operator-initiated pre-create by email (invite flow). The OIDC
+    /// apply links `(iss, sub)` on first login.
+    async fn create_account_by_email(
+        &self,
+        req: CreateAccountByEmailRequest,
+    ) -> Result<AccountData>;
     async fn get_account(&self, id: &str) -> Result<Option<AccountData>>;
     async fn get_account_by_oidc(&self, iss: &str, sub: &str) -> Result<Option<AccountData>>;
     async fn list_accounts(&self) -> Result<Vec<AccountData>>;

@@ -1307,6 +1307,26 @@ impl AccountStore for RaftStore {
         }
     }
 
+    async fn create_account_by_email(
+        &self,
+        req: crate::store::CreateAccountByEmailRequest,
+    ) -> Result<AccountData> {
+        let cmd = Command::CreateAccountByEmail {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            id: format!("acc_{}", uuid::Uuid::new_v4().simple()),
+            email: req.email,
+            display_name: req.display_name,
+        };
+        match self.write_command(cmd).await? {
+            Response::Account(a) => Ok(a),
+            Response::Error { code: 400, message } => Err(StoreError::Validation(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
     async fn get_account(&self, id: &str) -> Result<Option<AccountData>> {
         let node = self.node.read().await;
         let state = node.get_state().await;

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getMe,
   grantOrgMember,
+  inviteAccountByEmail,
   listAccounts,
   listOrgMembers,
   revokeOrgMember,
@@ -40,6 +41,20 @@ export function useAccounts() {
   return useQuery({
     queryKey: meKeys.accounts,
     queryFn: listAccounts,
+  })
+}
+
+export function useInviteAccount() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      email,
+      displayName,
+    }: {
+      email: string
+      displayName?: string
+    }) => inviteAccountByEmail(email, displayName),
+    onSuccess: () => qc.invalidateQueries({ queryKey: meKeys.accounts }),
   })
 }
 
