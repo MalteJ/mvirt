@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import {
   ArrowLeft,
+  Check,
   Copy,
   KeyRound,
   Plus,
@@ -87,10 +88,12 @@ export function ClusterDetailPage() {
     )
   }
 
+  const [tokenCopied, setTokenCopied] = useState(false)
   const copyToken = async () => {
-    if (revealedToken) {
-      await navigator.clipboard.writeText(revealedToken.token)
-    }
+    if (!revealedToken) return
+    await navigator.clipboard.writeText(revealedToken.token)
+    setTokenCopied(true)
+    setTimeout(() => setTokenCopied(false), 2000)
   }
 
   return (
@@ -327,8 +330,18 @@ export function ClusterDetailPage() {
               <pre className="flex-1 overflow-x-auto rounded border bg-muted/40 p-2 font-mono text-xs">
                 {revealedToken?.token ?? ''}
               </pre>
-              <Button variant="outline" size="icon" onClick={copyToken}>
-                <Copy className="h-3 w-3" />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={copyToken}
+                aria-label={tokenCopied ? 'Copied' : 'Copy token'}
+                className={tokenCopied ? 'text-green-600 dark:text-green-400' : ''}
+              >
+                {tokenCopied ? (
+                  <Check className="h-3 w-3" />
+                ) : (
+                  <Copy className="h-3 w-3" />
+                )}
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
