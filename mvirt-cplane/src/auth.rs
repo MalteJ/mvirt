@@ -221,10 +221,12 @@ impl AuthContext {
 
 /// Axum middleware: validates the Bearer token, lazy-creates the Account
 /// from the OIDC `(iss, sub)`, attaches the `AuthContext` (claims + account
-/// + memberships) to request extensions. Initial-admin bootstrap fires
-/// here too: the first verified login matching `MVIRT_INITIAL_ADMIN_EMAIL`
-/// receives Platform/PlatformAdmin atomically (race-safe — the apply
-/// handler refuses if any platform-admin already exists).
+/// + memberships) to request extensions.
+///
+/// Initial-admin bootstrap fires here too: the first verified login matching
+/// `MVIRT_INITIAL_ADMIN_EMAIL` receives Platform/PlatformAdmin atomically
+/// (race-safe — the apply handler refuses if any platform-admin already
+/// exists).
 pub async fn require_auth(
     State(state): State<Arc<crate::rest::AppState>>,
     mut req: Request,
