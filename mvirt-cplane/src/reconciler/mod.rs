@@ -110,6 +110,14 @@ impl Controller {
             Event::VolumeCreated(_) | Event::VolumeDeleted { .. } => {
                 volume::reconcile(ctx, &id).await
             }
+            Event::VolumeStatusUpdated { .. } => {
+                // Status writeback from our own reconciler — no-op on the
+                // volume itself, but wake any VMs that were waiting on
+                // this volume to reach Ready.
+                let r = vm::reconcile_for_volume(ctx, &id).await;
+                let _ = r;
+                Ok(())
+            }
             Event::TemplateCreated(_) | Event::TemplateUpdated { .. } => {
                 template::reconcile(ctx, &id).await
             }

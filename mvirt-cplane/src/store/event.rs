@@ -65,6 +65,15 @@ pub enum Event {
     // Volume events
     /// A new volume was created.
     VolumeCreated(VolumeData),
+    /// A volume's observed status was updated by the reconciler (phase
+    /// transition, error, etc.). Distinct from the create event so
+    /// dependent reconcilers (e.g. VM waiting for its boot disk) can wake
+    /// without waiting for the next 30s resync.
+    VolumeStatusUpdated {
+        id: String,
+        old: VolumeData,
+        new: VolumeData,
+    },
     /// A volume was deleted.
     VolumeDeleted { id: String, node_id: String },
 
@@ -100,7 +109,9 @@ impl Event {
             | Event::VmUpdated { .. }
             | Event::VmStatusUpdated { .. }
             | Event::VmDeleted { .. } => "vm",
-            Event::VolumeCreated(_) | Event::VolumeDeleted { .. } => "volume",
+            Event::VolumeCreated(_)
+            | Event::VolumeStatusUpdated { .. }
+            | Event::VolumeDeleted { .. } => "volume",
             Event::TemplateCreated(_) | Event::TemplateUpdated { .. } => "template",
             Event::SecurityGroupCreated { .. } | Event::SecurityGroupDeleted { .. } => {
                 "security_group"
@@ -125,6 +136,7 @@ impl Event {
             Event::VmStatusUpdated { id, .. } => id,
             Event::VmDeleted { id } => id,
             Event::VolumeCreated(v) => &v.id,
+            Event::VolumeStatusUpdated { id, .. } => id,
             Event::VolumeDeleted { id, .. } => id,
             Event::TemplateCreated(t) => &t.id,
             Event::TemplateUpdated { id, .. } => id,

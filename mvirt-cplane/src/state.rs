@@ -2448,6 +2448,7 @@ impl StateMachine<Command, Response> for ApiState {
                         vec![],
                     );
                 };
+                let old = vol.clone();
                 vol.status.phase = phase;
                 if let Some(p) = path {
                     vol.status.path = p;
@@ -2457,7 +2458,14 @@ impl StateMachine<Command, Response> for ApiState {
                 vol.updated_at = timestamp;
                 txn_put(&txn, VOLUMES, &id, &vol);
                 txn.commit().expect("commit");
-                (Response::Volume(vol), vec![])
+                (
+                    Response::Volume(vol.clone()),
+                    vec![Event::VolumeStatusUpdated {
+                        id,
+                        old,
+                        new: vol,
+                    }],
+                )
             }
 
             Command::ResizeVolume {
