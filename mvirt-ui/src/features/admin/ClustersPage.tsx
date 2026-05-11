@@ -252,6 +252,11 @@ export function ClustersPage() {
                     onChange={(e) => setDescription(e.target.value)}
                   />
                 </div>
+                {createCluster.error && (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    {String(createCluster.error)}
+                  </div>
+                )}
               </div>
               <DialogFooter>
                 <Button
@@ -277,6 +282,12 @@ export function ClustersPage() {
           </DialogContent>
         </Dialog>
       </div>
+
+      {deleteCluster.error && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          Delete failed: {String(deleteCluster.error)}
+        </div>
+      )}
 
       {isLoading ? (
         <div className="flex items-center justify-center h-32">

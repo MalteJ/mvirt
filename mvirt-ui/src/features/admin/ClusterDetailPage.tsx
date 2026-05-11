@@ -121,6 +121,12 @@ export function ClusterDetailPage() {
         </div>
       </div>
 
+      {(removeNode.error || deleteToken.error) && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {String(removeNode.error ?? deleteToken.error)}
+        </div>
+      )}
+
       {/* Nodes card */}
       <Card>
         <CardHeader>
@@ -215,6 +221,11 @@ export function ClusterDetailPage() {
                       </p>
                     </div>
                   </div>
+                  {createToken.error && (
+                    <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                      {String(createToken.error)}
+                    </div>
+                  )}
                   <DialogFooter>
                     <Button
                       type="button"
