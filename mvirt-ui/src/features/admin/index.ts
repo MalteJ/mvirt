@@ -1,5 +1,6 @@
 export { ProjectsPage } from './ProjectsPage'
 export { OrgsPage } from './OrgsPage'
 export { OrgSettingsPage } from './OrgSettingsPage'
+export { OrgLayout } from './OrgLayout'
 export { ClustersPage } from './ClustersPage'
 export { ClusterDetailPage } from './ClusterDetailPage'

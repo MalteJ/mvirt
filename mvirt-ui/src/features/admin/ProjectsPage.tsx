@@ -199,18 +199,9 @@ export function ProjectsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">
-            Projects
-            {scopedOrg && (
-              <span className="ml-2 font-mono text-base font-normal text-muted-foreground">
-                in {scopedOrg.slug}
-              </span>
-            )}
-          </h2>
-          <p className="text-muted-foreground">
-            {scopedOrg
-              ? `Projects scoped to ${scopedOrg.name}. Switch Org in the header to view projects elsewhere.`
-              : 'Pick an Org from the header switcher to scope this view.'}
+          <h2 className="text-lg font-semibold tracking-tight">Projects</h2>
+          <p className="text-sm text-muted-foreground">
+            K8s-style namespaces — every VM, network, and volume lives in one.
           </p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>

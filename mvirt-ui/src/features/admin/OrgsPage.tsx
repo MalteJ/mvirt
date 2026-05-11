@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { ColumnDef } from '@tanstack/react-table'
 import { MoreHorizontal, Plus, Settings, Trash2 } from 'lucide-react'
 import { useOrgs, useCreateOrg, useDeleteOrg } from '@/hooks/queries'
@@ -106,12 +106,15 @@ export function OrgsPage() {
       accessorKey: 'name',
       header: 'Name',
       cell: ({ row }) => (
-        <div>
+        <Link
+          to={`/orgs/${row.original.slug}`}
+          className="block hover:text-purple-light"
+        >
           <div className="font-medium">{row.original.name}</div>
           <div className="text-xs text-muted-foreground font-mono">
             {row.original.slug}
           </div>
-        </div>
+        </Link>
       ),
     },
     {

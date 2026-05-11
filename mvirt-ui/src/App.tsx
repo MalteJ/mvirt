@@ -16,6 +16,7 @@ import { LogsPage } from './features/logs/LogsPage'
 import {
   ClusterDetailPage,
   ClustersPage,
+  OrgLayout,
   OrgsPage,
   OrgSettingsPage,
   ProjectsPage,
@@ -181,18 +182,14 @@ function App() {
                 <Route path="/cluster" element={<ClusterPage />} />
                 <Route path="/cluster/:id" element={<NodeDetailPage />} />
                 <Route path="/orgs" element={<OrgsPage />} />
-                <Route
-                  path="/orgs/:orgSlug/settings"
-                  element={<OrgSettingsPage />}
-                />
-                <Route
-                  path="/orgs/:orgSlug/projects"
-                  element={<ProjectsPage />}
-                />
-                <Route
-                  path="/orgs/:orgSlug/clusters"
-                  element={<ClustersPage />}
-                />
+                {/* All org-scoped admin pages share a sub-navbar.
+                    /orgs/:slug bare → first tab. */}
+                <Route path="/orgs/:orgSlug" element={<OrgLayout />}>
+                  <Route index element={<Navigate to="projects" replace />} />
+                  <Route path="projects" element={<ProjectsPage />} />
+                  <Route path="clusters" element={<ClustersPage />} />
+                  <Route path="settings" element={<OrgSettingsPage />} />
+                </Route>
                 <Route path="/clusters/:slug" element={<ClusterDetailPage />} />
                 <Route path="/projects" element={<FlatProjectsRedirect />} />
 

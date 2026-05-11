@@ -169,18 +169,9 @@ export function ClustersPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">
-            Clusters
-            {scopedOrg && (
-              <span className="ml-2 font-mono text-base font-normal text-muted-foreground">
-                in {scopedOrg.slug}
-              </span>
-            )}
-          </h2>
-          <p className="text-muted-foreground">
-            {scopedOrg
-              ? `Hardware groups in ${scopedOrg.name}. Resources are placed on a Cluster's nodes.`
-              : 'Pick an Org from the header switcher to scope this view.'}
+          <h2 className="text-lg font-semibold tracking-tight">Clusters</h2>
+          <p className="text-sm text-muted-foreground">
+            Hardware groups. Resources are placed on a Cluster's nodes.
           </p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>

@@ -184,14 +184,13 @@ export function OrgProjectSwitcher() {
           </div>
         </div>
 
-        {/* Shared bottom action row — stays at the dialog edge regardless of
-            either column's content height. Manage Projects + Manage Clusters
-            scope to the currently focused Org. */}
+        {/* Shared bottom action row — workload-context entries only. Cluster
+            / Members / Billing live under the Org page's own tab navbar. */}
         <div className="flex border-t border-border bg-card/40">
           <Link
             to="/orgs"
             onClick={() => setOpen(false)}
-            className="flex w-1/3 items-center gap-2 border-r border-border px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
+            className="flex w-2/5 items-center gap-2 border-r border-border px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
           >
             <Settings className="h-3 w-3" />
             Manage Orgs
@@ -199,22 +198,12 @@ export function OrgProjectSwitcher() {
           <Link
             to={focusedOrg ? `/orgs/${focusedOrg.slug}/projects` : '/orgs'}
             onClick={() => setOpen(false)}
-            className="flex w-1/3 items-center gap-2 border-r border-border px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
+            className="flex w-3/5 items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
           >
             <Settings className="h-3 w-3" />
             {focusedOrg
-              ? `Projects in ${focusedOrg.slug}`
-              : 'Projects'}
-          </Link>
-          <Link
-            to={focusedOrg ? `/orgs/${focusedOrg.slug}/clusters` : '/orgs'}
-            onClick={() => setOpen(false)}
-            className="flex w-1/3 items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60"
-          >
-            <Settings className="h-3 w-3" />
-            {focusedOrg
-              ? `Clusters in ${focusedOrg.slug}`
-              : 'Clusters'}
+              ? `Manage Projects in ${focusedOrg.slug}`
+              : 'Manage Projects'}
           </Link>
         </div>
       </DropdownMenuContent>
