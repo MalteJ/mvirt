@@ -85,6 +85,41 @@ fn require_org_admin(
     Ok(())
 }
 
+/// Gate a project-scoped mutation: looks up the Project (404 if missing),
+/// then requires the caller to be project-admin of it (cascades from
+/// org-admin of the parent Org and platform-admin). Pass-through in dev.
+async fn require_project_access(
+    state: &AppState,
+    auth: &Option<crate::auth::AuthenticatedAccount>,
+    project_slug: &str,
+) -> Result<(), ApiError> {
+    if state.jwt_validator.is_none() {
+        return Ok(());
+    }
+    let project = state
+        .store
+        .get_project(project_slug)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("Project '{}' not found", project_slug),
+            code: 404,
+        })?;
+    let ctx = auth.as_ref().ok_or_else(|| ApiError {
+        error: "missing auth".into(),
+        code: 401,
+    })?;
+    if !ctx
+        .0
+        .is_project_admin(project_slug, Some(&project.org_slug))
+    {
+        return Err(ApiError {
+            error: format!("project-admin in '{}' required", project_slug),
+            code: 403,
+        });
+    }
+    Ok(())
+}
+
 // =============================================================================
 // Org Handlers
 // =============================================================================
@@ -1147,8 +1182,10 @@ pub async fn get_vm(
 pub async fn create_vm(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateVmRequest>,
 ) -> Result<Json<UiVm>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let spec = VmSpec {
         name: req.name.clone(),
         project_slug,
@@ -1173,7 +1210,15 @@ pub async fn create_vm(
 pub async fn delete_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    if state.jwt_validator.is_some() {
+        let vm = state.store.get_vm(&id).await?.ok_or_else(|| ApiError {
+            error: format!("VM '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &vm.spec.project_slug).await?;
+    }
     state.store.delete_vm(&id).await?;
     state.audit.vm_deleted(&id);
     Ok(StatusCode::NO_CONTENT)
@@ -1184,7 +1229,15 @@ pub async fn delete_vm(
 pub async fn start_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiVm>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let vm = state.store.get_vm(&id).await?.ok_or_else(|| ApiError {
+            error: format!("VM '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &vm.spec.project_slug).await?;
+    }
     let store_req = StoreUpdateVmSpecRequest {
         desired_state: VmDesiredState::Running,
     };
@@ -1219,7 +1272,15 @@ pub async fn start_vm(
 pub async fn stop_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiVm>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let vm = state.store.get_vm(&id).await?.ok_or_else(|| ApiError {
+            error: format!("VM '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &vm.spec.project_slug).await?;
+    }
     let store_req = StoreUpdateVmSpecRequest {
         desired_state: VmDesiredState::Stopped,
     };
@@ -1253,7 +1314,15 @@ pub async fn stop_vm(
 pub async fn kill_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiVm>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let vm = state.store.get_vm(&id).await?.ok_or_else(|| ApiError {
+            error: format!("VM '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &vm.spec.project_slug).await?;
+    }
     let store_req = StoreUpdateVmSpecRequest {
         desired_state: VmDesiredState::Stopped,
     };
@@ -1347,8 +1416,10 @@ pub async fn get_network(
 pub async fn create_network(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateNetworkRequest>,
 ) -> Result<Json<UiNetwork>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let store_req = StoreCreateNetworkRequest {
         project_slug,
         name: req.name.clone(),
@@ -1371,7 +1442,19 @@ pub async fn create_network(
 pub async fn delete_network(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    if state.jwt_validator.is_some() {
+        let net = state
+            .store
+            .get_network(&id)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Network '{}' not found", id),
+                code: 404,
+            })?;
+        require_project_access(&state, &auth, &net.project_slug).await?;
+    }
     state.store.delete_network(&id, false).await?;
     state.audit.network_deleted(&id);
     Ok(StatusCode::NO_CONTENT)
@@ -1429,8 +1512,10 @@ pub async fn get_nic(
 pub async fn create_nic(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateNicRequest>,
 ) -> Result<Json<UiNic>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let store_req = StoreCreateNicRequest {
         project_slug,
         network_id: req.network_id,
@@ -1455,7 +1540,15 @@ pub async fn create_nic(
 pub async fn delete_nic(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    if state.jwt_validator.is_some() {
+        let nic = state.store.get_nic(&id).await?.ok_or_else(|| ApiError {
+            error: format!("NIC '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &nic.spec.project_slug).await?;
+    }
     state.store.delete_nic(&id).await?;
     state.audit.nic_deleted(&id);
     Ok(StatusCode::NO_CONTENT)
@@ -1466,8 +1559,16 @@ pub async fn delete_nic(
 pub async fn attach_nic(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiAttachNicRequest>,
 ) -> Result<Json<UiNic>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let nic = state.store.get_nic(&id).await?.ok_or_else(|| ApiError {
+            error: format!("NIC '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &nic.spec.project_slug).await?;
+    }
     let nic = state.store.attach_nic(&id, &req.vm_id).await?;
     Ok(Json(UiNic::from(nic)))
 }
@@ -1477,7 +1578,15 @@ pub async fn attach_nic(
 pub async fn detach_nic(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiNic>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let nic = state.store.get_nic(&id).await?.ok_or_else(|| ApiError {
+            error: format!("NIC '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &nic.spec.project_slug).await?;
+    }
     let nic = state.store.detach_nic(&id).await?;
     Ok(Json(UiNic::from(nic)))
 }
@@ -1522,8 +1631,10 @@ pub async fn get_volume(
 pub async fn create_volume(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateVolumeRequest>,
 ) -> Result<Json<UiVolume>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let store_req = StoreCreateVolumeRequest {
         project_slug,
         node_id: req.node_id,
@@ -1542,7 +1653,15 @@ pub async fn create_volume(
 pub async fn delete_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    if state.jwt_validator.is_some() {
+        let vol = state.store.get_volume(&id).await?.ok_or_else(|| ApiError {
+            error: format!("Volume '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &vol.spec.project_slug).await?;
+    }
     state.store.delete_volume(&id).await?;
     state.audit.volume_deleted(&id);
     Ok(StatusCode::NO_CONTENT)
@@ -1553,8 +1672,16 @@ pub async fn delete_volume(
 pub async fn resize_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiResizeVolumeRequest>,
 ) -> Result<Json<UiVolume>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let vol = state.store.get_volume(&id).await?.ok_or_else(|| ApiError {
+            error: format!("Volume '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &vol.spec.project_slug).await?;
+    }
     let store_req = StoreResizeVolumeRequest {
         size_bytes: req.size_bytes,
     };
@@ -1569,8 +1696,16 @@ pub async fn resize_volume(
 pub async fn create_snapshot(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateSnapshotRequest>,
 ) -> Result<Json<UiVolume>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let vol = state.store.get_volume(&id).await?.ok_or_else(|| ApiError {
+            error: format!("Volume '{}' not found", id),
+            code: 404,
+        })?;
+        require_project_access(&state, &auth, &vol.spec.project_slug).await?;
+    }
     let store_req = StoreCreateSnapshotRequest { name: req.name };
 
     let data = state.store.create_snapshot(&id, store_req).await?;
@@ -1595,8 +1730,10 @@ pub async fn list_templates(
 pub async fn import_template(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiImportTemplateRequest>,
 ) -> Result<Json<UiImportJob>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let store_req = StoreCreateTemplateRequest {
         project_slug,
         node_id: req.node_id,
@@ -1846,9 +1983,11 @@ pub async fn get_security_group(
 pub async fn create_security_group(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateSecurityGroupRequest>,
 ) -> Result<Json<UiSecurityGroup>, ApiError> {
     use crate::store::CreateSecurityGroupRequest;
+    require_project_access(&state, &auth, &project_slug).await?;
 
     let sg = state
         .store
@@ -1879,9 +2018,21 @@ pub async fn create_security_group(
 pub async fn update_security_group(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiUpdateSecurityGroupRequest>,
 ) -> Result<Json<UiSecurityGroup>, ApiError> {
     use crate::store::UpdateSecurityGroupRequest;
+    if state.jwt_validator.is_some() {
+        let sg = state
+            .store
+            .get_security_group(&id)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Security group '{}' not found", id),
+                code: 404,
+            })?;
+        require_project_access(&state, &auth, &sg.project_slug).await?;
+    }
 
     let sg = state
         .store
@@ -1901,7 +2052,19 @@ pub async fn update_security_group(
 pub async fn delete_security_group(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    if state.jwt_validator.is_some() {
+        let sg = state
+            .store
+            .get_security_group(&id)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Security group '{}' not found", id),
+                code: 404,
+            })?;
+        require_project_access(&state, &auth, &sg.project_slug).await?;
+    }
     state.store.delete_security_group(&id).await?;
 
     state.audit.security_group_deleted(&id);
@@ -1914,9 +2077,21 @@ pub async fn delete_security_group(
 pub async fn create_security_group_rule(
     State(state): State<Arc<AppState>>,
     Path(sg_id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateSecurityGroupRuleRequest>,
 ) -> Result<Json<UiSecurityGroup>, ApiError> {
     use crate::store::CreateSecurityGroupRuleRequest;
+    if state.jwt_validator.is_some() {
+        let parent = state
+            .store
+            .get_security_group(&sg_id)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Security group '{}' not found", sg_id),
+                code: 404,
+            })?;
+        require_project_access(&state, &auth, &parent.project_slug).await?;
+    }
 
     let sg = state
         .store
@@ -1943,7 +2118,19 @@ pub async fn create_security_group_rule(
 pub async fn delete_security_group_rule(
     State(state): State<Arc<AppState>>,
     Path((sg_id, rule_id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    if state.jwt_validator.is_some() {
+        let parent = state
+            .store
+            .get_security_group(&sg_id)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Security group '{}' not found", sg_id),
+                code: 404,
+            })?;
+        require_project_access(&state, &auth, &parent.project_slug).await?;
+    }
     state
         .store
         .delete_security_group_rule(&sg_id, &rule_id)
@@ -1969,9 +2156,21 @@ pub async fn delete_security_group_rule(
 pub async fn update_security_group_rule(
     State(state): State<Arc<AppState>>,
     Path((sg_id, rule_id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiUpdateSecurityGroupRuleRequest>,
 ) -> Result<Json<UiSecurityGroup>, ApiError> {
     use crate::store::UpdateSecurityGroupRuleRequest;
+    if state.jwt_validator.is_some() {
+        let parent = state
+            .store
+            .get_security_group(&sg_id)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Security group '{}' not found", sg_id),
+                code: 404,
+            })?;
+        require_project_access(&state, &auth, &parent.project_slug).await?;
+    }
 
     // The wire shape uses a sentinel: send `description: null` to clear the
     // field, omit the key to leave it untouched. Serde turns "key present
