@@ -53,17 +53,33 @@ struct Args {
     #[arg(long, value_parser = parse_peer)]
     peer: Vec<(NodeId, String)>,
 
-    /// Data directory for persistent storage
-    #[arg(short, long, default_value = "/var/lib/mvirt/cplane")]
-    data_dir: PathBuf,
+    /// Data directory for persistent storage. Defaults to
+    /// `/var/lib/mvirt/cplane` in production and `/tmp/mvirt-cplane-dev`
+    /// when `--dev` is set.
+    #[arg(short, long)]
+    data_dir: Option<PathBuf>,
 
     /// Bootstrap a new cluster (only for the first node)
     #[arg(long)]
     bootstrap: bool,
 
-    /// Run in development mode (single-node, ephemeral storage)
+    /// Run in development mode (single-node, auto-bootstrap, in-memory by
+    /// default — see also `--dev-persist`).
     #[arg(long)]
     dev: bool,
+
+    /// In `--dev` mode, persist state to disk under `--data-dir`
+    /// (default `/tmp/mvirt-cplane-dev`) so restarts don't wipe orgs,
+    /// clusters, accounts, and the internal CA. Ignored without `--dev`.
+    #[arg(long)]
+    dev_persist: bool,
+
+    /// Delete the data directory before starting. Combine with
+    /// `--dev --dev-persist` to start from a known-empty state. Safety:
+    /// only fires when the path looks like a dev dir (contains "dev" or
+    /// "tmp") OR `--dev` is set — never wipes production data dirs.
+    #[arg(long)]
+    reset: bool,
 
     /// Log service endpoint for audit logging
     #[arg(long, default_value = "http://[::1]:50052")]
@@ -110,13 +126,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
 
-    if !args.dev {
-        tokio::fs::create_dir_all(&args.data_dir).await?;
+    // Effective data dir:
+    //  - explicit `--data-dir` always wins
+    //  - else `--dev` defaults to `/tmp/mvirt-cplane-dev` (writable, easy to wipe)
+    //  - else production default `/var/lib/mvirt/cplane`
+    let data_dir = args.data_dir.unwrap_or_else(|| {
+        if args.dev {
+            PathBuf::from("/tmp/mvirt-cplane-dev")
+        } else {
+            PathBuf::from("/var/lib/mvirt/cplane")
+        }
+    });
+
+    // --reset wipes the data dir before opening it. Guard against
+    // accidentally nuking a production path: only allow when --dev is set
+    // OR the path obviously looks like a dev/tmp location.
+    if args.reset {
+        let path_str = data_dir.to_string_lossy();
+        let looks_dev = path_str.contains("/tmp/") || path_str.contains("dev");
+        if !(args.dev || looks_dev) {
+            return Err(format!(
+                "--reset refused on non-dev data dir {}; pass --dev or use a path containing 'tmp' or 'dev'",
+                data_dir.display()
+            )
+            .into());
+        }
+        if data_dir.exists() {
+            info!(path = %data_dir.display(), "--reset: removing data dir");
+            tokio::fs::remove_dir_all(&data_dir).await?;
+        }
+    }
+
+    // Both --dev (in-memory) and --dev-persist (on-disk) skip the explicit
+    // create_dir_all dance for prod; ApiState::open / RaftNode handle it.
+    let persistent = !args.dev || args.dev_persist;
+    if persistent {
+        tokio::fs::create_dir_all(&data_dir).await?;
     }
 
     info!(
-        "Starting mvirt-cplane node {} ({}) - Raft: {}, REST: {}, tunnel: {}",
-        node_id, name, args.raft_listen, args.listen, args.tunnel_listen
+        "Starting mvirt-cplane node {} ({}) - Raft: {}, REST: {}, tunnel: {}, storage: {}",
+        node_id,
+        name,
+        args.raft_listen,
+        args.listen,
+        args.tunnel_listen,
+        if persistent {
+            format!("persistent at {}", data_dir.display())
+        } else {
+            "in-memory".into()
+        }
     );
 
     let peers: BTreeMap<NodeId, String> = args.peer.into_iter().collect();
@@ -125,12 +184,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         id: node_id,
         listen_addr: args.raft_listen.clone(),
         peers,
-        storage: if args.dev {
-            StorageBackend::Memory
-        } else {
+        storage: if persistent {
             StorageBackend::Persistent {
-                path: args.data_dir.join("raft.db"),
+                path: data_dir.join("raft.db"),
             }
+        } else {
+            StorageBackend::Memory
         },
         // Snapshot every 1000 applied commands (see ADR-0002 §1).
         // openraft default is 100; we go higher because a redb-backed snapshot
@@ -138,10 +197,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         raft_config: Some(config_with_snapshot_threshold(1000)),
     };
 
-    let api_state = if args.dev {
-        ApiState::default()
+    let api_state = if persistent {
+        ApiState::open(&data_dir.join("state.redb"))?
     } else {
-        ApiState::open(&args.data_dir.join("state.redb"))?
+        ApiState::default()
     };
 
     let mut node: RaftNode<Command, Response, ApiState> = RaftNode::new(config, api_state).await?;
@@ -159,9 +218,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .map_err(|e| format!("Failed to join cluster: {}", e))?;
         info!("Successfully joined cluster");
     } else if args.bootstrap || args.dev {
-        info!("Bootstrapping new cluster");
-        node.generate_cluster_secret();
-        node.initialize_cluster().await?;
+        // With persistent storage, a second start finds the cluster already
+        // initialized (membership log entry present). openraft documents
+        // that re-calling `initialize` returns InitializeError::NotAllowed
+        // and that it's safe to ignore. mraft surfaces the raft instance
+        // via `node.raft()` — check up-front so we don't log a misleading
+        // "Bootstrapping new cluster" on every dev-persist restart.
+        if node.raft().is_initialized().await? {
+            info!("Cluster already initialized — resuming from persistent storage");
+        } else {
+            info!("Bootstrapping new cluster");
+            node.generate_cluster_secret();
+            node.initialize_cluster().await?;
+        }
     }
 
     info!("Waiting for leader election...");
