@@ -186,8 +186,10 @@ pub async fn create_org(
 pub async fn update_org(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiUpdateOrgRequest>,
 ) -> Result<Json<UiOrg>, ApiError> {
+    require_org_admin(&state, &auth, &slug)?;
     let org = state.store.get_org(&slug).await?.ok_or_else(|| ApiError {
         error: format!("Org '{}' not found", slug),
         code: 404,
@@ -365,7 +367,20 @@ fn validate_slug(slug: &str, field: &str) -> Result<(), ApiError> {
 pub async fn delete_project(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    // Need the parent Org for authz cascade.
+    if state.jwt_validator.is_some() {
+        let project = state
+            .store
+            .get_project(&id)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Project '{}' not found", id),
+                code: 404,
+            })?;
+        require_org_admin(&state, &auth, &project.org_slug)?;
+    }
     state.store.delete_project(&id).await?;
     state.audit.project_deleted(&id);
     Ok(StatusCode::NO_CONTENT)
@@ -495,8 +510,20 @@ pub async fn create_cluster(
 pub async fn update_cluster(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiUpdateClusterRequest>,
 ) -> Result<Json<UiCluster>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let cluster = state
+            .store
+            .get_cluster(&slug)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Cluster '{}' not found", slug),
+                code: 404,
+            })?;
+        require_org_admin(&state, &auth, &cluster.org_slug)?;
+    }
     let store_req = StoreUpdateClusterRequest {
         name: req.name,
         description: req.description,
@@ -554,7 +581,19 @@ pub async fn delete_cluster(
 pub async fn add_node_to_cluster(
     State(state): State<Arc<AppState>>,
     Path((slug, node_id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiCluster>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let cluster = state
+            .store
+            .get_cluster(&slug)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Cluster '{}' not found", slug),
+                code: 404,
+            })?;
+        require_org_admin(&state, &auth, &cluster.org_slug)?;
+    }
     let data = state.store.add_node_to_cluster(&slug, &node_id).await?;
     Ok(Json(UiCluster::from(data)))
 }
@@ -573,7 +612,19 @@ pub async fn add_node_to_cluster(
 pub async fn remove_node_from_cluster(
     State(state): State<Arc<AppState>>,
     Path((slug, node_id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiCluster>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let cluster = state
+            .store
+            .get_cluster(&slug)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Cluster '{}' not found", slug),
+                code: 404,
+            })?;
+        require_org_admin(&state, &auth, &cluster.org_slug)?;
+    }
     let data = state
         .store
         .remove_node_from_cluster(&slug, &node_id)
@@ -689,7 +740,19 @@ pub async fn create_onboarding_token(
 pub async fn delete_onboarding_token(
     State(state): State<Arc<AppState>>,
     Path((slug, id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    if state.jwt_validator.is_some() {
+        let cluster = state
+            .store
+            .get_cluster(&slug)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Cluster '{}' not found", slug),
+                code: 404,
+            })?;
+        require_org_admin(&state, &auth, &cluster.org_slug)?;
+    }
     state.store.delete_onboarding_token(&slug, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -961,8 +1024,26 @@ pub async fn delete_org_member(
 pub async fn revoke_node(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiRevokeNodeRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // Cascade: org-admin of the node's cluster's org, or platform-admin.
+    if state.jwt_validator.is_some() {
+        let node = state.store.get_node(&id).await?.ok_or_else(|| ApiError {
+            error: format!("Node '{}' not found", id),
+            code: 404,
+        })?;
+        if let Some(cluster_slug) = node.cluster_slug.as_deref() {
+            if let Some(cluster) = state.store.get_cluster(cluster_slug).await? {
+                require_org_admin(&state, &auth, &cluster.org_slug)?;
+            } else {
+                require_platform_admin(&state, &auth)?;
+            }
+        } else {
+            // Legacy node with no cluster — only platform-admin can revoke.
+            require_platform_admin(&state, &auth)?;
+        }
+    }
     let reason = match req.reason.as_str() {
         "decommission" => crate::command::RevocationReason::Decommission,
         "compromise" => crate::command::RevocationReason::Compromise,
