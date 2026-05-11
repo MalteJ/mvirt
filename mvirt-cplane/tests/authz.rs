@@ -142,6 +142,8 @@ async fn cascade_org_admin_via_state_machine() {
             iat: None,
             email: None,
             name: None,
+            given_name: None,
+            family_name: None,
             preferred_username: None,
         },
         account: acc.clone(),

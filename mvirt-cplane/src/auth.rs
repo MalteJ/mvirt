@@ -32,15 +32,91 @@ pub struct AuthClaims {
     pub iat: Option<i64>,
     #[serde(default)]
     pub email: Option<String>,
+    /// Standard OIDC `name` (full name). Rauthy doesn't emit this — see
+    /// `given_name`/`family_name` below — but other IdPs (Zitadel, Keycloak,
+    /// Auth0) do, so keep accepting it.
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    pub given_name: Option<String>,
+    #[serde(default)]
+    pub family_name: Option<String>,
+    /// Rauthy defaults `preferred_username` to email. Used as last-resort
+    /// fallback for display_name — only after `name` and `given_name`+
+    /// `family_name` have been tried.
+    #[serde(default)]
     pub preferred_username: Option<String>,
+}
+
+impl AuthClaims {
+    /// Best display-name from the available claims. Priority:
+    ///   1. `name` (standard OIDC full-name)
+    ///   2. `given_name` + ` ` + `family_name` (rauthy emits these when set)
+    ///   3. `preferred_username` (rauthy defaults to email; better than nothing)
+    pub fn best_display_name(&self) -> Option<String> {
+        if let Some(n) = self.name.as_ref().filter(|s| !s.trim().is_empty()) {
+            return Some(n.trim().to_string());
+        }
+        let g = self.given_name.as_deref().unwrap_or("").trim();
+        let f = self.family_name.as_deref().unwrap_or("").trim();
+        if !g.is_empty() || !f.is_empty() {
+            let joined = format!("{g} {f}").trim().to_string();
+            if !joined.is_empty() {
+                return Some(joined);
+            }
+        }
+        self.preferred_username
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenIdConfig {
     jwks_uri: String,
+    userinfo_endpoint: Option<String>,
+}
+
+/// Profile claims pulled from the IdP's UserInfo endpoint. Rauthy emits
+/// `given_name`, `family_name`, `preferred_username` here but NOT in the
+/// access token, so this is the canonical source for display_name on
+/// rauthy. Other IdPs may put the same data in the JWT body — handler
+/// code merges both paths via `best_display_name()`.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ProfileClaims {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub given_name: Option<String>,
+    #[serde(default)]
+    pub family_name: Option<String>,
+    #[serde(default)]
+    pub preferred_username: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+impl ProfileClaims {
+    /// Same fallback chain as [`AuthClaims::best_display_name`], applied
+    /// to the UserInfo body.
+    pub fn best_display_name(&self) -> Option<String> {
+        if let Some(n) = self.name.as_ref().filter(|s| !s.trim().is_empty()) {
+            return Some(n.trim().to_string());
+        }
+        let g = self.given_name.as_deref().unwrap_or("").trim();
+        let f = self.family_name.as_deref().unwrap_or("").trim();
+        if !g.is_empty() || !f.is_empty() {
+            let joined = format!("{g} {f}").trim().to_string();
+            if !joined.is_empty() {
+                return Some(joined);
+            }
+        }
+        self.preferred_username
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +136,7 @@ pub struct JwtValidator {
     issuer: String,
     audience: Option<String>,
     jwks_uri: String,
+    userinfo_endpoint: Option<String>,
     keys: RwLock<HashMap<String, DecodingKey>>,
     http: reqwest::Client,
 }
@@ -94,12 +171,49 @@ impl JwtValidator {
             issuer,
             audience,
             jwks_uri: cfg.jwks_uri,
+            userinfo_endpoint: cfg.userinfo_endpoint,
             keys: RwLock::new(HashMap::new()),
             http,
         };
         validator.refresh_keys().await?;
-        info!(issuer = %validator.issuer, "JWT validator ready");
+        info!(
+            issuer = %validator.issuer,
+            userinfo = ?validator.userinfo_endpoint,
+            "JWT validator ready"
+        );
         Ok(validator)
+    }
+
+    /// Pull profile claims from the IdP's UserInfo endpoint using the same
+    /// bearer token. Rauthy doesn't put profile claims in the access token,
+    /// so the signin handler calls this once per fresh OIDC login to
+    /// backfill display_name on the Account. Not invoked from `require_auth`
+    /// — that would mean a UserInfo round-trip on every request.
+    /// Returns `None` when the IdP doesn't advertise UserInfo or the call
+    /// fails — we never block auth on a missing display name.
+    pub async fn fetch_userinfo_profile(&self, token: &str) -> Option<ProfileClaims> {
+        let url = self.userinfo_endpoint.as_deref()?;
+        let resp = match self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(r) => r,
+            Err(err) => {
+                warn!(?err, "UserInfo fetch failed");
+                return None;
+            }
+        };
+        match resp.json::<ProfileClaims>().await {
+            Ok(c) => Some(c),
+            Err(err) => {
+                warn!(?err, "UserInfo response not JSON-decodable");
+                None
+            }
+        }
     }
 
     async fn refresh_keys(&self) -> Result<()> {
@@ -255,15 +369,16 @@ pub async fn require_auth(
         }
     };
 
-    // Lazy-create / refresh the Account row.
+    // Lazy-create / refresh the Account row from the JWT body alone — no
+    // UserInfo fetch in the hot path. With rauthy, the access token only
+    // carries `email`, so `display_name` will be `None` on first request;
+    // the UI calls `POST /v1/auth/signin` once per OIDC callback to
+    // backfill display_name from the UserInfo endpoint.
     let ensure = crate::store::EnsureAccountRequest {
         iss: claims.iss.clone(),
         sub: claims.sub.clone(),
         email: claims.email.clone(),
-        display_name: claims
-            .name
-            .clone()
-            .or_else(|| claims.preferred_username.clone()),
+        display_name: claims.best_display_name(),
     };
     let account = match state.store.ensure_account_from_oidc(ensure).await {
         Ok(a) => a,

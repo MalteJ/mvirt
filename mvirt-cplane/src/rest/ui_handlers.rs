@@ -878,6 +878,75 @@ pub async fn get_me(
     }))
 }
 
+/// Signin callback — invoked once by the UI after an OIDC redirect lands.
+/// Pulls profile claims from the IdP's UserInfo endpoint and updates the
+/// Account's `display_name` / `email` if the JWT body alone didn't have
+/// them. Hot-path requests (`/v1/me`, anything authenticated) only see
+/// the JWT — UserInfo is **never** fetched on a per-request basis.
+///
+/// Returns the freshly-resolved UiMe so the UI can immediately render.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/signin",
+    responses(
+        (status = 200, body = UiMe),
+        (status = 401, body = ApiError)
+    ),
+    tag = "auth"
+)]
+pub async fn post_signin(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    crate::auth::AuthenticatedAccount(ctx): crate::auth::AuthenticatedAccount,
+) -> Result<Json<UiMe>, ApiError> {
+    // require_auth already validated the bearer; pull it from headers
+    // again so we can forward to UserInfo.
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or_else(|| ApiError {
+            error: "missing Authorization: Bearer header".into(),
+            code: 401,
+        })?;
+
+    let is_platform_admin = ctx.is_platform_admin();
+    let mut account = ctx.account;
+    if let (Some(validator), Some(iss), Some(sub)) = (
+        state.jwt_validator.as_ref(),
+        account.external_iss.clone(),
+        account.external_sub.clone(),
+    ) && let Some(profile) = validator.fetch_userinfo_profile(token).await
+    {
+        let new_display_name = profile.best_display_name();
+        let new_email = profile.email.clone();
+        let needs_update = (new_display_name.is_some()
+            && new_display_name != account.display_name)
+            || (new_email.is_some() && new_email != account.email);
+        if needs_update {
+            account = state
+                .store
+                .ensure_account_from_oidc(crate::store::EnsureAccountRequest {
+                    iss,
+                    sub,
+                    email: new_email.or(account.email.clone()),
+                    display_name: new_display_name.or(account.display_name.clone()),
+                })
+                .await?;
+        }
+    }
+
+    Ok(Json(UiMe {
+        account: UiAccount::from(account),
+        memberships: ctx
+            .memberships
+            .into_iter()
+            .map(UiMembership::from)
+            .collect(),
+        is_platform_admin,
+    }))
+}
+
 /// Invite-by-email: pre-create an Account with just the email. The OIDC
 /// apply reconciles by email on first login → links (iss, sub) to this
 /// row. Platform-admin only.

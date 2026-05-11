@@ -5,6 +5,14 @@ export async function getMe(): Promise<Me> {
   return get<Me>('/me')
 }
 
+/// One-shot called after the OIDC redirect lands. cplane fetches the IdP's
+/// UserInfo endpoint with the bearer to backfill display_name / email on
+/// the Account row — done here so the hot path (`/v1/me` and other
+/// authenticated calls) doesn't touch the IdP on every request.
+export async function postSignin(): Promise<Me> {
+  return post<Me>('/auth/signin', {})
+}
+
 export async function listAccounts(): Promise<Account[]> {
   return get<Account[]>('/accounts')
 }

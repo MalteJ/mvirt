@@ -77,6 +77,7 @@ use crate::auth::require_auth;
         ui_handlers::revoke_node,
         // Auth + Members (ADR-0004)
         ui_handlers::get_me,
+        ui_handlers::post_signin,
         ui_handlers::list_accounts,
         ui_handlers::invite_account,
         ui_handlers::list_org_members,
@@ -328,6 +329,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/nodes/{id}/revoke", post(ui_handlers::revoke_node))
         // Auth (ADR-0004): current user + accounts + org members
         .route("/me", get(ui_handlers::get_me))
+        // UI signin callback — backfills display_name from the IdP UserInfo
+        // endpoint. Called once per OIDC redirect, not per request.
+        .route("/auth/signin", post(ui_handlers::post_signin))
         .route(
             "/accounts",
             get(ui_handlers::list_accounts).post(ui_handlers::invite_account),
