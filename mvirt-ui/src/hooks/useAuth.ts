@@ -41,11 +41,17 @@ export function useAuth() {
 /// Whether the current user is a platform-wide super-admin (mvirt operator,
 /// not just an Org admin). Gates the "mvirt Admin" section in the sidebar.
 ///
-/// ADR-0004 defines a `platform-admin` role on the Account. The OIDC layer
-/// isn't fully wired through yet — until it is, we read a localStorage
-/// override (`mvirt-superuser=true`) so the operator can flip the section
-/// on in their browser. When the auth model lands, swap the body for a
-/// real claim check.
+/// Per ADR-0004 we deliberately do NOT read roles from OIDC claims — each
+/// provider exposes those differently ("groups", "roles", custom claim
+/// paths, …) and pulling authz out of the IdP is "exactly the trap we
+/// want to avoid". OIDC supplies only `(issuer, sub)`; the authoritative
+/// role lives in cplane's `memberships` table at scope=Platform.
+///
+/// That table + the `/v1/me` endpoint that surfaces it don't exist yet
+/// (pending ADR-0004 backend work). Until they do, this hook reads a
+/// `mvirt-superuser=true` localStorage flag so the operator can preview
+/// the section. Swap the body for `useQuery('/v1/me/memberships')` and
+/// check for a Platform-scoped role once that endpoint lands.
 export function useIsPlatformAdmin(): boolean {
   if (typeof window === 'undefined') return false
   return window.localStorage.getItem('mvirt-superuser') === 'true'
