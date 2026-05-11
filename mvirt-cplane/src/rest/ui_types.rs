@@ -638,6 +638,108 @@ pub struct UiRevokeNodeRequest {
 }
 
 // =============================================================================
+// Accounts + Memberships (ADR-0004)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiAccount {
+    pub id: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<crate::command::AccountData> for UiAccount {
+    fn from(a: crate::command::AccountData) -> Self {
+        Self {
+            id: a.id,
+            kind: match a.kind {
+                crate::command::AccountKind::User => "user".into(),
+                crate::command::AccountKind::ServiceAccount => "service_account".into(),
+            },
+            email: a.email,
+            display_name: a.display_name,
+            created_at: a.created_at,
+            updated_at: a.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiMembership {
+    pub id: String,
+    pub account_id: String,
+    /// `platform` | `org` | `project`.
+    pub scope: String,
+    /// Set only for `org` / `project` scopes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_slug: Option<String>,
+    /// `platform-admin` | `org-admin` | `project-admin`.
+    pub role: String,
+    pub created_by_account: String,
+    pub created_at: String,
+}
+
+impl From<crate::command::MembershipData> for UiMembership {
+    fn from(m: crate::command::MembershipData) -> Self {
+        let (scope, scope_slug) = match m.scope {
+            crate::command::MembershipScope::Platform => ("platform".to_string(), None),
+            crate::command::MembershipScope::Org { org_slug } => {
+                ("org".to_string(), Some(org_slug))
+            }
+            crate::command::MembershipScope::Project { project_slug } => {
+                ("project".to_string(), Some(project_slug))
+            }
+        };
+        let role = match m.role {
+            crate::command::Role::PlatformAdmin => "platform-admin",
+            crate::command::Role::OrgAdmin => "org-admin",
+            crate::command::Role::ProjectAdmin => "project-admin",
+        };
+        Self {
+            id: m.id,
+            account_id: m.account_id,
+            scope,
+            scope_slug,
+            role: role.to_string(),
+            created_by_account: m.created_by_account,
+            created_at: m.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiMe {
+    pub account: UiAccount,
+    pub memberships: Vec<UiMembership>,
+    pub is_platform_admin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MembershipListResponse {
+    pub memberships: Vec<UiMembership>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreateOrgMembershipRequest {
+    /// Account id to grant the membership to. Account must already exist —
+    /// either pre-registered or created via a prior OIDC login.
+    pub account_id: String,
+    /// `org-admin`. Only one role today; surface as a string for forward-
+    /// compat with future per-Org roles (member, viewer, …).
+    pub role: String,
+}
+
+// =============================================================================
 // Volume Types
 // =============================================================================
 

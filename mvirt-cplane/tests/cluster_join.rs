@@ -99,9 +99,11 @@ impl TestCluster {
             audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
             log_endpoint: String::new(),
+            jwt_validator: None,
+            initial_admin_email: None,
         });
 
-        let router = create_router(app_state, None);
+        let router = create_router(app_state);
         let rest_addr = format!("127.0.0.1:{}", rest_port);
         let listener = TcpListener::bind(&rest_addr).await.unwrap();
         let actual_rest_addr = listener.local_addr().unwrap().to_string();
@@ -167,9 +169,11 @@ impl TestCluster {
             audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
             log_endpoint: String::new(),
+            jwt_validator: None,
+            initial_admin_email: None,
         });
 
-        let router = create_router(app_state, None);
+        let router = create_router(app_state);
         let rest_addr = format!("127.0.0.1:{}", rest_port);
         let listener = TcpListener::bind(&rest_addr).await.unwrap();
         let actual_rest_addr = listener.local_addr().unwrap().to_string();

@@ -1,4 +1,5 @@
 import { useAuth as useOidcAuth } from 'react-oidc-context'
+import { useMe } from './queries/useMe'
 
 export interface AuthUser {
   name: string
@@ -38,21 +39,23 @@ export function useAuth() {
   }
 }
 
-/// Whether the current user is a platform-wide super-admin (mvirt operator,
-/// not just an Org admin). Gates the "mvirt Admin" section in the sidebar.
+/// Whether the current user is a platform-wide super-admin (ADR-0004
+/// scope=Platform, role=platform-admin). Authoritative source is the
+/// cplane's memberships table, surfaced via `/v1/me`. In dev mode (no
+/// JWT validator on the cplane) /v1/me returns 401 → the hook falls back
+/// to the `mvirt-superuser` localStorage flag so the operator can still
+/// preview the section. Production deployments rely solely on the API.
 ///
-/// Per ADR-0004 we deliberately do NOT read roles from OIDC claims — each
-/// provider exposes those differently ("groups", "roles", custom claim
-/// paths, …) and pulling authz out of the IdP is "exactly the trap we
-/// want to avoid". OIDC supplies only `(issuer, sub)`; the authoritative
-/// role lives in cplane's `memberships` table at scope=Platform.
-///
-/// That table + the `/v1/me` endpoint that surfaces it don't exist yet
-/// (pending ADR-0004 backend work). Until they do, this hook reads a
-/// `mvirt-superuser=true` localStorage flag so the operator can preview
-/// the section. Swap the body for `useQuery('/v1/me/memberships')` and
-/// check for a Platform-scoped role once that endpoint lands.
+/// Deliberately NOT reading OIDC claims — providers expose roles
+/// differently and pulling authz out of the IdP is the trap ADR-0004
+/// avoids. OIDC supplies only `(issuer, sub)`; cplane owns the role.
 export function useIsPlatformAdmin(): boolean {
-  if (typeof window === 'undefined') return false
-  return window.localStorage.getItem('mvirt-superuser') === 'true'
+  const { data } = useMe()
+  if (data && data.isPlatformAdmin) return true
+  // data === null → cplane returned 401 (auth disabled in dev). Fall
+  // through to the localStorage override.
+  if (data === null && typeof window !== 'undefined') {
+    return window.localStorage.getItem('mvirt-superuser') === 'true'
+  }
+  return false
 }

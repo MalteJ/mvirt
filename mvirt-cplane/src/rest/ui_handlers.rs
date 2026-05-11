@@ -18,6 +18,7 @@ use super::ui_types::*;
 use crate::command::{VmDesiredState, VmPhase, VmSpec, VmStatus};
 use crate::store::{
     CreateClusterRequest as StoreCreateClusterRequest,
+    CreateMembershipRequest as StoreCreateMembershipRequest,
     CreateNetworkRequest as StoreCreateNetworkRequest, CreateNicRequest as StoreCreateNicRequest,
     CreateOnboardingTokenRequest as StoreCreateOnboardingTokenRequest,
     CreateOrgRequest as StoreCreateOrgRequest, CreateProjectRequest as StoreCreateProjectRequest,
@@ -649,6 +650,172 @@ pub async fn bootstrap_onboarding(
         ca_cert_pem: outcome.ca_cert_pem,
         cert_not_after: outcome.cert_not_after,
     }))
+}
+
+// =============================================================================
+// Account + Membership handlers (ADR-0004)
+// =============================================================================
+
+/// Current user — Account + memberships. Driven by the AuthContext that the
+/// auth middleware attached after JWT validation. Returns 401 when auth is
+/// disabled (dev mode) — the UI's localStorage stub kicks in instead.
+#[utoipa::path(
+    get,
+    path = "/v1/me",
+    responses(
+        (status = 200, body = UiMe),
+        (status = 401, body = ApiError)
+    ),
+    tag = "auth"
+)]
+pub async fn get_me(
+    crate::auth::AuthenticatedAccount(ctx): crate::auth::AuthenticatedAccount,
+) -> Result<Json<UiMe>, ApiError> {
+    let is_platform_admin = ctx.is_platform_admin();
+    Ok(Json(UiMe {
+        account: UiAccount::from(ctx.account),
+        memberships: ctx
+            .memberships
+            .into_iter()
+            .map(UiMembership::from)
+            .collect(),
+        is_platform_admin,
+    }))
+}
+
+/// List members of an Org. Org-admin or platform-admin only.
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{org_slug}/members",
+    params(("org_slug" = String, Path)),
+    responses(
+        (status = 200, body = MembershipListResponse),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "orgs"
+)]
+pub async fn list_org_members(
+    State(state): State<Arc<AppState>>,
+    Path(org_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+) -> Result<Json<MembershipListResponse>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let ctx = auth.ok_or_else(|| ApiError {
+            error: "missing auth".into(),
+            code: 401,
+        })?;
+        if !ctx.0.is_org_admin(&org_slug) {
+            return Err(ApiError {
+                error: "org-admin required".into(),
+                code: 403,
+            });
+        }
+    }
+    if state.store.get_org(&org_slug).await?.is_none() {
+        return Err(ApiError {
+            error: format!("Org '{}' not found", org_slug),
+            code: 404,
+        });
+    }
+    let scope = crate::command::MembershipScope::Org {
+        org_slug: org_slug.clone(),
+    };
+    let memberships = state.store.list_memberships_at_scope(&scope).await?;
+    Ok(Json(MembershipListResponse {
+        memberships: memberships.into_iter().map(UiMembership::from).collect(),
+    }))
+}
+
+/// Grant a membership in this Org. Org-admin or platform-admin only.
+#[utoipa::path(
+    post,
+    path = "/v1/orgs/{org_slug}/members",
+    params(("org_slug" = String, Path)),
+    request_body = UiCreateOrgMembershipRequest,
+    responses(
+        (status = 200, body = UiMembership),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError),
+        (status = 409, body = ApiError)
+    ),
+    tag = "orgs"
+)]
+pub async fn create_org_member(
+    State(state): State<Arc<AppState>>,
+    Path(org_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+    Json(req): Json<UiCreateOrgMembershipRequest>,
+) -> Result<Json<UiMembership>, ApiError> {
+    let caller_account = if state.jwt_validator.is_some() {
+        let ctx = auth.ok_or_else(|| ApiError {
+            error: "missing auth".into(),
+            code: 401,
+        })?;
+        if !ctx.0.is_org_admin(&org_slug) {
+            return Err(ApiError {
+                error: "org-admin required".into(),
+                code: 403,
+            });
+        }
+        ctx.0.account.id
+    } else {
+        // Auth disabled (dev / test) — anonymous caller becomes the
+        // bootstrap admin in audit fields.
+        "system".to_string()
+    };
+    let role = match req.role.as_str() {
+        "org-admin" => crate::command::Role::OrgAdmin,
+        other => {
+            return Err(ApiError {
+                error: format!("unknown role '{}'; allowed: org-admin", other),
+                code: 400,
+            });
+        }
+    };
+    let m = state
+        .store
+        .create_membership(StoreCreateMembershipRequest {
+            account_id: req.account_id,
+            scope: crate::command::MembershipScope::Org { org_slug },
+            role,
+            created_by_account: caller_account,
+        })
+        .await?;
+    Ok(Json(UiMembership::from(m)))
+}
+
+/// Revoke a membership. Org-admin or platform-admin only.
+#[utoipa::path(
+    delete,
+    path = "/v1/orgs/{org_slug}/members/{id}",
+    params(("org_slug" = String, Path), ("id" = String, Path)),
+    responses(
+        (status = 204),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "orgs"
+)]
+pub async fn delete_org_member(
+    State(state): State<Arc<AppState>>,
+    Path((org_slug, id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+) -> Result<StatusCode, ApiError> {
+    if state.jwt_validator.is_some() {
+        let ctx = auth.ok_or_else(|| ApiError {
+            error: "missing auth".into(),
+            code: 401,
+        })?;
+        if !ctx.0.is_org_admin(&org_slug) {
+            return Err(ApiError {
+                error: "org-admin required".into(),
+                code: 403,
+            });
+        }
+    }
+    state.store.delete_membership(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Revoke a Node's cert. `decommission` also deletes the Node row (and

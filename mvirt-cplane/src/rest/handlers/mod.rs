@@ -36,6 +36,14 @@ pub struct AppState {
     pub audit: Arc<ApiAuditLogger>,
     pub node_id: NodeId,
     pub log_endpoint: String,
+    /// OIDC JWT validator. `None` in dev / test mode (auth disabled);
+    /// `Some` in production. The auth middleware reads it from here so it
+    /// can also reach the store for Account lazy-creation.
+    pub jwt_validator: Option<Arc<crate::auth::JwtValidator>>,
+    /// Email pulled from `MVIRT_INITIAL_ADMIN_EMAIL`. On the first verified
+    /// OIDC login matching this email (and no platform-admin existing yet),
+    /// the auth middleware grants Platform/PlatformAdmin to the new Account.
+    pub initial_admin_email: Option<String>,
 }
 
 /// API error response

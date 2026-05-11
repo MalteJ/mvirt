@@ -9,7 +9,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use super::handlers::{self, AppState};
 use super::ui_handlers;
 use super::ui_types;
-use crate::auth::{JwtValidator, require_auth};
+use crate::auth::require_auth;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -27,6 +27,7 @@ use crate::auth::{JwtValidator, require_auth};
         (name = "projects", description = "Project management"),
         (name = "clusters", description = "Cluster management (named groups of Nodes within an Org)"),
         (name = "bootstrap", description = "Node onboarding (token-authed; no Account session)"),
+        (name = "auth", description = "Current user, sessions"),
         (name = "networks", description = "Network CRUD operations"),
         (name = "nics", description = "NIC CRUD operations"),
         (name = "vms", description = "VM CRUD and lifecycle operations"),
@@ -74,6 +75,11 @@ use crate::auth::{JwtValidator, require_auth};
         ui_handlers::delete_onboarding_token,
         ui_handlers::bootstrap_onboarding,
         ui_handlers::revoke_node,
+        // Auth + Members (ADR-0004)
+        ui_handlers::get_me,
+        ui_handlers::list_org_members,
+        ui_handlers::create_org_member,
+        ui_handlers::delete_org_member,
         // VMs (UI)
         ui_handlers::list_vms,
         ui_handlers::get_vm,
@@ -165,6 +171,12 @@ use crate::auth::{JwtValidator, require_auth};
         ui_types::UiBootstrapRequest,
         ui_types::UiBootstrapResponse,
         ui_types::UiRevokeNodeRequest,
+        // UI schemas - Auth + Members
+        ui_types::UiAccount,
+        ui_types::UiMembership,
+        ui_types::UiMe,
+        ui_types::MembershipListResponse,
+        ui_types::UiCreateOrgMembershipRequest,
         // UI schemas - VMs
         ui_types::UiVm,
         ui_types::UiVmState,
@@ -219,7 +231,11 @@ use crate::auth::{JwtValidator, require_auth};
 )]
 pub struct ApiDoc;
 
-pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>) -> Router {
+pub fn create_router(state: Arc<AppState>) -> Router {
+    // The middleware reaches the JWT validator + DataStore via AppState,
+    // so we no longer need a separate validator parameter — auth is on
+    // iff `state.jwt_validator.is_some()`.
+    let auth_enabled = state.jwt_validator.is_some();
     // Internal API routes (for hypervisor nodes, cluster management)
     let internal_routes = Router::new()
         // System
@@ -304,6 +320,16 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
         )
         // Node revoke (cert revocation; Decommission also deletes the row)
         .route("/nodes/{id}/revoke", post(ui_handlers::revoke_node))
+        // Auth (ADR-0004): current user + org members
+        .route("/me", get(ui_handlers::get_me))
+        .route(
+            "/orgs/{org_slug}/members",
+            get(ui_handlers::list_org_members).post(ui_handlers::create_org_member),
+        )
+        .route(
+            "/orgs/{org_slug}/members/{id}",
+            delete(ui_handlers::delete_org_member),
+        )
         // Global storage
         .route("/import-jobs/{id}", get(ui_handlers::get_import_job))
         .route("/pool", get(ui_handlers::get_pool_stats))
@@ -404,12 +430,13 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
     // User-facing routes get JWT auth applied when a validator is configured.
     // Internal routes are reached via the cplane-to-cplane network, not the
     // public REST endpoint, and stay unauthenticated for now.
-    let (global_routes, project_routes) = match validator {
-        Some(v) => (
-            global_routes.layer(middleware::from_fn_with_state(v.clone(), require_auth)),
-            project_routes.layer(middleware::from_fn_with_state(v, require_auth)),
-        ),
-        None => (global_routes, project_routes),
+    let (global_routes, project_routes) = if auth_enabled {
+        (
+            global_routes.layer(middleware::from_fn_with_state(state.clone(), require_auth)),
+            project_routes.layer(middleware::from_fn_with_state(state.clone(), require_auth)),
+        )
+    } else {
+        (global_routes, project_routes)
     };
 
     Router::new()

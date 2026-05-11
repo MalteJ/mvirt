@@ -80,10 +80,12 @@ impl TestServer {
             audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
             log_endpoint: String::new(),
+            jwt_validator: None,
+            initial_admin_email: None,
         });
 
-        // Create router
-        let router = create_router(app_state, None);
+        // Create router (auth off — tests run without OIDC).
+        let router = create_router(app_state);
 
         // Bind to REST port - use port 0 to let OS choose available port
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

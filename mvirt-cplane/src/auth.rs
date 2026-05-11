@@ -169,11 +169,64 @@ impl JwtValidator {
     }
 }
 
-/// Axum middleware: requires a valid Bearer token. Inserts [`AuthClaims`] into
-/// request extensions so handlers (or the [`AuthenticatedUser`] extractor)
-/// can read the caller identity.
+/// Authenticated caller context. Attached to request extensions by
+/// [`require_auth`] after JWT validation, Account lazy-creation, and
+/// membership lookup. Handlers extract it via [`AuthenticatedUser`].
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    pub claims: AuthClaims,
+    pub account: crate::command::AccountData,
+    pub memberships: Vec<crate::command::MembershipData>,
+}
+
+impl AuthContext {
+    /// True if the caller has Platform/PlatformAdmin.
+    pub fn is_platform_admin(&self) -> bool {
+        use crate::command::{MembershipScope, Role};
+        self.memberships
+            .iter()
+            .any(|m| m.scope == MembershipScope::Platform && m.role == Role::PlatformAdmin)
+    }
+
+    /// True if the caller has Org/OrgAdmin for `org_slug` (or platform-admin).
+    pub fn is_org_admin(&self, org_slug: &str) -> bool {
+        use crate::command::{MembershipScope, Role};
+        if self.is_platform_admin() {
+            return true;
+        }
+        self.memberships.iter().any(|m| {
+            m.role == Role::OrgAdmin
+                && matches!(&m.scope, MembershipScope::Org { org_slug: s } if s == org_slug)
+        })
+    }
+
+    /// True if the caller has Project/ProjectAdmin for `project_slug` (or
+    /// platform-admin / org-admin of the project's parent org).
+    pub fn is_project_admin(&self, project_slug: &str, project_org_slug: Option<&str>) -> bool {
+        use crate::command::{MembershipScope, Role};
+        if self.is_platform_admin() {
+            return true;
+        }
+        if let Some(org) = project_org_slug {
+            if self.is_org_admin(org) {
+                return true;
+            }
+        }
+        self.memberships.iter().any(|m| {
+            m.role == Role::ProjectAdmin
+                && matches!(&m.scope, MembershipScope::Project { project_slug: s } if s == project_slug)
+        })
+    }
+}
+
+/// Axum middleware: validates the Bearer token, lazy-creates the Account
+/// from the OIDC `(iss, sub)`, attaches the `AuthContext` (claims + account
+/// + memberships) to request extensions. Initial-admin bootstrap fires
+/// here too: the first verified login matching `MVIRT_INITIAL_ADMIN_EMAIL`
+/// receives Platform/PlatformAdmin atomically (race-safe — the apply
+/// handler refuses if any platform-admin already exists).
 pub async fn require_auth(
-    State(validator): State<Arc<JwtValidator>>,
+    State(state): State<Arc<crate::rest::AppState>>,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -185,16 +238,72 @@ pub async fn require_auth(
     let Some(token) = token else {
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
-    match validator.validate(token).await {
-        Ok(claims) => {
-            req.extensions_mut().insert(claims);
-            next.run(req).await
-        }
+
+    let Some(validator) = state.jwt_validator.as_ref() else {
+        // Auth was wired up but the validator is missing — defensive: this
+        // codepath shouldn't be reachable because routes.rs only mounts the
+        // middleware when a validator exists.
+        return (StatusCode::SERVICE_UNAVAILABLE, "auth misconfigured").into_response();
+    };
+    let claims = match validator.validate(token).await {
+        Ok(c) => c,
         Err(err) => {
             warn!(?err, "JWT validation failed");
-            (StatusCode::UNAUTHORIZED, "invalid token").into_response()
+            return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+        }
+    };
+
+    // Lazy-create / refresh the Account row.
+    let ensure = crate::store::EnsureAccountRequest {
+        iss: claims.iss.clone(),
+        sub: claims.sub.clone(),
+        email: claims.email.clone(),
+        display_name: claims
+            .name
+            .clone()
+            .or_else(|| claims.preferred_username.clone()),
+    };
+    let account = match state.store.ensure_account_from_oidc(ensure).await {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(error = %e, "ensure_account_from_oidc failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "account provisioning failed",
+            )
+                .into_response();
+        }
+    };
+
+    // Initial-admin bootstrap: fires only on email-match + verified email +
+    // no existing platform-admin. The atomic check lives in the apply
+    // handler so parallel logins can't race.
+    if let Some(target_email) = state.initial_admin_email.as_deref() {
+        if account.email.as_deref() == Some(target_email) {
+            if let Err(e) = state
+                .store
+                .bootstrap_initial_platform_admin(&account.id)
+                .await
+            {
+                warn!(error = %e, "initial admin bootstrap failed");
+            }
         }
     }
+
+    let memberships = state
+        .store
+        .list_memberships_for_account(&account.id)
+        .await
+        .unwrap_or_default();
+
+    let ctx = AuthContext {
+        claims: claims.clone(),
+        account,
+        memberships,
+    };
+    req.extensions_mut().insert(claims);
+    req.extensions_mut().insert(ctx);
+    next.run(req).await
 }
 
 /// Extractor that pulls [`AuthClaims`] out of the request extensions. Only
@@ -209,5 +318,37 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthenticatedUser {
             .await
             .map(|Extension(c)| Self(c))
             .map_err(|_| (StatusCode::UNAUTHORIZED, "no auth claims in request"))
+    }
+}
+
+/// Extractor for the full [`AuthContext`] (account + memberships). Use this
+/// instead of [`AuthenticatedUser`] when the handler needs to make authz
+/// decisions. Also usable as `Option<AuthenticatedAccount>` on routes that
+/// run with auth disabled in dev — the option is `None` then.
+pub struct AuthenticatedAccount(pub AuthContext);
+
+impl<S: Send + Sync> FromRequestParts<S> for AuthenticatedAccount {
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Extension::<AuthContext>::from_request_parts(parts, _state)
+            .await
+            .map(|Extension(c)| Self(c))
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "no auth context in request"))
+    }
+}
+
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for AuthenticatedAccount {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(parts
+            .extensions
+            .get::<AuthContext>()
+            .cloned()
+            .map(AuthenticatedAccount))
     }
 }

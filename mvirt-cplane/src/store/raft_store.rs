@@ -8,8 +8,9 @@ use mraft::RaftNode;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::command::{
-    ClusterData, Command, NetworkData, NicData, NodeData, OrgContact, OrgData, ProjectData,
-    Response, TemplateData, VmData, VmPhase, VmStatus, VolumeData,
+    AccountData, ClusterData, Command, MembershipData, MembershipScope, NetworkData, NicData,
+    NodeData, OrgContact, OrgData, ProjectData, Response, TemplateData, VmData, VmPhase, VmStatus,
+    VolumeData,
 };
 use crate::scheduler::Scheduler;
 use crate::state::ApiState;
@@ -17,11 +18,12 @@ use crate::state::ApiState;
 use super::error::{Result, StoreError};
 use super::event::Event;
 use super::traits::{
-    BootstrapOutcome, ClusterStore, ControlplaneInfo, ControlplaneStore, CreateClusterRequest,
-    CreateNetworkRequest, CreateNicRequest, CreateOnboardingTokenRequest, CreateOrgRequest,
-    CreateProjectRequest, CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest,
-    CreateSnapshotRequest, CreateTemplateRequest, CreateVmRequest, CreateVolumeRequest, DataStore,
-    DeleteNetworkResult, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore,
+    AccountStore, BootstrapOutcome, ClusterStore, ControlplaneInfo, ControlplaneStore,
+    CreateClusterRequest, CreateMembershipRequest, CreateNetworkRequest, CreateNicRequest,
+    CreateOnboardingTokenRequest, CreateOrgRequest, CreateProjectRequest,
+    CreateSecurityGroupRequest, CreateSecurityGroupRuleRequest, CreateSnapshotRequest,
+    CreateTemplateRequest, CreateVmRequest, CreateVolumeRequest, DataStore, DeleteNetworkResult,
+    EnsureAccountRequest, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore,
     OnboardingStore, OrgStore, ProjectStore, RedeemOnboardingTokenRequest, RegisterNodeRequest,
     ResizeVolumeRequest, SecurityGroupStore, TemplateStore, UpdateClusterRequest,
     UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateOrgRequest,
@@ -1283,6 +1285,112 @@ impl OnboardingStore for RaftStore {
             Response::Error { message, .. } => Err(StoreError::Internal(message)),
             _ => Err(StoreError::Internal("unexpected response".into())),
         }
+    }
+}
+
+#[async_trait]
+impl AccountStore for RaftStore {
+    async fn ensure_account_from_oidc(&self, req: EnsureAccountRequest) -> Result<AccountData> {
+        let cmd = Command::EnsureAccountFromOidc {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            new_id: format!("acc_{}", uuid::Uuid::new_v4().simple()),
+            iss: req.iss,
+            sub: req.sub,
+            email: req.email,
+            display_name: req.display_name,
+        };
+        match self.write_command(cmd).await? {
+            Response::Account(a) => Ok(a),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn get_account(&self, id: &str) -> Result<Option<AccountData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_account(id))
+    }
+
+    async fn get_account_by_oidc(&self, iss: &str, sub: &str) -> Result<Option<AccountData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_account_by_oidc(iss, sub))
+    }
+
+    async fn list_accounts(&self) -> Result<Vec<AccountData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_accounts())
+    }
+
+    async fn create_membership(&self, req: CreateMembershipRequest) -> Result<MembershipData> {
+        let cmd = Command::CreateMembership {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            id: format!("mbr_{}", uuid::Uuid::new_v4().simple()),
+            account_id: req.account_id,
+            scope: req.scope,
+            role: req.role,
+            created_by_account: req.created_by_account,
+        };
+        match self.write_command(cmd).await? {
+            Response::Membership(m) => Ok(m),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn delete_membership(&self, id: &str) -> Result<()> {
+        let cmd = Command::DeleteMembership {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn list_memberships_for_account(&self, account_id: &str) -> Result<Vec<MembershipData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_memberships_for_account(account_id))
+    }
+
+    async fn list_memberships_at_scope(
+        &self,
+        scope: &MembershipScope,
+    ) -> Result<Vec<MembershipData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_memberships_at_scope(scope))
+    }
+
+    async fn bootstrap_initial_platform_admin(&self, account_id: &str) -> Result<()> {
+        let cmd = Command::BootstrapInitialPlatformAdmin {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            id: format!("mbr_{}", uuid::Uuid::new_v4().simple()),
+            account_id: account_id.to_string(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Membership(_) | Response::Ack => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn has_platform_admin(&self) -> Result<bool> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.has_platform_admin())
     }
 }
 

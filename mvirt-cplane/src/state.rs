@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use crate::ca::{InternalCa, new_serial, sign_node_leaf};
 use crate::command::{
-    ClusterData, Command, NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus,
-    OnboardingTokenData, OrgData, ProjectData, Response, RevocationReason, RevokedCertData,
-    SecurityGroupData, SecurityGroupRuleData, ServerCertData, SnapshotData, TemplateData,
-    TemplatePhase, TemplateSpec, TemplateStatus, VmData, VmPhase, VmStatus, VolumeData, VolumeSpec,
-    VolumeStatus,
+    AccountData, AccountKind, ClusterData, Command, MembershipData, MembershipScope, NetworkData,
+    NicData, NicSpec, NicStatus, NodeData, NodeStatus, OnboardingTokenData, OrgData, ProjectData,
+    Response, RevocationReason, RevokedCertData, Role, SecurityGroupData, SecurityGroupRuleData,
+    ServerCertData, SnapshotData, TemplateData, TemplatePhase, TemplateSpec, TemplateStatus,
+    VmData, VmPhase, VmStatus, VolumeData, VolumeSpec, VolumeStatus,
 };
 #[cfg(test)]
 use crate::command::{OrgContact, VolumePhase};
@@ -42,6 +42,8 @@ const SECURITY_GROUPS: TableDefinition<&str, &[u8]> = TableDefinition::new("secu
 const ONBOARDING_TOKENS: TableDefinition<&str, &[u8]> = TableDefinition::new("onboarding_tokens");
 const REVOKED_CERTS: TableDefinition<&str, &[u8]> = TableDefinition::new("revoked_certs");
 const PKI: TableDefinition<&str, &[u8]> = TableDefinition::new("pki");
+const ACCOUNTS: TableDefinition<&str, &[u8]> = TableDefinition::new("accounts");
+const MEMBERSHIPS: TableDefinition<&str, &[u8]> = TableDefinition::new("memberships");
 
 /// Singleton key inside PKI for the CA material.
 const PKI_KEY_CA: &str = "internal_ca";
@@ -61,6 +63,8 @@ const ALL_TABLES: &[TableDefinition<&str, &[u8]>] = &[
     SECURITY_GROUPS,
     ONBOARDING_TOKENS,
     REVOKED_CERTS,
+    ACCOUNTS,
+    MEMBERSHIPS,
     PKI,
 ];
 
@@ -497,6 +501,59 @@ impl ApiState {
             .open_table(REVOKED_CERTS)
             .map(|t| t.get(serial_hex).map(|g| g.is_some()).unwrap_or(false))
             .unwrap_or(false)
+    }
+
+    // =========================================================================
+    // Account + Membership queries (ADR-0004).
+    // =========================================================================
+
+    pub fn get_account(&self, id: &str) -> Option<AccountData> {
+        read_get(&self.read_txn(), ACCOUNTS, id)
+    }
+
+    /// Look up the User Account whose `(iss, sub)` matches. Linear scan over
+    /// ACCOUNTS — fine at expected sizes; if it ever gets hot we add a
+    /// secondary index.
+    pub fn get_account_by_oidc(&self, iss: &str, sub: &str) -> Option<AccountData> {
+        read_list::<AccountData>(&self.read_txn(), ACCOUNTS)
+            .into_iter()
+            .find(|a| {
+                a.external_iss.as_deref() == Some(iss) && a.external_sub.as_deref() == Some(sub)
+            })
+    }
+
+    pub fn list_accounts(&self) -> Vec<AccountData> {
+        read_list(&self.read_txn(), ACCOUNTS)
+    }
+
+    pub fn get_membership(&self, id: &str) -> Option<MembershipData> {
+        read_get(&self.read_txn(), MEMBERSHIPS, id)
+    }
+
+    pub fn list_memberships(&self) -> Vec<MembershipData> {
+        read_list(&self.read_txn(), MEMBERSHIPS)
+    }
+
+    pub fn list_memberships_for_account(&self, account_id: &str) -> Vec<MembershipData> {
+        read_list::<MembershipData>(&self.read_txn(), MEMBERSHIPS)
+            .into_iter()
+            .filter(|m| m.account_id == account_id)
+            .collect()
+    }
+
+    pub fn list_memberships_at_scope(&self, scope: &MembershipScope) -> Vec<MembershipData> {
+        read_list::<MembershipData>(&self.read_txn(), MEMBERSHIPS)
+            .into_iter()
+            .filter(|m| &m.scope == scope)
+            .collect()
+    }
+
+    /// True if any platform-admin membership exists. Used by the initial
+    /// admin bootstrap to detect first-login state without races.
+    pub fn has_platform_admin(&self) -> bool {
+        read_list::<MembershipData>(&self.read_txn(), MEMBERSHIPS)
+            .into_iter()
+            .any(|m| m.scope == MembershipScope::Platform && m.role == Role::PlatformAdmin)
     }
 
     // =========================================================================
@@ -1676,8 +1733,7 @@ impl StateMachine<Command, Response> for ApiState {
                 // tokens for the same hostname in the same cluster (they'd
                 // be indistinguishable in the UI).
                 let dup_hostname = txn_list::<NodeData>(&txn, NODES).into_iter().any(|n| {
-                    n.cluster_slug.as_deref() == Some(cluster_slug.as_str())
-                        && n.name == hostname
+                    n.cluster_slug.as_deref() == Some(cluster_slug.as_str()) && n.name == hostname
                 });
                 if dup_hostname {
                     return (
@@ -1873,20 +1929,24 @@ impl StateMachine<Command, Response> for ApiState {
                 };
 
                 let serial = new_serial();
-                let signed =
-                    match sign_node_leaf(&ca, &csr_pem, &token.node_id, &token.cluster_slug, serial)
-                    {
-                        Ok(s) => s,
-                        Err(e) => {
-                            return (
-                                Response::Error {
-                                    code: 400,
-                                    message: format!("CSR invalid: {e}"),
-                                },
-                                vec![],
-                            );
-                        }
-                    };
+                let signed = match sign_node_leaf(
+                    &ca,
+                    &csr_pem,
+                    &token.node_id,
+                    &token.cluster_slug,
+                    serial,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return (
+                            Response::Error {
+                                code: 400,
+                                message: format!("CSR invalid: {e}"),
+                            },
+                            vec![],
+                        );
+                    }
+                };
 
                 token.used_at = Some(timestamp.clone());
                 token.used_by_node_id = Some(token.node_id.clone());
@@ -1904,7 +1964,8 @@ impl StateMachine<Command, Response> for ApiState {
                 node.cert_serial_hex = Some(signed.serial_hex.clone());
                 node.cert_expires_at = Some(signed.not_after.clone());
                 node.hostname = Some(hostname);
-                node.agent_version = Some(format!("{} ({} {})", agent_version, kernel_version, arch));
+                node.agent_version =
+                    Some(format!("{} ({} {})", agent_version, kernel_version, arch));
                 txn_put(&txn, NODES, &resolved_node_id, &node);
 
                 txn.commit().expect("commit");
@@ -1974,6 +2035,195 @@ impl StateMachine<Command, Response> for ApiState {
                 }
                 txn.commit().expect("commit");
                 (Response::Deleted { id: node_id }, vec![])
+            }
+
+            // =================================================================
+            // Account + Membership (ADR-0004).
+            // =================================================================
+            Command::EnsureAccountFromOidc {
+                timestamp,
+                new_id,
+                iss,
+                sub,
+                email,
+                display_name,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                // Existing match: optionally refresh email/display_name (UI
+                // sees newest claim value) but keep the id stable.
+                let existing = txn_list::<AccountData>(&txn, ACCOUNTS)
+                    .into_iter()
+                    .find(|a| {
+                        a.external_iss.as_deref() == Some(iss.as_str())
+                            && a.external_sub.as_deref() == Some(sub.as_str())
+                    });
+                let account = if let Some(mut acc) = existing {
+                    let mut changed = false;
+                    if email.is_some() && acc.email != email {
+                        acc.email = email;
+                        changed = true;
+                    }
+                    if display_name.is_some() && acc.display_name != display_name {
+                        acc.display_name = display_name;
+                        changed = true;
+                    }
+                    if changed {
+                        acc.updated_at = timestamp;
+                        let id = acc.id.clone();
+                        txn_put(&txn, ACCOUNTS, &id, &acc);
+                    }
+                    acc
+                } else {
+                    let acc = AccountData {
+                        id: new_id.clone(),
+                        kind: AccountKind::User,
+                        external_iss: Some(iss),
+                        external_sub: Some(sub),
+                        email,
+                        display_name,
+                        created_at: timestamp.clone(),
+                        updated_at: timestamp,
+                    };
+                    txn_put(&txn, ACCOUNTS, &new_id, &acc);
+                    acc
+                };
+                txn.commit().expect("commit");
+                (Response::Account(account), vec![])
+            }
+
+            Command::CreateMembership {
+                timestamp,
+                id,
+                account_id,
+                scope,
+                role,
+                created_by_account,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                if txn_has(&txn, MEMBERSHIPS, &id) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Membership '{}' already exists", id),
+                        },
+                        vec![],
+                    );
+                }
+                if !txn_has(&txn, ACCOUNTS, &account_id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Account '{}' not found", account_id),
+                        },
+                        vec![],
+                    );
+                }
+                // Scope-target existence checks — fail fast if the operator
+                // tries to grant a membership at a scope that doesn't exist.
+                match &scope {
+                    MembershipScope::Platform => {}
+                    MembershipScope::Org { org_slug } => {
+                        if !txn_has(&txn, ORGS, org_slug) {
+                            return (
+                                Response::Error {
+                                    code: 404,
+                                    message: format!("Org '{}' not found", org_slug),
+                                },
+                                vec![],
+                            );
+                        }
+                    }
+                    MembershipScope::Project { project_slug } => {
+                        if !txn_has(&txn, PROJECTS, project_slug) {
+                            return (
+                                Response::Error {
+                                    code: 404,
+                                    message: format!("Project '{}' not found", project_slug),
+                                },
+                                vec![],
+                            );
+                        }
+                    }
+                }
+                // Reject duplicate (account, scope, role).
+                let dup = txn_list::<MembershipData>(&txn, MEMBERSHIPS)
+                    .into_iter()
+                    .any(|m| m.account_id == account_id && m.scope == scope && m.role == role);
+                if dup {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: "membership already granted".into(),
+                        },
+                        vec![],
+                    );
+                }
+                let m = MembershipData {
+                    id: id.clone(),
+                    account_id,
+                    scope,
+                    role,
+                    created_by_account,
+                    created_at: timestamp,
+                };
+                txn_put(&txn, MEMBERSHIPS, &id, &m);
+                txn.commit().expect("commit");
+                (Response::Membership(m), vec![])
+            }
+
+            Command::DeleteMembership { id, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                if !txn_has(&txn, MEMBERSHIPS, &id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Membership '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                }
+                txn_delete(&txn, MEMBERSHIPS, &id);
+                txn.commit().expect("commit");
+                (Response::Deleted { id }, vec![])
+            }
+
+            Command::BootstrapInitialPlatformAdmin {
+                timestamp,
+                id,
+                account_id,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                // Race-safe: noop if any platform-admin already exists.
+                let exists = txn_list::<MembershipData>(&txn, MEMBERSHIPS)
+                    .into_iter()
+                    .any(|m| m.scope == MembershipScope::Platform && m.role == Role::PlatformAdmin);
+                if exists {
+                    txn.commit().expect("commit");
+                    return (Response::Ack, vec![]);
+                }
+                if !txn_has(&txn, ACCOUNTS, &account_id) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Account '{}' not found", account_id),
+                        },
+                        vec![],
+                    );
+                }
+                let m = MembershipData {
+                    id: id.clone(),
+                    account_id: account_id.clone(),
+                    scope: MembershipScope::Platform,
+                    role: Role::PlatformAdmin,
+                    created_by_account: account_id,
+                    created_at: timestamp,
+                };
+                txn_put(&txn, MEMBERSHIPS, &id, &m);
+                txn.commit().expect("commit");
+                (Response::Membership(m), vec![])
             }
 
             // =================================================================

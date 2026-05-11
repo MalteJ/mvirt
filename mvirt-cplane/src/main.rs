@@ -187,15 +187,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let raft_node = Arc::new(RwLock::new(node));
     let store = Arc::new(RaftStore::new(raft_node.clone(), event_tx, node_id));
 
+    let jwt_validator = JwtValidator::from_env().await?;
+    let initial_admin_email = std::env::var("MVIRT_INITIAL_ADMIN_EMAIL").ok();
+    if let Some(email) = initial_admin_email.as_deref() {
+        info!(
+            email = %email,
+            "initial-admin bootstrap armed — first OIDC login with this email + no existing platform-admin → granted Platform/PlatformAdmin"
+        );
+    }
     let app_state = Arc::new(AppState {
         store: store.clone(),
         audit: audit.clone(),
         node_id,
         log_endpoint: args.log_endpoint.clone(),
+        jwt_validator,
+        initial_admin_email,
     });
 
-    let jwt_validator = JwtValidator::from_env().await?;
-    let router = create_router(app_state.clone(), jwt_validator);
+    let router = create_router(app_state.clone());
 
     // Reverse-tunnel listener: nodes dial in, we get a Channel per connection.
     let registry = Arc::new(NodeRegistry::new());

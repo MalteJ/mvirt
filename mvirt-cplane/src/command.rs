@@ -251,6 +251,51 @@ pub enum Command {
         reason: RevocationReason,
     },
 
+    // -- Accounts + Memberships (ADR-0004) ---------------------------------
+    /// Lazy-create or refresh an Account from an OIDC login. Idempotent —
+    /// returns the existing row if `(iss, sub)` already matches. The
+    /// authoritative identity key is `(iss, sub)`; email/display_name are
+    /// cached for UI but never the identity key (ADR-0004 §"Account model").
+    EnsureAccountFromOidc {
+        request_id: String,
+        timestamp: String,
+        /// Pre-generated id used iff a new row is inserted; ignored if a
+        /// match already exists.
+        new_id: String,
+        iss: String,
+        sub: String,
+        email: Option<String>,
+        display_name: Option<String>,
+    },
+
+    /// Grant a (scope, role) membership to an Account.
+    CreateMembership {
+        request_id: String,
+        timestamp: String,
+        id: String,
+        account_id: String,
+        scope: MembershipScope,
+        role: Role,
+        created_by_account: String,
+    },
+
+    /// Remove a membership by id.
+    DeleteMembership {
+        request_id: String,
+        id: String,
+    },
+
+    /// Idempotent: grants `(Platform, PlatformAdmin)` to `account_id` only
+    /// when no platform-admin membership exists yet. Used by the initial
+    /// admin bootstrap (ADR-0004 §"Initial admin bootstrap") so two parallel
+    /// logins can't race-create two platform admins.
+    BootstrapInitialPlatformAdmin {
+        request_id: String,
+        timestamp: String,
+        id: String,
+        account_id: String,
+    },
+
     // Cluster operations — keyed by slug (platform-wide unique). See ADR-0005.
     CreateCluster {
         request_id: String,
@@ -443,6 +488,10 @@ impl Command {
             Command::DeleteOnboardingToken { request_id, .. } => request_id,
             Command::RedeemOnboardingToken { request_id, .. } => request_id,
             Command::RevokeNodeCert { request_id, .. } => request_id,
+            Command::EnsureAccountFromOidc { request_id, .. } => request_id,
+            Command::CreateMembership { request_id, .. } => request_id,
+            Command::DeleteMembership { request_id, .. } => request_id,
+            Command::BootstrapInitialPlatformAdmin { request_id, .. } => request_id,
             Command::CreateVolume { request_id, .. } => request_id,
             Command::DeleteVolume { request_id, .. } => request_id,
             Command::UpdateVolumeStatus { request_id, .. } => request_id,
@@ -771,6 +820,70 @@ pub struct RevokedCertData {
     pub reason: RevocationReason,
 }
 
+// =============================================================================
+// Account + Membership Types (ADR-0004)
+// =============================================================================
+
+/// What kind of Account this row represents. ServiceAccount is reserved in
+/// v1 — all live rows are User accounts. See ADR-0004 §"Account model".
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AccountKind {
+    User,
+    ServiceAccount,
+}
+
+/// User-or-ServiceAccount. Identity key for Users is `(external_iss,
+/// external_sub)`; never email. Email + display_name are cached from the
+/// IdP for the UI and may go stale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountData {
+    pub id: String,
+    pub kind: AccountKind,
+    /// OIDC issuer URL. None for ServiceAccounts.
+    pub external_iss: Option<String>,
+    /// OIDC `sub` claim. None for ServiceAccounts.
+    pub external_sub: Option<String>,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Authorization scope for a membership row. Cluster scope is reserved per
+/// ADR-0005 but not used in v1.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MembershipScope {
+    Platform,
+    Org { org_slug: String },
+    Project { project_slug: String },
+}
+
+/// Roles available within a scope. ADR-0004 settled on three; cluster-admin
+/// was reclaimed for the future per-Cluster role and renamed away from the
+/// platform-wide superadmin role.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Role {
+    /// Full access across the whole platform. Cascades downward.
+    PlatformAdmin,
+    /// Full access within one Org (and its Projects/Clusters).
+    OrgAdmin,
+    /// Full access within one Project.
+    ProjectAdmin,
+}
+
+/// A grant of `role` at `scope` to an Account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MembershipData {
+    pub id: String,
+    pub account_id: String,
+    pub scope: MembershipScope,
+    pub role: Role,
+    /// The Account that issued this grant. For bootstrap rows it points at
+    /// the freshly-bootstrapped admin itself (self-grant).
+    pub created_by_account: String,
+    pub created_at: String,
+}
+
 /// Current cplane server cert + key, persisted in raft so a freshly-elected
 /// leader can serve TLS without re-minting. Rotation is leader-driven.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -943,6 +1056,8 @@ pub enum Response {
     Project(ProjectData),
     Cluster(ClusterData),
     OnboardingToken(OnboardingTokenData),
+    Account(AccountData),
+    Membership(MembershipData),
     /// Result of a successful `RedeemOnboardingToken` apply: the freshly-
     /// minted Node + signed leaf + CA root (so the node can verify the
     /// cplane server cert on the next mTLS handshake).

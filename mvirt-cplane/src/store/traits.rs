@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::command::{
-    ClusterData, NetworkData, NicData, NodeData, NodeResources, NodeStatus, OrgContact, OrgData,
-    ProjectData, RuleDirection, SecurityGroupData, TemplateData, TemplatePhase, VmData,
-    VmDesiredState, VmSpec, VmStatus, VolumeData,
+    AccountData, ClusterData, MembershipData, MembershipScope, NetworkData, NicData, NodeData,
+    NodeResources, NodeStatus, OrgContact, OrgData, ProjectData, Role, RuleDirection,
+    SecurityGroupData, TemplateData, TemplatePhase, VmData, VmDesiredState, VmSpec, VmStatus,
+    VolumeData,
 };
 use std::collections::HashMap;
 
@@ -479,6 +480,48 @@ pub trait ClusterStore: Send + Sync {
     ) -> Result<ClusterData>;
 }
 
+/// Operator-supplied inputs for creating an OIDC-backed User Account.
+#[derive(Debug, Clone)]
+pub struct EnsureAccountRequest {
+    pub iss: String,
+    pub sub: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+}
+
+/// Inputs for granting a membership.
+#[derive(Debug, Clone)]
+pub struct CreateMembershipRequest {
+    pub account_id: String,
+    pub scope: MembershipScope,
+    pub role: Role,
+    /// Account id that's performing the grant. Used for audit; for the
+    /// initial-admin bootstrap this points at the new admin itself.
+    pub created_by_account: String,
+}
+
+/// Store trait for Account + Membership operations (ADR-0004).
+#[async_trait]
+pub trait AccountStore: Send + Sync {
+    /// Lazy-create or refresh a User Account from an OIDC login. Returns
+    /// the persisted row.
+    async fn ensure_account_from_oidc(&self, req: EnsureAccountRequest) -> Result<AccountData>;
+    async fn get_account(&self, id: &str) -> Result<Option<AccountData>>;
+    async fn get_account_by_oidc(&self, iss: &str, sub: &str) -> Result<Option<AccountData>>;
+    async fn list_accounts(&self) -> Result<Vec<AccountData>>;
+    async fn create_membership(&self, req: CreateMembershipRequest) -> Result<MembershipData>;
+    async fn delete_membership(&self, id: &str) -> Result<()>;
+    async fn list_memberships_for_account(&self, account_id: &str) -> Result<Vec<MembershipData>>;
+    async fn list_memberships_at_scope(
+        &self,
+        scope: &MembershipScope,
+    ) -> Result<Vec<MembershipData>>;
+    /// Idempotent: grants Platform/PlatformAdmin to `account_id` only when
+    /// no platform-admin exists yet. Returns the row (existing or new).
+    async fn bootstrap_initial_platform_admin(&self, account_id: &str) -> Result<()>;
+    async fn has_platform_admin(&self) -> Result<bool>;
+}
+
 /// Store trait for node onboarding (ADR-0006). Tokens are issued and
 /// consumed via the bootstrap REST endpoint; revoke targets node certs.
 #[async_trait]
@@ -689,6 +732,7 @@ pub trait DataStore:
     + OrgStore
     + ProjectStore
     + ClusterStore
+    + AccountStore
     + OnboardingStore
     + VolumeStore
     + TemplateStore
