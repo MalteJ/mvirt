@@ -1,5 +1,6 @@
 import { NavLink, Link, useLocation } from 'react-router-dom'
 import {
+  Cog,
   CreditCard,
   FolderKanban,
   HardDrive,
@@ -9,7 +10,6 @@ import {
   ScrollText,
   Server,
   Settings,
-  Shield,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useApiHealth } from '@/hooks/queries'
@@ -108,7 +108,7 @@ export function Sidebar() {
             end
             className={({ isActive }) => linkClass(isActive)}
           >
-            <Shield className="mr-3 h-4 w-4" />
+            <Cog className="mr-3 h-4 w-4" />
             mvirt Admin
           </NavLink>
         </div>
