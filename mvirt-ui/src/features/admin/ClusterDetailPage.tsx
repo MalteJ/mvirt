@@ -265,7 +265,11 @@ export function ClusterDetailPage() {
                   <tr
                     key={n.id}
                     className="border-b last:border-0 hover:bg-secondary/40 cursor-pointer"
-                    onClick={() => navigate(`/cluster/${n.id}`)}
+                    onClick={() =>
+                      navigate(
+                        `/orgs/${cluster.orgSlug}/clusters/${cluster.slug}/nodes/${n.id}`,
+                      )
+                    }
                   >
                     <td className="py-2 font-medium">{n.name}</td>
                     <td className="py-2">

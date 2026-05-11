@@ -28,7 +28,7 @@ import {
 import { WelcomePage } from './features/welcome'
 import { useAuth } from './hooks/useAuth'
 import { useProject } from './hooks/useProject'
-import { useCluster, useOrgs, useProjects } from './hooks/queries'
+import { useCluster, useNode, useOrgs, useProjects } from './hooks/queries'
 import { useOrg } from './hooks/useOrg'
 import { useEffect } from 'react'
 
@@ -136,6 +136,22 @@ function ProjectRedirect({ path }: { path: string }) {
 
 // Old `/clusters/:slug` URL — look up the cluster, bounce to the
 // org-scoped variant. Bookmarks survive.
+// Old `/cluster/:id` URL — look up the node and bounce to the org-scoped
+// nodes detail. Keeps deep links from older sessions alive.
+function LegacyNodeRedirect() {
+  const { id } = useParams<{ id: string }>()
+  const { data: node } = useNode(id ?? '')
+  const { data: cluster } = useCluster(node?.clusterSlug)
+  if (!id) return <Navigate to="/cluster" replace />
+  if (!node || !cluster) return null
+  return (
+    <Navigate
+      to={`/orgs/${cluster.orgSlug}/clusters/${cluster.slug}/nodes/${node.id}`}
+      replace
+    />
+  )
+}
+
 function LegacyClusterRedirect() {
   const { slug } = useParams<{ slug: string }>()
   const { data: cluster } = useCluster(slug)
@@ -194,7 +210,7 @@ function App() {
                 <Route path="/welcome" element={<WelcomePage />} />
                 <Route path="/dashboard" element={<ProjectRedirect path="/dashboard" />} />
                 <Route path="/cluster" element={<ClusterPage />} />
-                <Route path="/cluster/:id" element={<NodeDetailPage />} />
+                <Route path="/cluster/:id" element={<LegacyNodeRedirect />} />
                 <Route path="/orgs" element={<OrgsPage />} />
                 {/* Org-scoped admin: nav lives in the global Sidebar,
                     each tab is its own route so deep links work. */}
@@ -206,6 +222,10 @@ function App() {
                   <Route
                     path="clusters/:slug"
                     element={<ClusterDetailPage />}
+                  />
+                  <Route
+                    path="clusters/:slug/nodes/:nodeId"
+                    element={<NodeDetailPage />}
                   />
                   <Route path="members" element={<OrgMembersPage />} />
                   <Route path="billing" element={<OrgBillingPage />} />
