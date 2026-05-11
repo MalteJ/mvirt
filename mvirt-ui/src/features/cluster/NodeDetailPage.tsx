@@ -1,6 +1,6 @@
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Cpu, HardDrive, Database } from 'lucide-react'
-import { useNode } from '@/hooks/queries'
+import { useCluster, useNode } from '@/hooks/queries'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -34,6 +34,9 @@ export function NodeDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { data: node, isLoading, isError, error } = useNode(id!)
+  // We need the parent Cluster to know its Org slug for the back-link —
+  // node row carries cluster_slug but not org_slug.
+  const { data: cluster } = useCluster(node?.clusterSlug)
 
   if (isLoading) {
     return (
@@ -63,7 +66,14 @@ export function NodeDetailPage() {
           variant="ghost"
           size="icon"
           onClick={() =>
-            navigate(node.clusterSlug ? `/clusters/${node.clusterSlug}` : '/cluster')
+            // Back to the cluster's detail page if we know which one — the
+            // node row carries its own `clusterSlug` but not the org slug,
+            // so we resolve the org from the loaded Cluster object below.
+            navigate(
+              node.clusterSlug && cluster
+                ? `/orgs/${cluster.orgSlug}/clusters/${node.clusterSlug}`
+                : '/cluster',
+            )
           }
         >
           <ArrowLeft className="h-4 w-4" />

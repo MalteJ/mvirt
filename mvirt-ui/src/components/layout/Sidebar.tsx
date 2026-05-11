@@ -1,16 +1,21 @@
 import { NavLink, Link, useLocation } from 'react-router-dom'
 import {
-  Server,
+  CreditCard,
+  FolderKanban,
   HardDrive,
-  Network,
   Flame,
+  LayoutDashboard,
+  Network,
   ScrollText,
-  Boxes,
+  Server,
+  Settings,
+  Shield,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useApiHealth } from '@/hooks/queries'
+import { useIsPlatformAdmin } from '@/hooks/useAuth'
 
-const navigation = [
+const projectNav = [
   { name: 'Virtual Machines', path: '/vms', icon: Server },
   { name: 'Storage', path: '/storage', icon: HardDrive },
   { name: 'Network', path: '/network', icon: Network },
@@ -18,26 +23,31 @@ const navigation = [
   { name: 'Logs', path: '/logs', icon: ScrollText },
 ]
 
-const adminNavigation = [
-  // Org/Project navigation lives in the header switcher; keep this
-  // section purely for platform-level admin (Cluster, future settings).
-  { name: 'Cluster', href: '/cluster', icon: Boxes },
+const orgNav = [
+  { name: 'Dashboard', path: 'dashboard', icon: LayoutDashboard, end: true },
+  { name: 'Projects', path: 'projects', icon: FolderKanban, end: false },
+  { name: 'Clusters', path: 'clusters', icon: Server, end: false },
+  { name: 'Billing', path: 'billing', icon: CreditCard, end: false },
+  { name: 'Settings', path: 'settings', icon: Settings, end: false },
 ]
 
+const linkClass = (isActive: boolean) =>
+  cn(
+    'flex items-center rounded-md px-3 py-2 text-sm font-medium transition-all duration-200 border',
+    isActive
+      ? 'bg-purple/20 text-purple-light border-purple/30'
+      : 'text-foreground/80 border-transparent hover:bg-secondary hover:text-foreground',
+  )
+
 export function Sidebar() {
-  // Project-scoped nav (VMs, Storage, …) is shown only when the
-  // user is actually inside a project route (`/projects/:projectSlug/*`).
-  // On Org-scope admin pages (`/projects`, `/orgs`, `/cluster`) those links
-  // would either point at a previously-active project that the user has
-  // navigated away from, or have no meaningful target at all — hide them.
-  //
-  // Sidebar is rendered by `Layout`, which sits outside the inner `<Routes>`
-  // that defines `:projectSlug`, so `useParams` returns nothing here. Pull
-  // the slug out of `pathname` instead.
+  // Sidebar lives outside the inner <Routes> tree that defines :projectSlug
+  // / :orgSlug, so useParams() returns nothing here — pull the active scope
+  // out of `pathname` directly.
   const { pathname } = useLocation()
-  const projectMatch = pathname.match(/^\/projects\/([^/]+)/)
-  const projectSlug = projectMatch?.[1]
+  const projectSlug = pathname.match(/^\/projects\/([^/]+)/)?.[1]
+  const orgSlug = pathname.match(/^\/orgs\/([^/]+)/)?.[1]
   const apiHealth = useApiHealth()
+  const isAdmin = useIsPlatformAdmin()
 
   const apiStatus: 'connected' | 'connecting' | 'disconnected' =
     apiHealth.isSuccess ? 'connected'
@@ -56,7 +66,10 @@ export function Sidebar() {
 
   return (
     <div className="relative z-10 flex w-64 flex-col border-r border-border bg-card/80 backdrop-blur-xl">
-      <Link to="/" className="group flex h-14 items-center border-b border-border px-4 hover:bg-secondary/50 transition-colors">
+      <Link
+        to="/"
+        className="group flex h-14 items-center border-b border-border px-4 hover:bg-secondary/50 transition-colors"
+      >
         <div className="logo-box-shimmer mr-3 flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-purple to-blue text-white text-lg font-bold shadow-glow-purple">
           m
         </div>
@@ -64,47 +77,42 @@ export function Sidebar() {
       </Link>
       <nav className="flex-1 space-y-1 p-2">
         {projectSlug &&
-          navigation.map((item) => (
+          projectNav.map((item) => (
             <NavLink
               key={item.name}
               to={`/projects/${projectSlug}${item.path}`}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center rounded-md px-3 py-2 text-sm font-medium transition-all duration-200 border',
-                  isActive
-                    ? 'bg-purple/20 text-purple-light border-purple/30'
-                    : 'text-foreground/80 border-transparent hover:bg-secondary hover:text-foreground',
-                )
-              }
+              className={({ isActive }) => linkClass(isActive)}
+            >
+              <item.icon className="mr-3 h-4 w-4" />
+              {item.name}
+            </NavLink>
+          ))}
+        {!projectSlug &&
+          orgSlug &&
+          orgNav.map((item) => (
+            <NavLink
+              key={item.name}
+              to={`/orgs/${orgSlug}/${item.path}`}
+              end={item.end}
+              className={({ isActive }) => linkClass(isActive)}
             >
               <item.icon className="mr-3 h-4 w-4" />
               {item.name}
             </NavLink>
           ))}
       </nav>
-      <div className="border-t border-border p-2">
-        {adminNavigation.map((item) => (
+      {isAdmin && (
+        <div className="border-t border-border p-2">
           <NavLink
-            key={item.name}
-            to={item.href}
-            // `end` makes /orgs match only the bare list, not /orgs/:slug/projects.
-            // Without it react-router's prefix match lights up Organizations
-            // whenever the URL starts with /orgs.
+            to="/cluster"
             end
-            className={({ isActive }) =>
-              cn(
-                'flex items-center rounded-md px-3 py-2 text-sm font-medium transition-all duration-200 border',
-                isActive
-                  ? 'bg-purple/20 text-purple-light border-purple/30'
-                  : 'text-foreground/80 border-transparent hover:bg-secondary hover:text-foreground'
-              )
-            }
+            className={({ isActive }) => linkClass(isActive)}
           >
-            <item.icon className="mr-3 h-4 w-4" />
-            {item.name}
+            <Shield className="mr-3 h-4 w-4" />
+            mvirt Admin
           </NavLink>
-        ))}
-      </div>
+        </div>
+      )}
       <div className="border-t border-border p-4">
         <div className="flex items-center gap-2 text-xs text-foreground/60">
           <div className={cn('h-2 w-2 rounded-full', dotClass)} />

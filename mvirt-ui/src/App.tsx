@@ -16,6 +16,8 @@ import { LogsPage } from './features/logs/LogsPage'
 import {
   ClusterDetailPage,
   ClustersPage,
+  OrgBillingPage,
+  OrgDashboardPage,
   OrgLayout,
   OrgsPage,
   OrgSettingsPage,
@@ -24,7 +26,7 @@ import {
 import { WelcomePage } from './features/welcome'
 import { useAuth } from './hooks/useAuth'
 import { useProject } from './hooks/useProject'
-import { useOrgs, useProjects } from './hooks/queries'
+import { useCluster, useOrgs, useProjects } from './hooks/queries'
 import { useOrg } from './hooks/useOrg'
 import { useEffect } from 'react'
 
@@ -130,6 +132,16 @@ function ProjectRedirect({ path }: { path: string }) {
   return <Navigate to="/orgs" replace />
 }
 
+// Old `/clusters/:slug` URL — look up the cluster, bounce to the
+// org-scoped variant. Bookmarks survive.
+function LegacyClusterRedirect() {
+  const { slug } = useParams<{ slug: string }>()
+  const { data: cluster } = useCluster(slug)
+  if (!slug) return <Navigate to="/orgs" replace />
+  if (!cluster) return null
+  return <Navigate to={`/orgs/${cluster.orgSlug}/clusters/${slug}`} replace />
+}
+
 // Old `/projects` URL — bounce to the org-scoped variant for the active Org,
 // or /orgs if there is none. Kept as a soft redirect so bookmarks survive.
 function FlatProjectsRedirect() {
@@ -182,15 +194,25 @@ function App() {
                 <Route path="/cluster" element={<ClusterPage />} />
                 <Route path="/cluster/:id" element={<NodeDetailPage />} />
                 <Route path="/orgs" element={<OrgsPage />} />
-                {/* All org-scoped admin pages share a sub-navbar.
-                    /orgs/:slug bare → first tab. */}
+                {/* Org-scoped admin: nav lives in the global Sidebar,
+                    each tab is its own route so deep links work. */}
                 <Route path="/orgs/:orgSlug" element={<OrgLayout />}>
-                  <Route index element={<Navigate to="projects" replace />} />
+                  <Route index element={<Navigate to="dashboard" replace />} />
+                  <Route path="dashboard" element={<OrgDashboardPage />} />
                   <Route path="projects" element={<ProjectsPage />} />
                   <Route path="clusters" element={<ClustersPage />} />
+                  <Route
+                    path="clusters/:slug"
+                    element={<ClusterDetailPage />}
+                  />
+                  <Route path="billing" element={<OrgBillingPage />} />
                   <Route path="settings" element={<OrgSettingsPage />} />
                 </Route>
-                <Route path="/clusters/:slug" element={<ClusterDetailPage />} />
+                {/* Legacy flat URL — bounce to the org-scoped path. */}
+                <Route
+                  path="/clusters/:slug"
+                  element={<LegacyClusterRedirect />}
+                />
                 <Route path="/projects" element={<FlatProjectsRedirect />} />
 
                 {/* Project-scoped routes — slug-based per ADR-0004.

@@ -77,7 +77,7 @@ export function ClustersPage() {
           setDescription('')
           setLocation('')
           setSlugTouched(false)
-          navigate(`/clusters/${cluster.slug}`)
+          navigate(`/orgs/${scopedOrg.slug}/clusters/${cluster.slug}`)
         },
       },
     )
@@ -92,7 +92,7 @@ export function ClustersPage() {
       header: 'Name',
       cell: ({ row }) => (
         <Link
-          to={`/clusters/${row.original.slug}`}
+          to={`/orgs/${row.original.orgSlug}/clusters/${row.original.slug}`}
           className="block hover:text-purple-light"
         >
           <div className="font-medium">{row.original.name}</div>
