@@ -47,6 +47,10 @@ export function ClusterDetailPage() {
   const [revealedToken, setRevealedToken] = useState<
     CreateOnboardingTokenResponse | null
   >(null)
+  // Must live with the other hooks (above the early returns) — Rules of Hooks
+  // forbid conditional hook calls, so anything below `if (isLoading) return`
+  // changes call order between renders and crashes the component.
+  const [tokenCopied, setTokenCopied] = useState(false)
 
   if (isLoading) {
     return (
@@ -88,7 +92,6 @@ export function ClusterDetailPage() {
     )
   }
 
-  const [tokenCopied, setTokenCopied] = useState(false)
   const copyToken = async () => {
     if (!revealedToken) return
     await navigator.clipboard.writeText(revealedToken.token)

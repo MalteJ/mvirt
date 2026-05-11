@@ -419,5 +419,19 @@ pub fn create_router(state: Arc<AppState>, validator: Option<Arc<JwtValidator>>)
         .nest("/v1", bootstrap_routes)
         .nest("/v1/projects/{project_slug}", project_routes)
         .with_state(state)
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(
+            // `CorsLayer::permissive()` sets `Access-Control-Allow-Headers: *`,
+            // which per CORS spec does **not** cover `Authorization`. Browsers
+            // (Firefox first, then Chrome) are dropping that header from
+            // requests unless it's listed explicitly. List the headers we
+            // actually use so the JWT-auth Authorization header survives.
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::ACCEPT,
+                ]),
+        )
 }
