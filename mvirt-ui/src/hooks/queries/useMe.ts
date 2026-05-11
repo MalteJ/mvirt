@@ -2,16 +2,20 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getMe,
   grantOrgMember,
+  grantProjectMember,
   inviteAccountByEmail,
   listAccounts,
   listOrgMembers,
+  listProjectMembers,
   revokeOrgMember,
+  revokeProjectMember,
 } from '@/api/endpoints'
 
 export const meKeys = {
   all: ['me'] as const,
   accounts: ['accounts'] as const,
   orgMembers: (slug: string) => ['orgMembers', slug] as const,
+  projectMembers: (slug: string) => ['projectMembers', slug] as const,
 }
 
 /** Current user — Account + memberships. Returns `undefined` until the
@@ -80,5 +84,33 @@ export function useRevokeOrgMember(orgSlug: string) {
   return useMutation({
     mutationFn: (membershipId: string) => revokeOrgMember(orgSlug, membershipId),
     onSuccess: () => qc.invalidateQueries({ queryKey: meKeys.orgMembers(orgSlug) }),
+  })
+}
+
+export function useProjectMembers(projectSlug: string | undefined) {
+  return useQuery({
+    queryKey: meKeys.projectMembers(projectSlug ?? ''),
+    queryFn: () => listProjectMembers(projectSlug!),
+    enabled: !!projectSlug,
+  })
+}
+
+export function useGrantProjectMember(projectSlug: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ accountId, role }: { accountId: string; role: string }) =>
+      grantProjectMember(projectSlug, accountId, role),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: meKeys.projectMembers(projectSlug) }),
+  })
+}
+
+export function useRevokeProjectMember(projectSlug: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (membershipId: string) =>
+      revokeProjectMember(projectSlug, membershipId),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: meKeys.projectMembers(projectSlug) }),
   })
 }

@@ -1040,6 +1040,103 @@ pub async fn create_org_member(
     Ok(Json(UiMembership::from(m)))
 }
 
+/// List members of a Project. Project-admin / Org-admin / platform-admin.
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_slug}/members",
+    params(("project_slug" = String, Path)),
+    responses(
+        (status = 200, body = MembershipListResponse),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "projects"
+)]
+pub async fn list_project_members(
+    State(state): State<Arc<AppState>>,
+    Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+) -> Result<Json<MembershipListResponse>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
+    let memberships = state
+        .store
+        .list_memberships_at_scope(&crate::command::MembershipScope::Project {
+            project_slug: project_slug.clone(),
+        })
+        .await?;
+    Ok(Json(MembershipListResponse {
+        memberships: memberships.into_iter().map(UiMembership::from).collect(),
+    }))
+}
+
+/// Grant project-admin in this Project. Project-admin or higher.
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_slug}/members",
+    params(("project_slug" = String, Path)),
+    request_body = UiCreateOrgMembershipRequest,
+    responses(
+        (status = 200, body = UiMembership),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError),
+        (status = 409, body = ApiError)
+    ),
+    tag = "projects"
+)]
+pub async fn create_project_member(
+    State(state): State<Arc<AppState>>,
+    Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+    Json(req): Json<UiCreateOrgMembershipRequest>,
+) -> Result<Json<UiMembership>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
+    let caller_account = auth
+        .as_ref()
+        .map(|c| c.0.account.id.clone())
+        .unwrap_or_else(|| "system".to_string());
+    let role = match req.role.as_str() {
+        "project-admin" => crate::command::Role::ProjectAdmin,
+        other => {
+            return Err(ApiError {
+                error: format!("unknown role '{}'; allowed: project-admin", other),
+                code: 400,
+            });
+        }
+    };
+    let m = state
+        .store
+        .create_membership(StoreCreateMembershipRequest {
+            account_id: req.account_id,
+            scope: crate::command::MembershipScope::Project { project_slug },
+            role,
+            created_by_account: caller_account,
+        })
+        .await?;
+    Ok(Json(UiMembership::from(m)))
+}
+
+/// Revoke a project-level membership. Project-admin or higher.
+#[utoipa::path(
+    delete,
+    path = "/v1/projects/{project_slug}/members/{id}",
+    params(("project_slug" = String, Path), ("id" = String, Path)),
+    responses(
+        (status = 204),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "projects"
+)]
+pub async fn delete_project_member(
+    State(state): State<Arc<AppState>>,
+    Path((project_slug, id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+) -> Result<StatusCode, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
+    state.store.delete_membership(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Revoke a membership. Org-admin or platform-admin only.
 #[utoipa::path(
     delete,

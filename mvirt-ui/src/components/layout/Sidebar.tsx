@@ -21,6 +21,7 @@ const projectNav = [
   { name: 'Storage', path: '/storage', icon: HardDrive },
   { name: 'Network', path: '/network', icon: Network },
   { name: 'Firewall', path: '/firewall', icon: Flame },
+  { name: 'Members', path: '/members', icon: Users },
   { name: 'Logs', path: '/logs', icon: ScrollText },
 ]
 

@@ -12,6 +12,7 @@ import { CreateVmPage } from './features/vms/CreateVmPage'
 import { StoragePage } from './features/storage/StoragePage'
 import { NetworkPage } from './features/network/NetworkPage'
 import { FirewallPage, SecurityGroupDetailPage } from './features/firewall'
+import { ProjectMembersPage } from './features/project/ProjectMembersPage'
 import { LogsPage } from './features/logs/LogsPage'
 import {
   ClusterDetailPage,
@@ -232,6 +233,7 @@ function App() {
                       <Route path="/network" element={<NetworkPage />} />
                       <Route path="/firewall" element={<FirewallPage />} />
                       <Route path="/firewall/:id" element={<SecurityGroupDetailPage />} />
+                      <Route path="/members" element={<ProjectMembersPage />} />
                       <Route path="/logs" element={<LogsPage />} />
                     </Routes>
                   }

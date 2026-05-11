@@ -39,3 +39,30 @@ export async function revokeOrgMember(
 ): Promise<void> {
   await del<void>(`/orgs/${orgSlug}/members/${membershipId}`)
 }
+
+export async function listProjectMembers(
+  projectSlug: string,
+): Promise<Membership[]> {
+  const r = await get<OrgMemberListResponse>(
+    `/projects/${projectSlug}/members`,
+  )
+  return r.memberships
+}
+
+export async function grantProjectMember(
+  projectSlug: string,
+  accountId: string,
+  role: string,
+): Promise<Membership> {
+  return post<Membership>(`/projects/${projectSlug}/members`, {
+    accountId,
+    role,
+  })
+}
+
+export async function revokeProjectMember(
+  projectSlug: string,
+  membershipId: string,
+): Promise<void> {
+  await del<void>(`/projects/${projectSlug}/members/${membershipId}`)
+}

@@ -82,6 +82,9 @@ use crate::auth::require_auth;
         ui_handlers::list_org_members,
         ui_handlers::create_org_member,
         ui_handlers::delete_org_member,
+        ui_handlers::list_project_members,
+        ui_handlers::create_project_member,
+        ui_handlers::delete_project_member,
         // VMs (UI)
         ui_handlers::list_vms,
         ui_handlers::get_vm,
@@ -423,7 +426,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/templates/import", post(ui_handlers::import_template))
         // Security Groups
         .route("/security-groups", get(ui_handlers::list_security_groups))
-        .route("/security-groups", post(ui_handlers::create_security_group));
+        .route("/security-groups", post(ui_handlers::create_security_group))
+        // Project members (ADR-0004)
+        .route(
+            "/members",
+            get(ui_handlers::list_project_members).post(ui_handlers::create_project_member),
+        )
+        .route("/members/{id}", delete(ui_handlers::delete_project_member));
 
     // Bootstrap endpoint (ADR-0006). Token-authed via the Authorization
     // header inside the handler — *not* through the Account JWT middleware.
