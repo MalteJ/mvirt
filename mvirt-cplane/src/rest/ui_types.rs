@@ -539,6 +539,8 @@ pub struct ClusterListResponse {
 pub struct UiOnboardingToken {
     pub id: String,
     pub cluster_slug: String,
+    pub node_id: String,
+    pub hostname: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub expires_at: String,
@@ -555,6 +557,8 @@ impl From<crate::command::OnboardingTokenData> for UiOnboardingToken {
         Self {
             id: d.id,
             cluster_slug: d.cluster_slug,
+            node_id: d.node_id,
+            hostname: d.hostname,
             description: d.description,
             expires_at: d.expires_at,
             used_at: d.used_at,
@@ -570,6 +574,8 @@ impl From<crate::command::OnboardingTokenData> for UiOnboardingToken {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCreateOnboardingTokenRequest {
+    /// Display hostname for the node. Required.
+    pub hostname: String,
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
     #[serde(default)]
@@ -585,6 +591,8 @@ pub struct UiCreateOnboardingTokenResponse {
     pub id: String,
     pub token: String,
     pub cluster_slug: String,
+    pub node_id: String,
+    pub hostname: String,
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,

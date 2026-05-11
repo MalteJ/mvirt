@@ -44,7 +44,7 @@ async fn bootstrap_a_node(
     let r = server
         .post_json(
             &format!("/clusters/{}/onboarding-tokens", cluster),
-            &json!({"ttlSeconds": 600}),
+            &json!({"ttlSeconds": 600, "hostname": "test-node"}),
         )
         .await;
     assert_eq!(r.status(), 200);

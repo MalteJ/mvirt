@@ -198,7 +198,10 @@ pub enum Command {
         not_after: String,
     },
 
-    /// Issue a new onboarding token bound to a Cluster.
+    /// Issue a new onboarding token bound to a Cluster. Pre-allocates a
+    /// `node_id` and writes a placeholder Node row with `status: Onboarding`
+    /// so the operator sees the host in the cluster's node list immediately.
+    /// Hostname is operator-supplied (display label).
     CreateOnboardingToken {
         request_id: String,
         timestamp: String,
@@ -207,6 +210,10 @@ pub enum Command {
         /// sha256(bare token), 32 bytes hex.
         token_hash_hex: String,
         cluster_slug: String,
+        /// Pre-allocated `node_<uuid>` — placeholder row in NODES gets this id.
+        node_id: String,
+        /// Display hostname for the node (required).
+        hostname: String,
         description: Option<String>,
         expires_at: String,
         created_by_account: String,
@@ -496,6 +503,10 @@ pub enum NodeStatus {
     /// Node status is unknown (initial state)
     #[default]
     Unknown,
+    /// Onboarding token issued, node hasn't redeemed yet. Placeholder Node
+    /// row created by the operator with hostname pre-filled. Transitions to
+    /// `Online` on successful redeem.
+    Onboarding,
     /// Node onboarding completed, but cert revoked. Node is kept in the
     /// table for audit, must not be allowed to reconnect.
     Revoked,
@@ -738,6 +749,11 @@ pub struct OnboardingTokenData {
     pub id: String,
     pub token_hash_hex: String,
     pub cluster_slug: String,
+    /// Node id pre-allocated at token-issuance time. The placeholder row in
+    /// NODES has this id and `status: Onboarding`; redeem flips it to Online.
+    pub node_id: String,
+    /// Operator-supplied display hostname; also written to NodeData.name.
+    pub hostname: String,
     pub description: Option<String>,
     pub expires_at: String,
     pub used_at: Option<String>,

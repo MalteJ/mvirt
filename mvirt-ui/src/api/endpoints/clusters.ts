@@ -6,6 +6,7 @@ import type {
   Cluster,
   ClusterListResponse,
   CreateClusterRequest,
+  Node,
   UpdateClusterRequest,
   OnboardingToken,
   OnboardingTokenListResponse,
@@ -61,6 +62,13 @@ export async function removeNodeFromCluster(
   nodeId: string,
 ): Promise<Cluster> {
   return del<Cluster>(`/clusters/${slug}/nodes/${nodeId}`)
+}
+
+/** Get all nodes belonging to a cluster. Client-side filtered against the
+ *  flat /v1/nodes list — there's no per-cluster endpoint yet. */
+export async function listNodesInCluster(slug: string): Promise<Node[]> {
+  const nodes = await get<Node[]>(`/nodes`)
+  return nodes.filter((n) => n.clusterSlug === slug)
 }
 
 // =============================================================================

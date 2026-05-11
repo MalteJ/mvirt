@@ -26,11 +26,19 @@ async fn create_cluster(server: &common::TestServer, slug: &str) {
 }
 
 async fn create_token(server: &common::TestServer, cluster_slug: &str) -> (String, String) {
+    create_token_for(server, cluster_slug, &format!("host-{}", cluster_slug)).await
+}
+
+async fn create_token_for(
+    server: &common::TestServer,
+    cluster_slug: &str,
+    hostname: &str,
+) -> (String, String) {
     // returns (bare_token, token_id)
     let resp = server
         .post_json(
             &format!("/clusters/{}/onboarding-tokens", cluster_slug),
-            &json!({"ttlSeconds": 600, "description": "rack-3"}),
+            &json!({"ttlSeconds": 600, "hostname": hostname, "description": "rack-3"}),
         )
         .await;
     assert_eq!(resp.status(), 200, "token create failed");
@@ -198,7 +206,7 @@ async fn create_token_returns_404_for_unknown_cluster() {
     let r = server
         .post_json(
             "/clusters/no-such-cluster/onboarding-tokens",
-            &json!({"ttlSeconds": 600}),
+            &json!({"ttlSeconds": 600, "hostname": "x"}),
         )
         .await;
     assert_eq!(r.status(), 404);

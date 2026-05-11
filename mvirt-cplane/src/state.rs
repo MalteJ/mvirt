@@ -1636,13 +1636,16 @@ impl StateMachine<Command, Response> for ApiState {
                 id,
                 token_hash_hex,
                 cluster_slug,
+                node_id,
+                hostname,
                 description,
                 expires_at,
                 created_by_account,
                 ..
             } => {
                 let txn = self.db.begin_write().expect("begin");
-                if !txn_has(&txn, CLUSTERS, &cluster_slug) {
+                let Some(mut cluster) = txn_get::<ClusterData>(&txn, CLUSTERS, &cluster_slug)
+                else {
                     return (
                         Response::Error {
                             code: 404,
@@ -1650,7 +1653,7 @@ impl StateMachine<Command, Response> for ApiState {
                         },
                         vec![],
                     );
-                }
+                };
                 if txn_has(&txn, ONBOARDING_TOKENS, &id) {
                     return (
                         Response::Error {
@@ -1660,18 +1663,76 @@ impl StateMachine<Command, Response> for ApiState {
                         vec![],
                     );
                 }
+                if txn_has(&txn, NODES, &node_id) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("Node '{}' already exists", node_id),
+                        },
+                        vec![],
+                    );
+                }
+                // Per-cluster hostname uniqueness — operator can't issue two
+                // tokens for the same hostname in the same cluster (they'd
+                // be indistinguishable in the UI).
+                let dup_hostname = txn_list::<NodeData>(&txn, NODES).into_iter().any(|n| {
+                    n.cluster_slug.as_deref() == Some(cluster_slug.as_str())
+                        && n.name == hostname
+                });
+                if dup_hostname {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!(
+                                "A node with hostname '{}' already exists in cluster '{}'",
+                                hostname, cluster_slug
+                            ),
+                        },
+                        vec![],
+                    );
+                }
+
                 let token = OnboardingTokenData {
                     id: id.clone(),
                     token_hash_hex,
-                    cluster_slug,
+                    cluster_slug: cluster_slug.clone(),
+                    node_id: node_id.clone(),
+                    hostname: hostname.clone(),
                     description,
                     expires_at,
                     used_at: None,
                     used_by_node_id: None,
                     created_by_account,
-                    created_at: timestamp,
+                    created_at: timestamp.clone(),
                 };
                 txn_put(&txn, ONBOARDING_TOKENS, &id, &token);
+
+                // Placeholder Node row with status: Onboarding so the
+                // operator sees the host in the cluster list immediately.
+                let node = NodeData {
+                    id: node_id.clone(),
+                    name: hostname,
+                    address: String::new(),
+                    status: NodeStatus::Onboarding,
+                    resources: Default::default(),
+                    labels: Default::default(),
+                    last_heartbeat: timestamp.clone(),
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp.clone(),
+                    cluster_slug: Some(cluster_slug.clone()),
+                    cert_serial_hex: None,
+                    cert_expires_at: None,
+                    hostname: None,
+                    agent_version: None,
+                };
+                txn_put(&txn, NODES, &node_id, &node);
+
+                if !cluster.node_ids.iter().any(|n| n == &node_id) {
+                    cluster.node_ids.push(node_id);
+                    cluster.updated_at = timestamp;
+                    txn_put(&txn, CLUSTERS, &cluster_slug, &cluster);
+                }
+
                 txn.commit().expect("commit");
                 (Response::OnboardingToken(token), vec![])
             }
@@ -1700,6 +1761,22 @@ impl StateMachine<Command, Response> for ApiState {
                         },
                         vec![],
                     );
+                }
+                // If the token never got redeemed, also tear down the
+                // placeholder Node row and remove it from the cluster — the
+                // operator wants the entry gone, not a half-state.
+                if t.used_at.is_none() && txn_has(&txn, NODES, &t.node_id) {
+                    txn_delete(&txn, NODES, &t.node_id);
+                    if let Some(mut cluster) =
+                        txn_get::<ClusterData>(&txn, CLUSTERS, &t.cluster_slug)
+                    {
+                        let before = cluster.node_ids.len();
+                        cluster.node_ids.retain(|n| n != &t.node_id);
+                        if cluster.node_ids.len() != before {
+                            let slug = cluster.slug.clone();
+                            txn_put(&txn, CLUSTERS, &slug, &cluster);
+                        }
+                    }
                 }
                 txn_delete(&txn, ONBOARDING_TOKENS, &id);
                 txn.commit().expect("commit");
@@ -1756,14 +1833,29 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 }
 
-                let Some(mut cluster) = txn_get::<ClusterData>(&txn, CLUSTERS, &token.cluster_slug)
-                else {
+                if !txn_has(&txn, CLUSTERS, &token.cluster_slug) {
                     return (
                         Response::Error {
                             code: 410,
                             message: format!(
                                 "cluster '{}' gone since token issuance",
                                 token.cluster_slug
+                            ),
+                        },
+                        vec![],
+                    );
+                }
+
+                // The placeholder Node row was created with the token; if the
+                // operator deleted it post-issue, refuse — the token alone
+                // can't reconstitute the row safely.
+                let Some(mut node) = txn_get::<NodeData>(&txn, NODES, &token.node_id) else {
+                    return (
+                        Response::Error {
+                            code: 410,
+                            message: format!(
+                                "placeholder node '{}' was deleted; re-issue a fresh token",
+                                token.node_id
                             ),
                         },
                         vec![],
@@ -1780,49 +1872,40 @@ impl StateMachine<Command, Response> for ApiState {
                     );
                 };
 
-                let node_id = format!("node_{}", uuid::Uuid::new_v4().simple());
                 let serial = new_serial();
-                let signed = match sign_node_leaf(&ca, &csr_pem, &node_id, &cluster.slug, serial) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return (
-                            Response::Error {
-                                code: 400,
-                                message: format!("CSR invalid: {e}"),
-                            },
-                            vec![],
-                        );
-                    }
-                };
+                let signed =
+                    match sign_node_leaf(&ca, &csr_pem, &token.node_id, &token.cluster_slug, serial)
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return (
+                                Response::Error {
+                                    code: 400,
+                                    message: format!("CSR invalid: {e}"),
+                                },
+                                vec![],
+                            );
+                        }
+                    };
 
                 token.used_at = Some(timestamp.clone());
-                token.used_by_node_id = Some(node_id.clone());
-                txn_put(&txn, ONBOARDING_TOKENS, &token.id, &token);
+                token.used_by_node_id = Some(token.node_id.clone());
+                let token_id = token.id.clone();
+                let resolved_node_id = token.node_id.clone();
+                txn_put(&txn, ONBOARDING_TOKENS, &token_id, &token);
 
-                let node = NodeData {
-                    id: node_id.clone(),
-                    name: hostname.clone(),
-                    address: String::new(),
-                    status: NodeStatus::Online,
-                    resources: Default::default(),
-                    labels: Default::default(),
-                    last_heartbeat: timestamp.clone(),
-                    created_at: timestamp.clone(),
-                    updated_at: timestamp.clone(),
-                    cluster_slug: Some(cluster.slug.clone()),
-                    cert_serial_hex: Some(signed.serial_hex.clone()),
-                    cert_expires_at: Some(signed.not_after.clone()),
-                    hostname: Some(hostname),
-                    agent_version: Some(format!("{} ({} {})", agent_version, kernel_version, arch)),
-                };
-                txn_put(&txn, NODES, &node_id, &node);
-
-                if !cluster.node_ids.iter().any(|n| n == &node_id) {
-                    cluster.node_ids.push(node_id.clone());
-                    cluster.updated_at = timestamp.clone();
-                    let slug = cluster.slug.clone();
-                    txn_put(&txn, CLUSTERS, &slug, &cluster);
-                }
+                // Flip the placeholder to Online + fill in cert metadata.
+                // We keep the operator-supplied display `name`; the agent's
+                // reported hostname/kernel/arch go into the diagnostic
+                // fields so the UI can show them if desired.
+                node.status = NodeStatus::Online;
+                node.last_heartbeat = timestamp.clone();
+                node.updated_at = timestamp.clone();
+                node.cert_serial_hex = Some(signed.serial_hex.clone());
+                node.cert_expires_at = Some(signed.not_after.clone());
+                node.hostname = Some(hostname);
+                node.agent_version = Some(format!("{} ({} {})", agent_version, kernel_version, arch));
+                txn_put(&txn, NODES, &resolved_node_id, &node);
 
                 txn.commit().expect("commit");
                 (
@@ -1864,6 +1947,14 @@ impl StateMachine<Command, Response> for ApiState {
 
                 match reason {
                     RevocationReason::Decommission => {
+                        // Drop unredeemed tokens that were pre-allocated for
+                        // this node — otherwise they'd dangle with a
+                        // missing-node reference and would 410 on redeem.
+                        for t in txn_list::<OnboardingTokenData>(&txn, ONBOARDING_TOKENS) {
+                            if t.node_id == node_id && t.used_at.is_none() {
+                                txn_delete(&txn, ONBOARDING_TOKENS, &t.id);
+                            }
+                        }
                         for mut cluster in txn_list::<ClusterData>(&txn, CLUSTERS) {
                             let before = cluster.node_ids.len();
                             cluster.node_ids.retain(|n| n != &node_id);

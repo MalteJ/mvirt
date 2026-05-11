@@ -36,6 +36,8 @@ export interface UpdateClusterRequest {
 export interface OnboardingToken {
   id: string
   clusterSlug: string
+  nodeId: string
+  hostname: string
   description?: string
   expiresAt: string
   usedAt?: string
@@ -49,6 +51,8 @@ export interface OnboardingTokenListResponse {
 }
 
 export interface CreateOnboardingTokenRequest {
+  /** Required — operator-supplied display hostname for the new node. */
+  hostname: string
   ttlSeconds?: number
   description?: string
 }
@@ -60,6 +64,8 @@ export interface CreateOnboardingTokenResponse {
   id: string
   token: string
   clusterSlug: string
+  nodeId: string
+  hostname: string
   expiresAt: string
   description?: string
 }

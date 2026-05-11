@@ -84,11 +84,11 @@ export function ClusterPage() {
       },
     },
     {
-      accessorKey: 'last_heartbeat',
+      accessorKey: 'lastHeartbeat',
       header: 'Last Heartbeat',
       cell: ({ row }) => (
         <span className="text-sm text-muted-foreground">
-          {timeAgo(row.original.last_heartbeat)}
+          {timeAgo(row.original.lastHeartbeat)}
         </span>
       ),
     },

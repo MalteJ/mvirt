@@ -1,6 +1,9 @@
 export enum NodeStatus {
-  ONLINE = 'Online',
-  OFFLINE = 'Offline',
+  ONLINE = 'online',
+  OFFLINE = 'offline',
+  ONBOARDING = 'onboarding',
+  REVOKED = 'revoked',
+  UNKNOWN = 'unknown',
 }
 
 export interface NodeResources {
@@ -12,6 +15,7 @@ export interface NodeResources {
   available_storage_gb: number
 }
 
+/** Wire shape from /v1/nodes (camelCase). */
 export interface Node {
   id: string
   name: string
@@ -19,9 +23,14 @@ export interface Node {
   status: NodeStatus
   resources: NodeResources
   labels: Record<string, string>
-  last_heartbeat: string
-  created_at: string
-  updated_at: string
+  lastHeartbeat: string
+  createdAt: string
+  updatedAt: string
+  clusterSlug?: string
+  certSerialHex?: string
+  certExpiresAt?: string
+  hostname?: string
+  agentVersion?: string
 }
 
 export interface ControlplanePeer {

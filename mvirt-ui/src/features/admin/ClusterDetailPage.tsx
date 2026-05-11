@@ -1,22 +1,18 @@
 import { useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useNavigate, useParams, Link } from 'react-router-dom'
 import {
   ArrowLeft,
   Check,
   Copy,
-  KeyRound,
   Plus,
   Server,
   Trash2,
-  CheckCircle2,
-  AlertTriangle,
 } from 'lucide-react'
 import {
   useCluster,
+  useClusterNodes,
   useCreateOnboardingToken,
-  useDeleteOnboardingToken,
-  useOnboardingTokens,
-  useRemoveNodeFromCluster,
+  useRevokeNode,
 } from '@/hooks/queries'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -30,27 +26,97 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { formatDate } from '@/lib/utils'
-import type { CreateOnboardingTokenResponse } from '@/types'
+import { NodeStatus, type CreateOnboardingTokenResponse, type Node } from '@/types'
+
+function timeAgo(iso?: string): string {
+  if (!iso) return '—'
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return '—'
+  const delta = Date.now() - t
+  if (delta < 0) return 'just now'
+  const s = Math.floor(delta / 1000)
+  if (s < 60) return `${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  return `${d}d ago`
+}
+
+function StatusBadge({ node }: { node: Node }) {
+  const map: Record<string, { label: string; color: string }> = {
+    [NodeStatus.ONLINE]: {
+      label: 'online',
+      color:
+        'bg-green-500/15 text-green-700 dark:text-green-300 border-green-500/30',
+    },
+    [NodeStatus.OFFLINE]: {
+      label: 'offline',
+      color:
+        'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
+    },
+    [NodeStatus.ONBOARDING]: {
+      label: 'onboarding',
+      color:
+        'bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-500/30',
+    },
+    [NodeStatus.REVOKED]: {
+      label: 'revoked',
+      color:
+        'bg-red-500/15 text-red-700 dark:text-red-300 border-red-500/30',
+    },
+    [NodeStatus.UNKNOWN]: {
+      label: 'unknown',
+      color:
+        'bg-muted text-muted-foreground border-border',
+    },
+  }
+  const entry = map[node.status] ?? map[NodeStatus.UNKNOWN]
+  return (
+    <span
+      className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium ${entry.color}`}
+    >
+      {entry.label}
+    </span>
+  )
+}
 
 export function ClusterDetailPage() {
+  const navigate = useNavigate()
   const { slug } = useParams<{ slug: string }>()
   const { data: cluster, isLoading } = useCluster(slug)
-  const { data: tokens } = useOnboardingTokens(slug)
+  const { data: nodes } = useClusterNodes(slug)
   const createToken = useCreateOnboardingToken(slug ?? '')
-  const deleteToken = useDeleteOnboardingToken(slug ?? '')
-  const removeNode = useRemoveNodeFromCluster(slug ?? '')
+  const revokeNode = useRevokeNode()
 
-  const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
-  const [newTokenDescription, setNewTokenDescription] = useState('')
-  const [newTokenTtl, setNewTokenTtl] = useState('3600')
-  const [revealedToken, setRevealedToken] = useState<
-    CreateOnboardingTokenResponse | null
-  >(null)
-  // Must live with the other hooks (above the early returns) — Rules of Hooks
-  // forbid conditional hook calls, so anything below `if (isLoading) return`
-  // changes call order between renders and crashes the component.
+  const [addOpen, setAddOpen] = useState(false)
+  const [newHostname, setNewHostname] = useState('')
+  const [revealedToken, setRevealedToken] =
+    useState<CreateOnboardingTokenResponse | null>(null)
   const [tokenCopied, setTokenCopied] = useState(false)
+
+  const handleAdd = () => {
+    const host = newHostname.trim()
+    if (!host) return
+    createToken.mutate(
+      { hostname: host },
+      {
+        onSuccess: (resp) => {
+          setRevealedToken(resp)
+          setAddOpen(false)
+          setNewHostname('')
+        },
+      },
+    )
+  }
+
+  const copyToken = async () => {
+    if (!revealedToken) return
+    await navigator.clipboard.writeText(revealedToken.token)
+    setTokenCopied(true)
+    setTimeout(() => setTokenCopied(false), 2000)
+  }
 
   if (isLoading) {
     return (
@@ -63,7 +129,7 @@ export function ClusterDetailPage() {
     return (
       <div className="space-y-4">
         <Link
-          to="/dashboard"
+          to="/"
           className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="mr-1 h-4 w-4" />
@@ -72,31 +138,6 @@ export function ClusterDetailPage() {
         <p>Cluster not found.</p>
       </div>
     )
-  }
-
-  const handleCreateToken = () => {
-    const ttl = parseInt(newTokenTtl, 10)
-    createToken.mutate(
-      {
-        ttlSeconds: Number.isFinite(ttl) && ttl > 0 ? ttl : undefined,
-        description: newTokenDescription.trim() || undefined,
-      },
-      {
-        onSuccess: (resp) => {
-          setRevealedToken(resp)
-          setTokenDialogOpen(false)
-          setNewTokenDescription('')
-          setNewTokenTtl('3600')
-        },
-      },
-    )
-  }
-
-  const copyToken = async () => {
-    if (!revealedToken) return
-    await navigator.clipboard.writeText(revealedToken.token)
-    setTokenCopied(true)
-    setTimeout(() => setTokenCopied(false), 2000)
   }
 
   return (
@@ -127,121 +168,75 @@ export function ClusterDetailPage() {
         </div>
       </div>
 
-      {(removeNode.error || deleteToken.error) && (
+      {(createToken.error || revokeNode.error) && (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {String(removeNode.error ?? deleteToken.error)}
+          {String(createToken.error ?? revokeNode.error)}
         </div>
       )}
 
-      {/* Nodes card */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Server className="h-4 w-4" />
-            Nodes ({cluster.nodeIds.length})
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {cluster.nodeIds.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No nodes yet. Issue an onboarding token below and run mvirt-node
-              with it to add one.
-            </p>
-          ) : (
-            <ul className="space-y-2">
-              {cluster.nodeIds.map((id) => (
-                <li
-                  key={id}
-                  className="flex items-center justify-between rounded border px-3 py-2"
-                >
-                  <span className="font-mono text-sm">{id}</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      if (
-                        confirm(`Remove node ${id} from cluster ${cluster.slug}?`)
-                      ) {
-                        removeNode.mutate(id)
-                      }
-                    }}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Onboarding tokens card */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
             <CardTitle className="flex items-center gap-2">
-              <KeyRound className="h-4 w-4" />
-              Onboarding Tokens
+              <Server className="h-4 w-4" />
+              Nodes ({nodes?.length ?? 0})
             </CardTitle>
-            <Dialog open={tokenDialogOpen} onOpenChange={setTokenDialogOpen}>
-              <Button size="sm" onClick={() => setTokenDialogOpen(true)}>
+            <Dialog open={addOpen} onOpenChange={setAddOpen}>
+              <Button size="sm" onClick={() => setAddOpen(true)}>
                 <Plus className="mr-1 h-3 w-3" />
-                New Token
+                Add Node
               </Button>
               <DialogContent>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault()
-                    handleCreateToken()
+                    handleAdd()
                   }}
                 >
                   <DialogHeader>
-                    <DialogTitle>Issue Onboarding Token</DialogTitle>
+                    <DialogTitle>Add Node</DialogTitle>
                     <DialogDescription>
-                      The token is single-use, bound to this Cluster, and
-                      revealed only once. Copy it into the node config.
+                      Issues a single-use onboarding token bound to this Cluster.
+                      The node will appear immediately with status{' '}
+                      <span className="font-mono">onboarding</span>; once it
+                      redeems the token, the status flips to{' '}
+                      <span className="font-mono">online</span>.
                     </DialogDescription>
                   </DialogHeader>
                   <div className="grid gap-4 py-4">
                     <div className="grid gap-2">
-                      <Label htmlFor="desc">Description (optional)</Label>
+                      <Label htmlFor="hostname">Hostname</Label>
                       <Input
-                        id="desc"
-                        placeholder="rack-3 node 5"
-                        value={newTokenDescription}
-                        onChange={(e) => setNewTokenDescription(e.target.value)}
-                      />
-                    </div>
-                    <div className="grid gap-2">
-                      <Label htmlFor="ttl">Lifetime (seconds)</Label>
-                      <Input
-                        id="ttl"
-                        type="number"
-                        min={60}
-                        max={604800}
-                        value={newTokenTtl}
-                        onChange={(e) => setNewTokenTtl(e.target.value)}
+                        id="hostname"
+                        placeholder="rack3-node5"
+                        value={newHostname}
+                        onChange={(e) => setNewHostname(e.target.value)}
+                        autoFocus
                       />
                       <p className="text-xs text-muted-foreground">
-                        60s … 7d. Default 1h.
+                        Operator-supplied display name. Must be unique within
+                        the cluster.
                       </p>
                     </div>
+                    {createToken.error && (
+                      <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                        {String(createToken.error)}
+                      </div>
+                    )}
                   </div>
-                  {createToken.error && (
-                    <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                      {String(createToken.error)}
-                    </div>
-                  )}
                   <DialogFooter>
                     <Button
                       type="button"
                       variant="outline"
-                      onClick={() => setTokenDialogOpen(false)}
+                      onClick={() => setAddOpen(false)}
                     >
                       Cancel
                     </Button>
-                    <Button type="submit" disabled={createToken.isPending}>
-                      {createToken.isPending ? 'Creating...' : 'Issue'}
+                    <Button
+                      type="submit"
+                      disabled={!newHostname.trim() || createToken.isPending}
+                    >
+                      {createToken.isPending ? 'Issuing...' : 'Issue Token'}
                     </Button>
                   </DialogFooter>
                 </form>
@@ -250,78 +245,79 @@ export function ClusterDetailPage() {
           </div>
         </CardHeader>
         <CardContent>
-          {tokens && tokens.length > 0 ? (
-            <ul className="space-y-2">
-              {tokens.map((t) => (
-                <li
-                  key={t.id}
-                  className="flex items-center justify-between rounded border px-3 py-2"
-                >
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-sm">{t.id}</span>
-                      {t.usedAt ? (
-                        <span className="inline-flex items-center text-xs text-green-700 dark:text-green-400">
-                          <CheckCircle2 className="mr-1 h-3 w-3" />
-                          Redeemed
-                        </span>
-                      ) : new Date(t.expiresAt).getTime() < Date.now() ? (
-                        <span className="inline-flex items-center text-xs text-amber-700 dark:text-amber-400">
-                          <AlertTriangle className="mr-1 h-3 w-3" />
-                          Expired
-                        </span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">
-                          Pending
-                        </span>
-                      )}
-                    </div>
-                    {t.description && (
-                      <div className="text-xs text-muted-foreground">
-                        {t.description}
-                      </div>
-                    )}
-                    <div className="text-xs text-muted-foreground">
-                      Expires {formatDate(t.expiresAt)}
-                      {t.usedByNodeId && (
-                        <>
-                          {' '}
-                          ·{' '}
-                          <span className="font-mono">{t.usedByNodeId}</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  {!t.usedAt && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        if (confirm(`Delete onboarding token ${t.id}?`)) {
-                          deleteToken.mutate(t.id)
-                        }
-                      }}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  )}
-                </li>
-              ))}
-            </ul>
+          {!nodes || nodes.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No nodes yet. Click <strong>Add Node</strong> to onboard one.
+            </p>
           ) : (
-            <p className="text-sm text-muted-foreground">No tokens issued.</p>
+            <table className="w-full text-sm">
+              <thead className="border-b text-left text-muted-foreground">
+                <tr>
+                  <th className="py-2 font-medium">Hostname</th>
+                  <th className="py-2 font-medium">Status</th>
+                  <th className="py-2 font-medium">Last heartbeat</th>
+                  <th className="py-2 font-medium">Node id</th>
+                  <th className="py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {nodes.map((n) => (
+                  <tr
+                    key={n.id}
+                    className="border-b last:border-0 hover:bg-secondary/40 cursor-pointer"
+                    onClick={() => navigate(`/cluster/${n.id}`)}
+                  >
+                    <td className="py-2 font-medium">{n.name}</td>
+                    <td className="py-2">
+                      <StatusBadge node={n} />
+                    </td>
+                    <td className="py-2 text-muted-foreground">
+                      {n.status === NodeStatus.ONBOARDING
+                        ? '—'
+                        : timeAgo(n.lastHeartbeat)}
+                    </td>
+                    <td className="py-2 font-mono text-xs text-muted-foreground">
+                      {n.id}
+                    </td>
+                    <td
+                      className="py-2 text-right"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          const what =
+                            n.status === NodeStatus.ONBOARDING
+                              ? `Cancel onboarding of "${n.name}"? The token will be revoked.`
+                              : `Decommission "${n.name}"? Its cert will be revoked and the row removed.`
+                          if (confirm(what)) {
+                            revokeNode.mutate({
+                              nodeId: n.id,
+                              reason: 'decommission',
+                            })
+                          }
+                        }}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </CardContent>
       </Card>
 
-      {/* One-time-show modal for a freshly-issued token. */}
+      {/* One-time-show modal for the freshly-issued token. */}
       <Dialog
         open={!!revealedToken}
         onOpenChange={(open) => !open && setRevealedToken(null)}
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Token issued</DialogTitle>
+            <DialogTitle>Token issued for {revealedToken?.hostname}</DialogTitle>
             <DialogDescription>
               Copy the token now — this is the only time the bare value is
               shown. Lost tokens can't be recovered, only re-issued.
@@ -338,7 +334,9 @@ export function ClusterDetailPage() {
                 size="icon"
                 onClick={copyToken}
                 aria-label={tokenCopied ? 'Copied' : 'Copy token'}
-                className={tokenCopied ? 'text-green-600 dark:text-green-400' : ''}
+                className={
+                  tokenCopied ? 'text-green-600 dark:text-green-400' : ''
+                }
               >
                 {tokenCopied ? (
                   <Check className="h-3 w-3" />
@@ -351,6 +349,8 @@ export function ClusterDetailPage() {
               Use as <code className="font-mono">--onboarding-token</code> when
               starting mvirt-node, or set{' '}
               <code className="font-mono">MVIRT_NODE_ONBOARDING_TOKEN</code>.
+              The node will appear in this list with status{' '}
+              <span className="font-mono">onboarding</span> until it redeems.
             </p>
           </div>
           <DialogFooter>

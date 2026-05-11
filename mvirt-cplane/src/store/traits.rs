@@ -181,6 +181,10 @@ pub struct UpdateClusterRequest {
 #[derive(Debug, Clone)]
 pub struct CreateOnboardingTokenRequest {
     pub cluster_slug: String,
+    /// Display hostname for the node. Required — pre-allocates a Node row
+    /// with `status: Onboarding` so the operator sees the host in the
+    /// cluster's node list immediately.
+    pub hostname: String,
     pub description: Option<String>,
     /// TTL in seconds; clamped server-side.
     pub ttl_seconds: u64,

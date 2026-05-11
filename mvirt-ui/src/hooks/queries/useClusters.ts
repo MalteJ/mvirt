@@ -7,6 +7,7 @@ import {
   deleteCluster,
   addNodeToCluster,
   removeNodeFromCluster,
+  listNodesInCluster,
   listOnboardingTokens,
   createOnboardingToken,
   deleteOnboardingToken,
@@ -24,6 +25,7 @@ export const clusterKeys = {
   listsInOrg: (orgSlug: string) => [...clusterKeys.all, 'org', orgSlug] as const,
   detail: (slug: string) => [...clusterKeys.all, 'detail', slug] as const,
   tokens: (slug: string) => [...clusterKeys.all, 'tokens', slug] as const,
+  nodes: (slug: string) => [...clusterKeys.all, 'nodes', slug] as const,
 }
 
 export function useClustersInOrg(orgSlug: string | undefined) {
@@ -39,6 +41,22 @@ export function useCluster(slug: string | undefined) {
     queryKey: clusterKeys.detail(slug ?? ''),
     queryFn: () => getCluster(slug!),
     enabled: !!slug,
+  })
+}
+
+/** Poll while the cluster has any nodes mid-onboarding so the status badge
+ *  flips to Online without a manual refresh. */
+export function useClusterNodes(slug: string | undefined) {
+  return useQuery({
+    queryKey: clusterKeys.nodes(slug ?? ''),
+    queryFn: () => listNodesInCluster(slug!),
+    enabled: !!slug,
+    refetchInterval: (q) => {
+      const pending = q.state.data?.some(
+        (n) => n.status === 'onboarding' || n.status === 'offline',
+      )
+      return pending ? 3000 : false
+    },
   })
 }
 
@@ -112,7 +130,12 @@ export function useCreateOnboardingToken(clusterSlug: string) {
     mutationFn: (request: CreateOnboardingTokenRequest) =>
       createOnboardingToken(clusterSlug, request),
     onSuccess: () => {
+      // Token issuance also creates the placeholder Node row + appends to
+      // cluster.node_ids, so the detail page's node list + cluster query
+      // both need to refresh.
       queryClient.invalidateQueries({ queryKey: clusterKeys.tokens(clusterSlug) })
+      queryClient.invalidateQueries({ queryKey: clusterKeys.nodes(clusterSlug) })
+      queryClient.invalidateQueries({ queryKey: clusterKeys.detail(clusterSlug) })
     },
   })
 }
@@ -123,6 +146,8 @@ export function useDeleteOnboardingToken(clusterSlug: string) {
     mutationFn: (id: string) => deleteOnboardingToken(clusterSlug, id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: clusterKeys.tokens(clusterSlug) })
+      queryClient.invalidateQueries({ queryKey: clusterKeys.nodes(clusterSlug) })
+      queryClient.invalidateQueries({ queryKey: clusterKeys.detail(clusterSlug) })
     },
   })
 }

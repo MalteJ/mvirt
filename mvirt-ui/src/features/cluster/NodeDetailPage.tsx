@@ -123,15 +123,15 @@ export function NodeDetailPage() {
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Last Heartbeat</dt>
-                  <dd>{new Date(node.last_heartbeat).toLocaleString()}</dd>
+                  <dd>{new Date(node.lastHeartbeat).toLocaleString()}</dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Created</dt>
-                  <dd>{new Date(node.created_at).toLocaleString()}</dd>
+                  <dd>{new Date(node.createdAt).toLocaleString()}</dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Updated</dt>
-                  <dd>{new Date(node.updated_at).toLocaleString()}</dd>
+                  <dd>{new Date(node.updatedAt).toLocaleString()}</dd>
                 </div>
               </dl>
             </CardContent>

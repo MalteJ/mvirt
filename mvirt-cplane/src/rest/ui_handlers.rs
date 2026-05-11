@@ -492,7 +492,10 @@ pub async fn remove_node_from_cluster(
 // Node onboarding handlers (ADR-0006)
 // =============================================================================
 
-const DEFAULT_ONBOARDING_TOKEN_TTL_SECONDS: u64 = 3600;
+/// Default onboarding-token TTL — 6 hours. Long enough that an operator
+/// can copy the token to the node, install the binary, and start the
+/// service without rushing. ADR-0006 caps at 7 days.
+const DEFAULT_ONBOARDING_TOKEN_TTL_SECONDS: u64 = 6 * 3600;
 
 /// List onboarding tokens issued for a given Cluster.
 #[utoipa::path(
@@ -545,8 +548,16 @@ pub async fn create_onboarding_token(
             code: 404,
         });
     }
+    let hostname = req.hostname.trim().to_string();
+    if hostname.is_empty() {
+        return Err(ApiError {
+            error: "hostname is required".to_string(),
+            code: 400,
+        });
+    }
     let store_req = StoreCreateOnboardingTokenRequest {
         cluster_slug: slug,
+        hostname,
         description: req.description,
         ttl_seconds: req
             .ttl_seconds
@@ -560,6 +571,8 @@ pub async fn create_onboarding_token(
         id: record.id,
         token: bare,
         cluster_slug: record.cluster_slug,
+        node_id: record.node_id,
+        hostname: record.hostname,
         expires_at: record.expires_at,
         description: record.description,
     }))

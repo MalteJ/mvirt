@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ColumnDef } from '@tanstack/react-table'
-import { MoreHorizontal, Plus, Trash2, FolderOpen, MapPin, Server } from 'lucide-react'
+import { MoreHorizontal, Plus, Trash2, MapPin, Server } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import {
   useClustersInOrg,
   useCreateClusterInOrg,
@@ -90,12 +91,15 @@ export function ClustersPage() {
       accessorKey: 'name',
       header: 'Name',
       cell: ({ row }) => (
-        <div>
+        <Link
+          to={`/clusters/${row.original.slug}`}
+          className="block hover:text-purple-light"
+        >
           <div className="font-medium">{row.original.name}</div>
           <div className="text-xs text-muted-foreground font-mono">
             {row.original.slug}
           </div>
-        </div>
+        </Link>
       ),
     },
     {
@@ -140,12 +144,6 @@ export function ClustersPage() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              onClick={() => navigate(`/clusters/${row.original.slug}`)}
-            >
-              <FolderOpen className="mr-2 h-4 w-4" />
-              Open
-            </DropdownMenuItem>
             <DropdownMenuItem
               className="text-destructive"
               onClick={() => {

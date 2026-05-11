@@ -1184,6 +1184,7 @@ impl OnboardingStore for RaftStore {
         let hash_hex = sha256_hex(bare.as_bytes());
 
         let id = format!("tok_{}", short_id());
+        let node_id = format!("node_{}", uuid::Uuid::new_v4().simple());
 
         let cmd = Command::CreateOnboardingToken {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -1191,6 +1192,8 @@ impl OnboardingStore for RaftStore {
             id: id.clone(),
             token_hash_hex: hash_hex,
             cluster_slug: req.cluster_slug,
+            node_id,
+            hostname: req.hostname,
             description: req.description,
             expires_at: expires.to_rfc3339(),
             created_by_account: req.created_by_account,
