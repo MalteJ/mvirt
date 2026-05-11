@@ -69,7 +69,9 @@ export function Layout({ children }: LayoutProps) {
     location.pathname.startsWith('/orgs/') ||
     location.pathname === '/projects' ||
     location.pathname === '/cluster' ||
-    location.pathname.startsWith('/cluster/')
+    location.pathname.startsWith('/cluster/') ||
+    location.pathname === '/clusters' ||
+    location.pathname.startsWith('/clusters/')
 
   const showEmptyState =
     !projectsLoading && !orgsLoading && !hasProjects && !isAdminPage
