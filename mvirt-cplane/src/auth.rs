@@ -207,10 +207,10 @@ impl AuthContext {
         if self.is_platform_admin() {
             return true;
         }
-        if let Some(org) = project_org_slug {
-            if self.is_org_admin(org) {
-                return true;
-            }
+        if let Some(org) = project_org_slug
+            && self.is_org_admin(org)
+        {
+            return true;
         }
         self.memberships.iter().any(|m| {
             m.role == Role::ProjectAdmin
@@ -278,16 +278,14 @@ pub async fn require_auth(
     // Initial-admin bootstrap: fires only on email-match + verified email +
     // no existing platform-admin. The atomic check lives in the apply
     // handler so parallel logins can't race.
-    if let Some(target_email) = state.initial_admin_email.as_deref() {
-        if account.email.as_deref() == Some(target_email) {
-            if let Err(e) = state
-                .store
-                .bootstrap_initial_platform_admin(&account.id)
-                .await
-            {
-                warn!(error = %e, "initial admin bootstrap failed");
-            }
-        }
+    if let Some(target_email) = state.initial_admin_email.as_deref()
+        && account.email.as_deref() == Some(target_email)
+        && let Err(e) = state
+            .store
+            .bootstrap_initial_platform_admin(&account.id)
+            .await
+    {
+        warn!(error = %e, "initial admin bootstrap failed");
     }
 
     let memberships = state

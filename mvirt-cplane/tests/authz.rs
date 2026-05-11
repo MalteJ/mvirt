@@ -62,6 +62,76 @@ async fn list_members_404_for_unknown_org() {
 }
 
 #[tokio::test]
+async fn cascade_org_admin_via_state_machine() {
+    // The is_org_admin / is_platform_admin helpers don't need REST to be
+    // exercised; build an AuthContext in-process and assert the cascades.
+    use mvirt_cplane::auth::AuthContext;
+    use mvirt_cplane::command::{AccountData, AccountKind, MembershipData, MembershipScope, Role};
+    let now = "2026-01-01T00:00:00Z".to_string();
+    let acc = AccountData {
+        id: "acc_x".into(),
+        kind: AccountKind::User,
+        external_iss: Some("idp".into()),
+        external_sub: Some("u".into()),
+        email: None,
+        display_name: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    // org-admin in "alpha"
+    let m_org = MembershipData {
+        id: "m1".into(),
+        account_id: acc.id.clone(),
+        scope: MembershipScope::Org {
+            org_slug: "alpha".into(),
+        },
+        role: Role::OrgAdmin,
+        created_by_account: acc.id.clone(),
+        created_at: now.clone(),
+    };
+    let ctx = AuthContext {
+        claims: mvirt_cplane::AuthClaims {
+            sub: "u".into(),
+            iss: "idp".into(),
+            exp: 0,
+            iat: None,
+            email: None,
+            name: None,
+            preferred_username: None,
+        },
+        account: acc.clone(),
+        memberships: vec![m_org],
+    };
+    assert!(ctx.is_org_admin("alpha"), "direct org-admin grant");
+    assert!(!ctx.is_org_admin("beta"), "no membership in other org");
+    assert!(!ctx.is_platform_admin(), "org-admin is not platform-admin");
+    // Project under "alpha" — org-admin cascade applies.
+    assert!(ctx.is_project_admin("any-project", Some("alpha")));
+    assert!(!ctx.is_project_admin("any-project", Some("beta")));
+    assert!(
+        !ctx.is_project_admin("any-project", None),
+        "no cascade without parent org context"
+    );
+
+    // Platform-admin cascades everywhere.
+    let plat = AuthContext {
+        claims: ctx.claims.clone(),
+        account: acc,
+        memberships: vec![MembershipData {
+            id: "m2".into(),
+            account_id: "acc_x".into(),
+            scope: MembershipScope::Platform,
+            role: Role::PlatformAdmin,
+            created_by_account: "acc_x".into(),
+            created_at: now,
+        }],
+    };
+    assert!(plat.is_platform_admin());
+    assert!(plat.is_org_admin("any"));
+    assert!(plat.is_project_admin("any", None));
+}
+
+#[tokio::test]
 async fn me_endpoint_401_without_auth_context() {
     // /v1/me requires AuthContext. In dev (validator None) the middleware
     // doesn't run → no AuthContext attached → handler should 401.

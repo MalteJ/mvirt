@@ -33,6 +33,59 @@ use crate::store::{
 };
 
 // =============================================================================
+// Authz helpers (ADR-0004 enforcement)
+//
+// `require_*` style helpers return Ok(()) when auth is disabled (dev mode)
+// or when the caller has the required role. Returning 403 keeps the
+// existing error-envelope shape. Each handler that needs gating threads
+// `auth: Option<AuthenticatedAccount>` from the request and calls one of
+// these before mutating state.
+// =============================================================================
+
+#[inline]
+fn require_platform_admin(
+    state: &AppState,
+    auth: &Option<crate::auth::AuthenticatedAccount>,
+) -> Result<(), ApiError> {
+    if state.jwt_validator.is_none() {
+        return Ok(());
+    }
+    let ctx = auth.as_ref().ok_or_else(|| ApiError {
+        error: "missing auth".into(),
+        code: 401,
+    })?;
+    if !ctx.0.is_platform_admin() {
+        return Err(ApiError {
+            error: "platform-admin required".into(),
+            code: 403,
+        });
+    }
+    Ok(())
+}
+
+#[inline]
+fn require_org_admin(
+    state: &AppState,
+    auth: &Option<crate::auth::AuthenticatedAccount>,
+    org_slug: &str,
+) -> Result<(), ApiError> {
+    if state.jwt_validator.is_none() {
+        return Ok(());
+    }
+    let ctx = auth.as_ref().ok_or_else(|| ApiError {
+        error: "missing auth".into(),
+        code: 401,
+    })?;
+    if !ctx.0.is_org_admin(org_slug) {
+        return Err(ApiError {
+            error: format!("org-admin in '{}' required", org_slug),
+            code: 403,
+        });
+    }
+    Ok(())
+}
+
+// =============================================================================
 // Org Handlers
 // =============================================================================
 
@@ -89,8 +142,10 @@ pub async fn get_org(
 )]
 pub async fn create_org(
     State(state): State<Arc<AppState>>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateOrgRequest>,
 ) -> Result<Json<UiOrg>, ApiError> {
+    require_platform_admin(&state, &auth)?;
     validate_slug(&req.slug, "Org slug")?;
     let store_req = StoreCreateOrgRequest {
         slug: req.slug,
@@ -99,6 +154,23 @@ pub async fn create_org(
         disallow_static_keys: req.disallow_static_keys,
     };
     let data = state.store.create_org(store_req).await?;
+
+    // After the first Org is created, ensure the caller is org-admin so
+    // they can manage it. Platform-admins implicitly have org-admin via
+    // the cascade, but explicit grants make audit-log reads cleaner.
+    if let Some(ctx) = auth {
+        let _ = state
+            .store
+            .create_membership(crate::store::CreateMembershipRequest {
+                account_id: ctx.0.account.id.clone(),
+                scope: crate::command::MembershipScope::Org {
+                    org_slug: data.slug.clone(),
+                },
+                role: crate::command::Role::OrgAdmin,
+                created_by_account: ctx.0.account.id,
+            })
+            .await;
+    }
     Ok(Json(UiOrg::from(data)))
 }
 
@@ -145,7 +217,9 @@ pub async fn update_org(
 pub async fn delete_org(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    require_org_admin(&state, &auth, &slug)?;
     let org = state.store.get_org(&slug).await?.ok_or_else(|| ApiError {
         error: format!("Org '{}' not found", slug),
         code: 404,
@@ -229,8 +303,10 @@ pub async fn get_project(
 pub async fn create_project(
     State(state): State<Arc<AppState>>,
     Path(org_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateProjectRequest>,
 ) -> Result<Json<UiProject>, ApiError> {
+    require_org_admin(&state, &auth, &org_slug)?;
     validate_slug(&req.slug, "Project slug")?;
 
     let org = state
@@ -381,8 +457,10 @@ pub async fn get_cluster(
 pub async fn create_cluster(
     State(state): State<Arc<AppState>>,
     Path(org_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateClusterRequest>,
 ) -> Result<Json<UiCluster>, ApiError> {
+    require_org_admin(&state, &auth, &org_slug)?;
     validate_slug(&req.slug, "Cluster slug")?;
 
     let org = state
@@ -443,7 +521,21 @@ pub async fn update_cluster(
 pub async fn delete_cluster(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<StatusCode, ApiError> {
+    // Authz: org-admin of the cluster's parent Org. Cluster is platform-
+    // unique so a single lookup resolves the org.
+    if state.jwt_validator.is_some() {
+        let cluster = state
+            .store
+            .get_cluster(&slug)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: format!("Cluster '{}' not found", slug),
+                code: 404,
+            })?;
+        require_org_admin(&state, &auth, &cluster.org_slug)?;
+    }
     state.store.delete_cluster(&slug).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -541,14 +633,18 @@ pub async fn list_onboarding_tokens_in_cluster(
 pub async fn create_onboarding_token(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
     Json(req): Json<UiCreateOnboardingTokenRequest>,
 ) -> Result<Json<UiCreateOnboardingTokenResponse>, ApiError> {
-    if state.store.get_cluster(&slug).await?.is_none() {
-        return Err(ApiError {
+    let cluster = state
+        .store
+        .get_cluster(&slug)
+        .await?
+        .ok_or_else(|| ApiError {
             error: format!("Cluster '{}' not found", slug),
             code: 404,
-        });
-    }
+        })?;
+    require_org_admin(&state, &auth, &cluster.org_slug)?;
     let hostname = req.hostname.trim().to_string();
     if hostname.is_empty() {
         return Err(ApiError {
