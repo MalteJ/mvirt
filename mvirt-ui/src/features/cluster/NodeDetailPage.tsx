@@ -12,6 +12,24 @@ function formatMb(mb: number): string {
   return `${mb} MB`
 }
 
+/// Map node status → badge variant. Without this, every non-Online status
+/// hits the "else" branch and renders red, which is wrong for
+/// onboarding/offline (those aren't errors, just transient states).
+function statusVariant(s: NodeStatus): 'running' | 'starting' | 'stopped' | 'error' | 'secondary' {
+  switch (s) {
+    case NodeStatus.ONLINE:
+      return 'running'
+    case NodeStatus.ONBOARDING:
+      return 'starting'
+    case NodeStatus.OFFLINE:
+      return 'stopped'
+    case NodeStatus.REVOKED:
+      return 'error'
+    default:
+      return 'secondary'
+  }
+}
+
 export function NodeDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -47,9 +65,7 @@ export function NodeDetailPage() {
         <div className="flex-1">
           <div className="flex items-center gap-3">
             <h2 className="text-2xl font-bold tracking-tight">{node.name}</h2>
-            <Badge variant={node.status === NodeStatus.ONLINE ? 'running' : 'error'}>
-              {node.status}
-            </Badge>
+            <Badge variant={statusVariant(node.status)}>{node.status}</Badge>
           </div>
           <p className="text-sm text-muted-foreground font-mono">{node.id}</p>
         </div>
@@ -116,15 +132,17 @@ export function NodeDetailPage() {
                 <div>
                   <dt className="text-muted-foreground">Status</dt>
                   <dd>
-                    <Badge variant={node.status === NodeStatus.ONLINE ? 'running' : 'error'}>
+                    <Badge variant={statusVariant(node.status)}>
                       {node.status}
                     </Badge>
                   </dd>
                 </div>
-                <div>
-                  <dt className="text-muted-foreground">Last Heartbeat</dt>
-                  <dd>{new Date(node.lastHeartbeat).toLocaleString()}</dd>
-                </div>
+                {node.status !== NodeStatus.ONBOARDING && (
+                  <div>
+                    <dt className="text-muted-foreground">Last Heartbeat</dt>
+                    <dd>{new Date(node.lastHeartbeat).toLocaleString()}</dd>
+                  </div>
+                )}
                 <div>
                   <dt className="text-muted-foreground">Created</dt>
                   <dd>{new Date(node.createdAt).toLocaleString()}</dd>
