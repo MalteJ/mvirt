@@ -683,6 +683,36 @@ pub async fn get_me(
     }))
 }
 
+/// List all Accounts. Platform-admin only — cross-Org visibility.
+#[utoipa::path(
+    get,
+    path = "/v1/accounts",
+    responses(
+        (status = 200, body = Vec<UiAccount>),
+        (status = 403, body = ApiError)
+    ),
+    tag = "auth"
+)]
+pub async fn list_accounts(
+    State(state): State<Arc<AppState>>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+) -> Result<Json<Vec<UiAccount>>, ApiError> {
+    if state.jwt_validator.is_some() {
+        let ctx = auth.ok_or_else(|| ApiError {
+            error: "missing auth".into(),
+            code: 401,
+        })?;
+        if !ctx.0.is_platform_admin() {
+            return Err(ApiError {
+                error: "platform-admin required".into(),
+                code: 403,
+            });
+        }
+    }
+    let accounts = state.store.list_accounts().await?;
+    Ok(Json(accounts.into_iter().map(UiAccount::from).collect()))
+}
+
 /// List members of an Org. Org-admin or platform-admin only.
 #[utoipa::path(
     get,

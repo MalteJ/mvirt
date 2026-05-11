@@ -19,6 +19,7 @@ import {
   OrgBillingPage,
   OrgDashboardPage,
   OrgLayout,
+  OrgMembersPage,
   OrgsPage,
   OrgSettingsPage,
   ProjectsPage,
@@ -205,6 +206,7 @@ function App() {
                     path="clusters/:slug"
                     element={<ClusterDetailPage />}
                   />
+                  <Route path="members" element={<OrgMembersPage />} />
                   <Route path="billing" element={<OrgBillingPage />} />
                   <Route path="settings" element={<OrgSettingsPage />} />
                 </Route>

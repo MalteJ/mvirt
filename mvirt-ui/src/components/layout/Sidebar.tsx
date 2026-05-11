@@ -10,6 +10,7 @@ import {
   ScrollText,
   Server,
   Settings,
+  Users,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useApiHealth } from '@/hooks/queries'
@@ -27,6 +28,7 @@ const orgNav = [
   { name: 'Dashboard', path: 'dashboard', icon: LayoutDashboard, end: true },
   { name: 'Projects', path: 'projects', icon: FolderKanban, end: false },
   { name: 'Clusters', path: 'clusters', icon: Server, end: false },
+  { name: 'Members', path: 'members', icon: Users, end: false },
   { name: 'Billing', path: 'billing', icon: CreditCard, end: false },
   { name: 'Settings', path: 'settings', icon: Settings, end: false },
 ]

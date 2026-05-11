@@ -77,6 +77,7 @@ use crate::auth::require_auth;
         ui_handlers::revoke_node,
         // Auth + Members (ADR-0004)
         ui_handlers::get_me,
+        ui_handlers::list_accounts,
         ui_handlers::list_org_members,
         ui_handlers::create_org_member,
         ui_handlers::delete_org_member,
@@ -320,8 +321,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // Node revoke (cert revocation; Decommission also deletes the row)
         .route("/nodes/{id}/revoke", post(ui_handlers::revoke_node))
-        // Auth (ADR-0004): current user + org members
+        // Auth (ADR-0004): current user + accounts + org members
         .route("/me", get(ui_handlers::get_me))
+        .route("/accounts", get(ui_handlers::list_accounts))
         .route(
             "/orgs/{org_slug}/members",
             get(ui_handlers::list_org_members).post(ui_handlers::create_org_member),
