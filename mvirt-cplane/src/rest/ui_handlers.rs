@@ -85,17 +85,15 @@ fn require_org_admin(
     Ok(())
 }
 
-/// Gate a project-scoped mutation: looks up the Project (404 if missing),
-/// then requires the caller to be project-admin of it (cascades from
-/// org-admin of the parent Org and platform-admin). Pass-through in dev.
+/// Gate a project-scoped mutation: always 404s when the project doesn't
+/// exist (regardless of auth state — otherwise endpoint shapes drift
+/// between dev and prod), then in production also requires project-admin
+/// (cascading from org-admin of the parent Org and from platform-admin).
 async fn require_project_access(
     state: &AppState,
     auth: &Option<crate::auth::AuthenticatedAccount>,
     project_slug: &str,
 ) -> Result<(), ApiError> {
-    if state.jwt_validator.is_none() {
-        return Ok(());
-    }
     let project = state
         .store
         .get_project(project_slug)
@@ -104,6 +102,9 @@ async fn require_project_access(
             error: format!("Project '{}' not found", project_slug),
             code: 404,
         })?;
+    if state.jwt_validator.is_none() {
+        return Ok(());
+    }
     let ctx = auth.as_ref().ok_or_else(|| ApiError {
         error: "missing auth".into(),
         code: 401,

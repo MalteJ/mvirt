@@ -121,14 +121,30 @@ impl TestCluster {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        TestNode {
+        let n = TestNode {
             id: node_id,
             raft_addr,
             rest_addr: actual_rest_addr,
             raft_node: node,
             rest_client: reqwest::Client::new(),
             shutdown_tx,
-        }
+        };
+        // The existing tests write to /projects/test-project/* without
+        // creating the parent Org+Project first — that used to work because
+        // the resource-apply handlers don't validate the parent. With the
+        // ADR-0004 require_project_access helper checking project existence
+        // unconditionally, we have to actually create the Project here so
+        // the resource writes 200 instead of 404.
+        let _ = n
+            .post_json("/orgs", &json!({"slug": "test-org", "name": "Test Org"}))
+            .await;
+        let _ = n
+            .post_json(
+                "/orgs/test-org/projects",
+                &json!({"slug": "test-project", "name": "Test Project"}),
+            )
+            .await;
+        n
     }
 
     async fn spawn_joining_node(node_id: u64, leader_raft_addr: &str, token: &str) -> TestNode {

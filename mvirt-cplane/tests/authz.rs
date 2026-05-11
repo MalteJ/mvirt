@@ -53,6 +53,51 @@ async fn org_member_grant_unknown_role_400() {
 }
 
 #[tokio::test]
+async fn project_member_crud() {
+    let server = common::TestServer::spawn().await;
+    server
+        .post_json(
+            "/orgs/test/projects",
+            &json!({"slug": "demo", "name": "Demo"}),
+        )
+        .await;
+
+    // Empty initial list.
+    let r = server.get("/projects/demo/members").await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert!(body["memberships"].as_array().unwrap().is_empty());
+
+    // Grant to nonexistent account → 404.
+    let r = server
+        .post_json(
+            "/projects/demo/members",
+            &json!({"accountId": "acc_nope", "role": "project-admin"}),
+        )
+        .await;
+    assert_eq!(r.status(), 404);
+
+    // Bad role → 400.
+    let r = server
+        .post_json(
+            "/projects/demo/members",
+            &json!({"accountId": "acc_x", "role": "wizard"}),
+        )
+        .await;
+    assert_eq!(r.status(), 400);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn list_project_members_404_for_unknown_project() {
+    let server = common::TestServer::spawn().await;
+    let r = server.get("/projects/ghost/members").await;
+    assert_eq!(r.status(), 404);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_members_404_for_unknown_org() {
     let server = common::TestServer::spawn().await;
     let r = server.get("/orgs/no-such-org/members").await;
