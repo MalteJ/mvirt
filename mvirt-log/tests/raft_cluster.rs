@@ -84,7 +84,9 @@ impl TestCluster {
         let mut nodes = Vec::new();
         for config in configs {
             let node: RaftNode<LogCommand, LogCommandResponse, LogStateMachine> =
-                RaftNode::new(config).await.expect("Failed to create node");
+                RaftNode::new(config, LogStateMachine)
+                    .await
+                    .expect("Failed to create node");
             nodes.push(node);
         }
 
