@@ -1010,10 +1010,7 @@ impl StateMachine<Command, Response> for ApiState {
                         security_group_id,
                         vm_id: None,
                     },
-                    status: NicStatus {
-                        socket_path: format!("/run/mvirt-net/nic-{}.sock", id),
-                        ..Default::default()
-                    },
+                    status: NicStatus::default(),
                     created_at: timestamp.clone(),
                     updated_at: timestamp,
                 };
