@@ -27,10 +27,58 @@ use tower::service_fn;
 use tracing::{info, warn};
 
 use crate::ca::extract_identity_from_der;
-use crate::command::NodeStatus;
-use crate::grpc::proto::WatchEventsRequest;
+use crate::command::{NodeResources, NodeStatus};
 use crate::grpc::proto::node_agent_client::NodeAgentClient;
+use crate::grpc::proto::{CurrentResourcesRequest, NodeResources as ProtoNodeResources, WatchEventsRequest};
 use crate::store::{DataStore, UpdateNodeStatusRequest};
+
+/// How often to re-pull resource counters from a connected node.
+const RESOURCE_PULL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl From<ProtoNodeResources> for NodeResources {
+    fn from(r: ProtoNodeResources) -> Self {
+        Self {
+            cpu_cores: r.cpu_cores,
+            memory_mb: r.memory_mb,
+            storage_gb: r.storage_gb,
+            available_cpu_cores: r.available_cpu_cores,
+            available_memory_mb: r.available_memory_mb,
+            available_storage_gb: r.available_storage_gb,
+        }
+    }
+}
+
+/// Pull `CurrentResources` from the node and persist them via raft.
+///
+/// Returns Ok on success; logs (does not propagate) any RPC or store error so
+/// the caller's tunnel lifecycle is unaffected.
+async fn pull_resources<S: DataStore + ?Sized>(
+    agent: &mut NodeAgentClient<Channel>,
+    store: &Arc<S>,
+    node_id: &str,
+) {
+    match agent
+        .current_resources(tonic::Request::new(CurrentResourcesRequest {}))
+        .await
+    {
+        Ok(resp) => {
+            let resources: NodeResources = resp.into_inner().into();
+            if let Err(e) = store
+                .update_node_status(
+                    node_id,
+                    UpdateNodeStatusRequest {
+                        status: NodeStatus::Online,
+                        resources: Some(resources),
+                    },
+                )
+                .await
+            {
+                warn!(node_id = %node_id, error = %e, "raft update_node_status(resources) failed");
+            }
+        }
+        Err(e) => warn!(node_id = %node_id, error = %e, "CurrentResources RPC failed"),
+    }
+}
 
 /// Per-node connection state. All four clients share the same underlying
 /// HTTP/2-over-TLS connection (the inverted tunnel socket).
@@ -201,20 +249,15 @@ async fn handle_connection(
         .await
         .context("building inverted channel from accepted TLS socket")?;
 
-    if let Err(e) = store
-        .update_node_status(
-            &node_id,
-            UpdateNodeStatusRequest {
-                status: NodeStatus::Online,
-                resources: None,
-            },
-        )
-        .await
+    // Mark the node online + pull its initial resource snapshot. Without a
+    // first pull, the cplane keeps a zero-resource view of the node and the
+    // scheduler skips it for every placement decision.
+    let agent = NodeAgentClient::new(channel.clone());
     {
-        warn!(node_id = %node_id, error = %e, "raft update_node_status(Online) failed");
+        let mut agent = agent.clone();
+        pull_resources(&mut agent, &store, &node_id).await;
     }
 
-    let agent = NodeAgentClient::new(channel.clone());
     let handle = Arc::new(NodeHandle {
         node_id: node_id.clone(),
         name: node_row.name,
@@ -228,8 +271,12 @@ async fn handle_connection(
 
     registry.insert(handle.clone()).await;
 
-    // 5. Hold an open WatchEvents stream for the lifetime of the tunnel.
+    // 5. Hold an open WatchEvents stream for the lifetime of the tunnel and,
+    // in parallel, periodically refresh the node's resource counters.
     let mut agent = handle.agent.clone();
+    let mut resource_tick = tokio::time::interval(RESOURCE_PULL_INTERVAL);
+    resource_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    resource_tick.tick().await; // consume the immediate first tick
     let stream_result = agent
         .watch_events(tonic::Request::new(WatchEventsRequest {}))
         .await;
@@ -237,17 +284,23 @@ async fn handle_connection(
         Ok(resp) => {
             let mut stream = resp.into_inner();
             loop {
-                match stream.message().await {
-                    Ok(Some(_event)) => {
-                        // Phase 3 TODO: drive controller from node-emitted events.
-                    }
-                    Ok(None) => {
-                        info!(node_id = %node_id, "node closed event stream cleanly");
-                        break;
-                    }
-                    Err(e) => {
-                        warn!(node_id = %node_id, error = %e, "tunnel event stream broken");
-                        break;
+                tokio::select! {
+                    msg = stream.message() => match msg {
+                        Ok(Some(_event)) => {
+                            // Phase 3 TODO: drive controller from node-emitted events.
+                        }
+                        Ok(None) => {
+                            info!(node_id = %node_id, "node closed event stream cleanly");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(node_id = %node_id, error = %e, "tunnel event stream broken");
+                            break;
+                        }
+                    },
+                    _ = resource_tick.tick() => {
+                        let mut agent = handle.agent.clone();
+                        pull_resources(&mut agent, &store, &node_id).await;
                     }
                 }
             }
