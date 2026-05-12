@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Raft consensus via mraft
-mraft = { path = "/home/malte/mraft" }
+mraft = { git = "https://github.com/MalteJ/mraft.git", rev = "6e0bfab" }
 
 # REST API
 axum = "0.8"

@@ -160,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     let mut node: RaftNode<LogCommand, LogCommandResponse, LogStateMachine> =
-        RaftNode::new(config).await?;
+        RaftNode::new(config, LogStateMachine).await?;
     node.start().await?;
 
     if args.bootstrap || args.dev {

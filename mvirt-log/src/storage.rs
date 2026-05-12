@@ -150,6 +150,22 @@ impl StateMachine<LogCommand, LogCommandResponse> for LogStateMachine {
             }
         }
     }
+
+    // Append-only log data: the SQLite file owned by `log_manager` is the
+    // source of truth and is independently durable. Raft snapshots don't
+    // need to carry log content, so these are no-ops. `requires_external_persistence`
+    // (mraft) signals that to the snapshot/restore machinery.
+    fn snapshot(&self) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Vec::new())
+    }
+
+    fn restore(&mut self, _bytes: &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    fn requires_external_persistence(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
