@@ -37,7 +37,6 @@ impl VmStore {
         self.create_internal(&id, name, config, false).await
     }
 
-    #[allow(dead_code)]
     pub async fn create_with_id(
         &self,
         id: &str,

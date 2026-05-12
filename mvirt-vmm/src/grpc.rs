@@ -126,13 +126,20 @@ impl VmService for VmServiceImpl {
             }
         }
 
-        info!(name = ?req.name, vcpus = config.vcpus, memory_mb = config.memory_mb, boot_mode = ?boot_mode, "Creating VM");
+        info!(id = ?req.id, name = ?req.name, vcpus = config.vcpus, memory_mb = config.memory_mb, boot_mode = ?boot_mode, "Creating VM");
 
-        let entry = self
-            .store
-            .create(req.name, config)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let entry = match req.id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => self
+                .store
+                .create_with_id(id, req.name, config)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?,
+            None => self
+                .store
+                .create(req.name, config)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?,
+        };
 
         info!(id = %entry.id, "VM created");
         self.audit

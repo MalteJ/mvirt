@@ -241,6 +241,7 @@ async fn create_vm(
     };
 
     vmm.create_vm(CreateVmRequest {
+        id: Some(vm.id.clone()),
         name: Some(vm.spec.name.clone()),
         config: Some(config),
     })

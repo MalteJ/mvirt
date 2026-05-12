@@ -194,6 +194,11 @@ message NicInfo {
 message CreateVmRequest {
   optional string name = 1;
   VmConfig config = 2;
+  // Caller-supplied stable id (cplane VM id). When set, the vmm stores the
+  // VM under this id instead of generating a fresh UUID, so the same id can
+  // be used for subsequent GetVm/StartVm/StopVm/DeleteVm calls. Required
+  // for the cplane reconciler driving the VM lifecycle over the tunnel.
+  optional string id = 3;
 }
 
 message GetVmRequest {
