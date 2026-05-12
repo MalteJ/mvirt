@@ -744,7 +744,12 @@ impl NetService for EbpfNetServiceImpl {
                 .map_err(validation_err_to_status)?;
 
         let now = Utc::now();
-        let nic_id = Uuid::new_v4();
+        let nic_id = if req.id.is_empty() {
+            Uuid::new_v4()
+        } else {
+            Uuid::parse_str(&req.id)
+                .map_err(|_| Status::invalid_argument(format!("Invalid NIC ID: {}", req.id)))?
+        };
         let tap_name = tap_name_from_nic_id(&nic_id);
 
         let nic = NicData {

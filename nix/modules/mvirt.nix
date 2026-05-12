@@ -256,7 +256,10 @@ in {
       after = [ "network.target" "mvirt-log.service" ];
       wants = [ "mvirt-log.service" ];
 
-      path = [ cfg.cloudHypervisor ];
+      # cdrkit provides genisoimage, which mvirt-vmm shells out to in
+      # `create_cloudinit_iso` to build the NoCloud CIDATA ISO attached
+      # as a second disk for cloud-init's datasource.
+      path = [ cfg.cloudHypervisor pkgs.cdrkit ];
 
       environment = {
         MVIRT_DATA_DIR = cfg.dataDir;

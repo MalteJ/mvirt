@@ -171,6 +171,11 @@ message CreateNicRequest {
   // Optional: routed prefixes
   repeated string routed_ipv4_prefixes = 6;
   repeated string routed_ipv6_prefixes = 7;
+
+  // Optional: external ID to use instead of generating a new UUID
+  // (cplane sets this to its own NIC id so subsequent GetNic / DeleteNic
+  //  use the same identifier on both sides).
+  string id = 8;
 }
 
 message GetNicRequest {
