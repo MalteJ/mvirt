@@ -54,8 +54,6 @@ struct OrgData {
     id: String,                              // uuid v4
     slug: String,                            // unique platform-wide, kebab-case, URL-safe
     name: String,                            // mutable display text
-    default_static_key_ttl_days: u32,        // default 90 (see ServiceAccount credentials)
-    disallow_static_keys: bool,              // default false (see ServiceAccount credentials)
     created_at: String,
     updated_at: String,
 }
@@ -136,7 +134,7 @@ Each SA can have N credential rows. Three kinds, listed by security from stronge
    SA holds an ed25519 private key, mvirt stores the public key. Service signs short-lived JWTs locally; mvirt verifies. Slightly worse than FederatedTrust because the private key has to be deployed somewhere, but better than StaticApiKey because the key was never on mvirt's side and need not transit on every request.
 
 3. **StaticApiKey**
-   mvirt generates a random secret, displays once at creation, stores BLAKE3 hash. Convenient for homelab CI and local scripts. Default expiry comes from the parent Org's `default_static_key_ttl_days` (default 90). Rotation via "create new credential, both valid for grace period, old auto-revoked". A per-Org policy can disable static keys outright (`disallow_static_keys: true` on `OrgData`) for stricter setups.
+   mvirt generates a random secret, displays once at creation, stores BLAKE3 hash. Convenient for homelab CI and local scripts. Expiry (`expires_at: Option<DateTime>`) is caller-explicit per key — `None` means never expires; a date enforces hard cut-off. No Org-wide default. Rotation is the caller's responsibility: create a new key, deploy it, revoke the old one (no implicit grace period).
 
 The SA itself is identity; credentials are how it proves that identity. Same SA can have a FederatedTrust for production CI and a StaticApiKey for emergency manual scripting.
 
@@ -290,7 +288,7 @@ Naming reconciliation: ADR-0001 and ADR-0002 use "the cluster" colloquially for 
 
 - **Allow human-owned PATs (GitHub-style).** Rejected because the pattern ties machine credentials to human lifecycle. Departing employee → orphaned tokens unless cascade deletion is rigorously enforced, which is exactly the operational pain enterprises avoid. Humans use ephemeral OIDC-backed sessions; machines use ServiceAccounts whose lifecycle is owned by the project.
 
-- **Federated trust only for SAs (no StaticApiKey).** Rejected because FederatedTrust assumes some external workload-identity infrastructure (GitHub Actions, AWS IRSA, etc.). Tier-1 homelab CI scripts running on a NAS or cron job have nothing to federate against; static keys are the pragmatic minimum. Static keys are explicitly second-tier and can be disabled per-org.
+- **Federated trust only for SAs (no StaticApiKey).** Rejected because FederatedTrust assumes some external workload-identity infrastructure (GitHub Actions, AWS IRSA, etc.). Tier-1 homelab CI scripts running on a NAS or cron job have nothing to federate against; static keys are the pragmatic minimum. Static keys are explicitly second-tier; operators wanting them gone for compliance reasons can audit-revoke them in bulk and choose not to issue new ones.
 
 - **Service users in the IdP** (Zitadel-style PATs, Auth0 M2M apps) as the canonical SA representation. Rejected because every IdP handles machine identity differently; forcing a particular IdP-side capability would compromise the BYO-IdP promise. SAs as mvirt-side entities work uniformly across all OIDC providers, including IdPs that have no service-user concept.
 
@@ -308,7 +306,7 @@ Naming reconciliation: ADR-0001 and ADR-0002 use "the cluster" colloquially for 
 
 - **Per-Org Accounts (hard identity isolation per tenant).** Rejected as inconsistent with the one-Account-per-`(iss, sub)` rule. It also breaks the multi-Org-membership use case (contractor working for two tenants, platform team with cross-Org visibility) and forces an "Org selector at login" step that no widely-used IdP supports natively. Tenants needing identity-layer isolation can run separate mvirt deployments — that's a deployment choice, not a data-model choice.
 
-- **Org as a label/tag on Project, not a first-class entity.** Rejected because the per-Org policy knobs (default static-key TTL, `disallow_static_keys`) need a row to attach to, audit logs need a stable Org id to filter by, and cross-Project queries scoped to an Org need an index. A label gets us the URL prefix and nothing else.
+- **Org as a label/tag on Project, not a first-class entity.** Rejected because audit logs need a stable Org id to filter by, cross-Project queries scoped to an Org need an index, Org-level memberships need a parent row, and any future per-tenant policy (billing limits, contact data, branding) needs somewhere to attach. A label gets us the URL prefix and nothing else.
 
 - **Allow Projects to belong to multiple Orgs.** Rejected as a query/billing nightmare. Resources have one parent Project; Projects have one parent Org. A "shared resource between Orgs" use case is real but cheaper to model as a Project-level *share*-relation later than to make the parent edge multi-valued now.
 
@@ -335,3 +333,7 @@ Naming reconciliation: ADR-0001 and ADR-0002 use "the cluster" colloquially for 
 - **Polymorphic Membership table** carries Platform/Org/Project scopes today and is the extension point for the future `Cluster` entity. One redb table, one Authorizer code path.
 - **The reverse tunnel and inter-cplane Raft channel are out of scope** for this ADR. They will use mTLS and are covered separately.
 - **Storage choice (mraft) and the future `Cluster` entity** are decided in their own ADRs; this ADR is intentionally agnostic to the former and forward-compatible with the latter.
+
+## Revisions
+
+- **2026-05-12** — Dropped `OrgData.default_static_key_ttl_days` and `OrgData.disallow_static_keys`. StaticApiKey expiry is now caller-explicit per key (`expires_at: Option<DateTime>`; `None` = never), with no Org-wide default or operator-policy gate. Rationale: the Org-level policy fields were leaking into the Org admin UI (TTL column, disallow toggle) and form surface for a knob nobody asked for at this stage; compliance pressure (C5/SOC2) that motivates forced rotation is not on the current roadmap. Rotation becomes "create new, deploy, revoke old" — no implicit grace period. Reintroduce a policy layer when a real compliance ask shows up.
