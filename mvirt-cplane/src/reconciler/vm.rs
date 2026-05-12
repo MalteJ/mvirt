@@ -51,6 +51,24 @@ pub async fn reconcile_for_volume(ctx: &Ctx, volume_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drive every VM that uses the given NIC. Called when the NIC reconciler
+/// publishes a fresh socket_path so dependent VMs can proceed to start
+/// without waiting for the 30s resync.
+pub async fn reconcile_for_nic(ctx: &Ctx, nic_id: &str) -> Result<()> {
+    let state = ctx.store.snapshot().await;
+    let dependents: Vec<String> = state
+        .vm_ids()
+        .into_iter()
+        .filter_map(|id| state.get_vm(&id))
+        .filter(|vm| vm.spec.nic_id == nic_id)
+        .map(|vm| vm.id)
+        .collect();
+    for id in dependents {
+        let _ = reconcile(ctx, &id).await;
+    }
+    Ok(())
+}
+
 pub async fn reconcile(ctx: &Ctx, id: &str) -> Result<()> {
     let state = ctx.store.snapshot().await;
     let Some(vm) = state.get_vm(id) else {
@@ -84,13 +102,24 @@ pub async fn reconcile(ctx: &Ctx, id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // NIC is optional in the reconciler: a missing or Pending NIC just
-    // means the VM boots without networking for now. This keeps the path
-    // unblocked while the NIC reconciler is still a stub.
-    let nic_socket = state
-        .get_nic(&vm.spec.nic_id)
-        .filter(|n| !n.status.socket_path.is_empty())
-        .map(|n| n.status.socket_path);
+    // VM gates on NIC: if a nic_id is set we wait for the NIC reconciler
+    // to have published a socket_path on the node. Without it, cloud-
+    // hypervisor would either spin retrying a non-existent vhost-user
+    // socket (if we passed a stale path) or boot disk-only and miss
+    // its network forever (if we passed None). A VM with empty nic_id
+    // is allowed and boots disk-only.
+    let nic_attach = if vm.spec.nic_id.is_empty() {
+        None
+    } else {
+        let Some(nic) = state.get_nic(&vm.spec.nic_id) else {
+            warn!(vm = %id, nic = %vm.spec.nic_id, "vm references unknown NIC; will retry on resync");
+            return Ok(());
+        };
+        if nic.status.socket_path.is_empty() {
+            return Ok(()); // NIC reconciler not done yet — wake via NicUpdated event
+        }
+        Some((nic.status.socket_path, nic.spec.mac_address))
+    };
 
     let Some(node) = ctx.registry.get(node_id).await else {
         warn!(vm = %id, node = %node_id, "owning node not connected; will retry on resync");
@@ -103,7 +132,7 @@ pub async fn reconcile(ctx: &Ctx, id: &str) -> Result<()> {
         &node,
         &vm,
         &disk_path,
-        nic_socket.as_deref(),
+        nic_attach.as_ref(),
         target_running,
     )
     .await;
@@ -156,13 +185,13 @@ async fn drive(
     node: &NodeHandle,
     vm: &crate::command::VmData,
     disk_path: &str,
-    nic_socket: Option<&str>,
+    nic_attach: Option<&(String, String)>,
     target_running: bool,
 ) -> std::result::Result<VmPhase, String> {
     // get_or_create: idempotent against partial failures and node restarts.
     let current = match get_vm(node, &vm.id).await? {
         Some(v) => v,
-        None => create_vm(node, vm, disk_path, nic_socket).await?,
+        None => create_vm(node, vm, disk_path, nic_attach).await?,
     };
 
     let observed = VmState::try_from(current.state).unwrap_or(VmState::Unspecified);
@@ -202,16 +231,16 @@ async fn create_vm(
     node: &NodeHandle,
     vm: &crate::command::VmData,
     disk_path: &str,
-    nic_socket: Option<&str>,
+    nic_attach: Option<&(String, String)>,
 ) -> std::result::Result<Vm, String> {
     let mut vmm = node.vmm.clone();
 
-    let nics = nic_socket
-        .map(|s| {
+    let nics = nic_attach
+        .map(|(socket, mac)| {
             vec![NicConfig {
                 tap: None,
-                mac: None,
-                vhost_socket: Some(s.to_string()),
+                mac: if mac.is_empty() { None } else { Some(mac.clone()) },
+                vhost_socket: Some(socket.clone()),
             }]
         })
         .unwrap_or_default();
@@ -236,7 +265,13 @@ async fn create_vm(
             readonly: false,
         }],
         nics,
-        user_data: None,
+        // Cloud-init datasource: caller-supplied user_data if any, else
+        // a hostname-only stub. The stub is non-negotiable — without ANY
+        // NoCloud seed, Ubuntu cloud-image's cloud-init hangs in the
+        // metadata-probe loop forever and netplan never fires DHCP.
+        user_data: Some(vm.spec.user_data.clone().unwrap_or_else(|| {
+            format!("#cloud-config\nhostname: {}\n", vm.spec.name.replace('_', "-"))
+        })),
         nested_virt: false,
     };
 

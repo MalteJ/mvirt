@@ -100,8 +100,15 @@ impl Controller {
             Event::NetworkCreated(_)
             | Event::NetworkUpdated { .. }
             | Event::NetworkDeleted { .. } => network::reconcile(ctx, &id).await,
-            Event::NicCreated(_) | Event::NicUpdated { .. } | Event::NicDeleted { .. } => {
-                nic::reconcile(ctx, &id).await
+            Event::NicCreated(_) | Event::NicDeleted { .. } => nic::reconcile(ctx, &id).await,
+            Event::NicUpdated { .. } => {
+                // Status writeback from our own reconciler — re-running
+                // the NIC reconciler is harmless (it short-circuits on
+                // Active+socket_path), and we also wake every VM that
+                // was waiting on this NIC to publish a socket_path.
+                let _ = nic::reconcile(ctx, &id).await;
+                let _ = vm::reconcile_for_nic(ctx, &id).await;
+                Ok(())
             }
             Event::VmCreated(_)
             | Event::VmUpdated { .. }
