@@ -1,5 +1,6 @@
 import { NavLink, Link, useLocation } from 'react-router-dom'
 import {
+  Bot,
   Cog,
   CreditCard,
   FolderKanban,
@@ -22,6 +23,7 @@ const projectNav = [
   { name: 'Network', path: '/network', icon: Network },
   { name: 'Firewall', path: '/firewall', icon: Flame },
   { name: 'Members', path: '/members', icon: Users },
+  { name: 'Service Accounts', path: '/service-accounts', icon: Bot },
   { name: 'Logs', path: '/logs', icon: ScrollText },
 ]
 

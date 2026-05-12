@@ -355,6 +355,22 @@ pub async fn require_auth(
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
 
+    // Bearer prefix fork: static API keys take a non-JWT path. ADR-0004
+    // §"Token validation pipeline" reserves `mvirt_sa_*` for this.
+    if token.starts_with("mvirt_sa_") {
+        let ctx = match authenticate_static_api_key(state.as_ref(), token).await {
+            Ok(c) => c,
+            Err(reason) => {
+                warn!(%reason, "static api key auth failed");
+                return (StatusCode::UNAUTHORIZED, "invalid api key").into_response();
+            }
+        };
+        let claims = ctx.claims.clone();
+        req.extensions_mut().insert(claims);
+        req.extensions_mut().insert(ctx);
+        return next.run(req).await;
+    }
+
     let Some(validator) = state.jwt_validator.as_ref() else {
         // Auth was wired up but the validator is missing — defensive: this
         // codepath shouldn't be reachable because routes.rs only mounts the
@@ -419,6 +435,105 @@ pub async fn require_auth(
     req.extensions_mut().insert(claims);
     req.extensions_mut().insert(ctx);
     next.run(req).await
+}
+
+/// Authenticate a `mvirt_sa_<id>_<secret>` Bearer token. Returns an
+/// AuthContext with synthetic claims (sub = account id, iss =
+/// `mvirt:service-account`) so downstream handlers can treat the SA
+/// uniformly with User auth.
+async fn authenticate_static_api_key(
+    state: &crate::rest::AppState,
+    token: &str,
+) -> std::result::Result<AuthContext, &'static str> {
+    // Token shape: `mvirt_sa_<id>.<secret>` — `.` separates id and
+    // secret unambiguously (base64url contains `-` and `_`, so a `_`
+    // separator would be non-trivial to parse back).
+    let rest = token.strip_prefix("mvirt_sa_").ok_or("bad prefix")?;
+    let (id, secret) = rest.split_once('.').ok_or("missing secret segment")?;
+    if id.is_empty() || secret.is_empty() {
+        return Err("empty id or secret");
+    }
+
+    let api_key = state
+        .store
+        .get_api_key(id)
+        .await
+        .map_err(|_| "key lookup failed")?
+        .ok_or("unknown key id")?;
+    if api_key.revoked_at.is_some() {
+        return Err("key revoked");
+    }
+    if let Some(exp) = &api_key.expires_at {
+        let now = chrono::Utc::now().to_rfc3339();
+        if now.as_str() > exp.as_str() {
+            return Err("key expired");
+        }
+    }
+
+    // Constant-time compare via blake3::Hash equality. We hash the
+    // presented secret, then load the stored hash from hex and let
+    // blake3::Hash's PartialEq (which is timing-safe) do the comparison.
+    let presented = blake3::hash(secret.as_bytes());
+    let stored_bytes: [u8; blake3::OUT_LEN] = match hex_to_array(&api_key.hash_hex) {
+        Some(b) => b,
+        None => return Err("corrupt stored hash"),
+    };
+    if presented != blake3::Hash::from(stored_bytes) {
+        return Err("secret mismatch");
+    }
+
+    let account = state
+        .store
+        .get_account(&api_key.account_id)
+        .await
+        .map_err(|_| "account lookup failed")?
+        .ok_or("orphan key (account gone)")?;
+    let memberships = state
+        .store
+        .list_memberships_for_account(&account.id)
+        .await
+        .unwrap_or_default();
+
+    let claims = AuthClaims {
+        sub: account.id.clone(),
+        iss: "mvirt:service-account".into(),
+        exp: 0,
+        iat: None,
+        email: account.email.clone(),
+        name: account.display_name.clone(),
+        given_name: None,
+        family_name: None,
+        preferred_username: account.display_name.clone(),
+    };
+
+    Ok(AuthContext {
+        claims,
+        account,
+        memberships,
+    })
+}
+
+fn hex_to_array(s: &str) -> Option<[u8; blake3::OUT_LEN]> {
+    if s.len() != blake3::OUT_LEN * 2 {
+        return None;
+    }
+    let mut out = [0u8; blake3::OUT_LEN];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let pair = &s.as_bytes()[i * 2..i * 2 + 2];
+        let hi = hex_nybble(pair[0])?;
+        let lo = hex_nybble(pair[1])?;
+        *byte = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+fn hex_nybble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Extractor that pulls [`AuthClaims`] out of the request extensions. Only

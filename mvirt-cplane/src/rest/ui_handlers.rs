@@ -2451,3 +2451,281 @@ pub async fn stop_pod(
         error: "Pod not found".into(),
     })
 }
+
+// =============================================================================
+// ServiceAccount + StaticApiKey handlers (ADR-0004)
+// =============================================================================
+
+fn caller_account_id(state: &AppState, auth: &Option<crate::auth::AuthenticatedAccount>) -> String {
+    if state.jwt_validator.is_none() {
+        return "system".into();
+    }
+    auth.as_ref()
+        .map(|a| a.0.account.id.clone())
+        .unwrap_or_else(|| "system".into())
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_slug}/service-accounts",
+    params(("project_slug" = String, Path)),
+    responses(
+        (status = 200, body = ServiceAccountListResponse),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "service-accounts"
+)]
+pub async fn list_service_accounts(
+    State(state): State<Arc<AppState>>,
+    Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+) -> Result<Json<ServiceAccountListResponse>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
+    let accounts = state
+        .store
+        .list_service_accounts_in_project(&project_slug)
+        .await?;
+    Ok(Json(ServiceAccountListResponse {
+        service_accounts: accounts
+            .into_iter()
+            .map(UiServiceAccount::from_account)
+            .collect(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_slug}/service-accounts",
+    params(("project_slug" = String, Path)),
+    request_body = UiCreateServiceAccountRequest,
+    responses(
+        (status = 200, body = UiServiceAccount),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError),
+        (status = 409, body = ApiError)
+    ),
+    tag = "service-accounts"
+)]
+pub async fn create_service_account(
+    State(state): State<Arc<AppState>>,
+    Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+    Json(req): Json<UiCreateServiceAccountRequest>,
+) -> Result<Json<UiServiceAccount>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
+    let trimmed = req.name.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(ApiError {
+            error: "name is required".into(),
+            code: 400,
+        });
+    }
+    let caller = caller_account_id(&state, &auth);
+    let store_req = crate::store::CreateServiceAccountRequest {
+        project_slug,
+        name: trimmed,
+        description: req.description.filter(|s| !s.trim().is_empty()),
+        created_by_account: caller,
+    };
+    let acc = state.store.create_service_account(store_req).await?;
+    Ok(Json(UiServiceAccount::from_account(acc)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/projects/{project_slug}/service-accounts/{id}",
+    params(("project_slug" = String, Path), ("id" = String, Path)),
+    responses(
+        (status = 204),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "service-accounts"
+)]
+pub async fn delete_service_account(
+    State(state): State<Arc<AppState>>,
+    Path((project_slug, id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+) -> Result<StatusCode, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
+    // Defence in depth: only allow delete when the SA actually lives in
+    // the project the URL targets, otherwise an attacker who knows an SA
+    // id could nuke an SA in a project they have access to via a
+    // *different* project's URL.
+    let acc = state
+        .store
+        .get_account(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("ServiceAccount '{}' not found", id),
+            code: 404,
+        })?;
+    if acc.project_slug.as_deref() != Some(project_slug.as_str()) {
+        return Err(ApiError {
+            error: "service account does not belong to this project".into(),
+            code: 404,
+        });
+    }
+    state.store.delete_service_account(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_slug}/service-accounts/{id}/api-keys",
+    params(("project_slug" = String, Path), ("id" = String, Path)),
+    responses(
+        (status = 200, body = ApiKeyListResponse),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "service-accounts"
+)]
+pub async fn list_api_keys(
+    State(state): State<Arc<AppState>>,
+    Path((project_slug, id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+) -> Result<Json<ApiKeyListResponse>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
+    let acc = state
+        .store
+        .get_account(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("ServiceAccount '{}' not found", id),
+            code: 404,
+        })?;
+    if acc.project_slug.as_deref() != Some(project_slug.as_str()) {
+        return Err(ApiError {
+            error: "service account does not belong to this project".into(),
+            code: 404,
+        });
+    }
+    let keys = state.store.list_api_keys_for_account(&id).await?;
+    Ok(Json(ApiKeyListResponse {
+        api_keys: keys.into_iter().map(UiApiKey::from_data).collect(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_slug}/service-accounts/{id}/api-keys",
+    params(("project_slug" = String, Path), ("id" = String, Path)),
+    request_body = UiCreateApiKeyRequest,
+    responses(
+        (status = 200, body = UiApiKey),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "service-accounts"
+)]
+pub async fn create_api_key(
+    State(state): State<Arc<AppState>>,
+    Path((project_slug, id)): Path<(String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+    Json(req): Json<UiCreateApiKeyRequest>,
+) -> Result<Json<UiApiKey>, ApiError> {
+    use base64::Engine;
+    use rand::RngCore;
+
+    require_project_access(&state, &auth, &project_slug).await?;
+    let acc = state
+        .store
+        .get_account(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("ServiceAccount '{}' not found", id),
+            code: 404,
+        })?;
+    if acc.project_slug.as_deref() != Some(project_slug.as_str()) {
+        return Err(ApiError {
+            error: "service account does not belong to this project".into(),
+            code: 404,
+        });
+    }
+
+    // Generate 32 bytes of entropy for the secret; base64url-encode
+    // (without padding) for the wire form. With 256 bits of entropy
+    // brute force is not in the threat model.
+    let mut secret_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret_bytes);
+    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret_bytes);
+    let hash = blake3::hash(secret.as_bytes());
+    let hash_hex = hash.to_hex().to_string();
+    let display_prefix: String = secret.chars().take(4).collect();
+
+    let caller = caller_account_id(&state, &auth);
+    let store_req = crate::store::CreateStaticApiKeyRequest {
+        account_id: id.clone(),
+        hash_hex,
+        display_prefix,
+        description: req.description.filter(|s| !s.trim().is_empty()),
+        expires_at: req.expires_at.filter(|s| !s.trim().is_empty()),
+        created_by_account: caller,
+    };
+    let key = state.store.create_static_api_key(store_req).await?;
+
+    // Build the user-facing key string: `mvirt_sa_<id>.<secret>`. The
+    // `.` separator unambiguously separates id from secret — base64url
+    // can contain `-` and `_`, so an underscore separator would be
+    // ambiguous on parse.
+    let key_string = format!("mvirt_sa_{}.{}", key.id, secret);
+
+    let mut ui = UiApiKey::from_data(key);
+    ui.secret = Some(key_string);
+    Ok(Json(ui))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/projects/{project_slug}/service-accounts/{id}/api-keys/{key_id}",
+    params(
+        ("project_slug" = String, Path),
+        ("id" = String, Path),
+        ("key_id" = String, Path)
+    ),
+    responses(
+        (status = 204),
+        (status = 403, body = ApiError),
+        (status = 404, body = ApiError)
+    ),
+    tag = "service-accounts"
+)]
+pub async fn revoke_api_key(
+    State(state): State<Arc<AppState>>,
+    Path((project_slug, id, key_id)): Path<(String, String, String)>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
+) -> Result<StatusCode, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
+    let acc = state
+        .store
+        .get_account(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("ServiceAccount '{}' not found", id),
+            code: 404,
+        })?;
+    if acc.project_slug.as_deref() != Some(project_slug.as_str()) {
+        return Err(ApiError {
+            error: "service account does not belong to this project".into(),
+            code: 404,
+        });
+    }
+    let key = state
+        .store
+        .get_api_key(&key_id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("API key '{}' not found", key_id),
+            code: 404,
+        })?;
+    if key.account_id != id {
+        return Err(ApiError {
+            error: "API key does not belong to this ServiceAccount".into(),
+            code: 404,
+        });
+    }
+    state.store.revoke_static_api_key(&key_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}

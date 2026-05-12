@@ -305,6 +305,53 @@ pub enum Command {
         account_id: String,
     },
 
+    /// Create a project-scoped ServiceAccount. Produces an Account row with
+    /// `kind = ServiceAccount, project_slug = Some(...)` plus a Membership
+    /// granting `(Project, ProjectAdmin)` to that account. Project-scope
+    /// uniqueness on `(project_slug, display_name)` per ADR-0004.
+    CreateServiceAccount {
+        request_id: String,
+        timestamp: String,
+        account_id: String,
+        membership_id: String,
+        project_slug: String,
+        name: String,
+        description: Option<String>,
+        created_by_account: String,
+    },
+
+    /// Delete a ServiceAccount. Cascade-revokes all its API keys and
+    /// removes its memberships before the Account row goes.
+    DeleteServiceAccount {
+        request_id: String,
+        timestamp: String,
+        account_id: String,
+    },
+
+    /// Mint a new static API key for a ServiceAccount. The plaintext secret
+    /// is hashed by the caller (REST handler) — only the hex of BLAKE3
+    /// is committed. Plaintext is returned in the apply Response so the
+    /// handler can show it to the user once.
+    CreateStaticApiKey {
+        request_id: String,
+        timestamp: String,
+        id: String,
+        account_id: String,
+        hash_hex: String,
+        display_prefix: String,
+        description: Option<String>,
+        expires_at: Option<String>,
+        created_by_account: String,
+    },
+
+    /// Revoke a key. Treated as a soft-delete: the row stays but
+    /// `revoked_at` becomes Some, and the auth path rejects.
+    RevokeStaticApiKey {
+        request_id: String,
+        timestamp: String,
+        id: String,
+    },
+
     // Cluster operations — keyed by slug (platform-wide unique). See ADR-0005.
     CreateCluster {
         request_id: String,
@@ -502,6 +549,10 @@ impl Command {
             Command::CreateMembership { request_id, .. } => request_id,
             Command::DeleteMembership { request_id, .. } => request_id,
             Command::BootstrapInitialPlatformAdmin { request_id, .. } => request_id,
+            Command::CreateServiceAccount { request_id, .. } => request_id,
+            Command::DeleteServiceAccount { request_id, .. } => request_id,
+            Command::CreateStaticApiKey { request_id, .. } => request_id,
+            Command::RevokeStaticApiKey { request_id, .. } => request_id,
             Command::CreateVolume { request_id, .. } => request_id,
             Command::DeleteVolume { request_id, .. } => request_id,
             Command::UpdateVolumeStatus { request_id, .. } => request_id,
@@ -853,8 +904,54 @@ pub struct AccountData {
     pub external_sub: Option<String>,
     pub email: Option<String>,
     pub display_name: Option<String>,
+    /// Home Project for ServiceAccounts. None for Users (Users belong to no
+    /// Project; their access is granted via Memberships). Per ADR-0004 SAs
+    /// have a single "home" Project that owns their lifecycle. Platform-
+    /// scoped SAs (project_slug = None on a ServiceAccount kind) are
+    /// reserved but not used in v1.
+    #[serde(default)]
+    pub project_slug: Option<String>,
+    /// Operator-supplied note for ServiceAccounts (e.g. "github-actions CI"
+    /// or "terraform"). None for Users.
+    #[serde(default)]
+    pub description: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Static API key for a ServiceAccount. The plaintext secret is shown
+/// exactly once at creation — only `hash_hex` (BLAKE3) persists.
+///
+/// Key string format (the value the client sends as `Authorization: Bearer`):
+///     `mvirt_sa_<id>.<secret>`
+/// where `id` is the 16-byte UUID rendered as 32 hex chars (no dashes), and
+/// `secret` is 32 random bytes base64url-encoded. The `.` separator avoids
+/// the ambiguity an `_` would create: base64url contains both `-` and `_`,
+/// so an underscore-separated form couldn't be parsed back unambiguously.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyData {
+    pub id: String,
+    /// ServiceAccount this key authenticates as.
+    pub account_id: String,
+    /// BLAKE3 hash of the secret bytes, hex-encoded. The hash is over the
+    /// raw 32-byte secret, not the prefixed key string.
+    pub hash_hex: String,
+    /// First 4 chars of the base64url-encoded secret, kept for the UI list
+    /// so operators can recognise which key is which after the plaintext
+    /// is gone. Never sufficient to authenticate.
+    pub display_prefix: String,
+    /// Optional caller-supplied label.
+    pub description: Option<String>,
+    /// Optional RFC3339 expiry. `None` = never expires.
+    pub expires_at: Option<String>,
+    /// Set on the first successful auth that uses this key — best-effort,
+    /// not state-machine consensus on every request. Reserved for v2.
+    pub last_used_at: Option<String>,
+    /// Set when the key is revoked; auth treats a revoked key as missing.
+    pub revoked_at: Option<String>,
+    pub created_at: String,
+    /// The Account that issued this key (audit trail).
+    pub created_by_account: String,
 }
 
 /// Authorization scope for a membership row. Cluster scope is reserved per
@@ -1066,6 +1163,7 @@ pub enum Response {
     OnboardingToken(OnboardingTokenData),
     Account(AccountData),
     Membership(MembershipData),
+    ApiKey(ApiKeyData),
     /// Result of a successful `RedeemOnboardingToken` apply: the freshly-
     /// minted Node + signed leaf + CA root (so the node can verify the
     /// cplane server cert on the next mTLS handshake).

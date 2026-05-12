@@ -1410,6 +1410,110 @@ impl AccountStore for RaftStore {
     }
 }
 
+#[async_trait]
+impl crate::store::ServiceAccountStore for RaftStore {
+    async fn create_service_account(
+        &self,
+        req: crate::store::CreateServiceAccountRequest,
+    ) -> Result<AccountData> {
+        let cmd = Command::CreateServiceAccount {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            account_id: format!("acc_{}", uuid::Uuid::new_v4().simple()),
+            membership_id: format!("mbr_{}", uuid::Uuid::new_v4().simple()),
+            project_slug: req.project_slug,
+            name: req.name,
+            description: req.description,
+            created_by_account: req.created_by_account,
+        };
+        match self.write_command(cmd).await? {
+            Response::Account(a) => Ok(a),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn delete_service_account(&self, account_id: &str) -> Result<()> {
+        let cmd = Command::DeleteServiceAccount {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            account_id: account_id.to_string(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Deleted { .. } => Ok(()),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 400, message } => Err(StoreError::Validation(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn list_service_accounts_in_project(
+        &self,
+        project_slug: &str,
+    ) -> Result<Vec<AccountData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_service_accounts_in_project(project_slug))
+    }
+
+    async fn create_static_api_key(
+        &self,
+        req: crate::store::CreateStaticApiKeyRequest,
+    ) -> Result<crate::command::ApiKeyData> {
+        let cmd = Command::CreateStaticApiKey {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            id: format!("key_{}", uuid::Uuid::new_v4().simple()),
+            account_id: req.account_id,
+            hash_hex: req.hash_hex,
+            display_prefix: req.display_prefix,
+            description: req.description,
+            expires_at: req.expires_at,
+            created_by_account: req.created_by_account,
+        };
+        match self.write_command(cmd).await? {
+            Response::ApiKey(k) => Ok(k),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { code: 400, message } => Err(StoreError::Validation(message)),
+            Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn revoke_static_api_key(&self, id: &str) -> Result<crate::command::ApiKeyData> {
+        let cmd = Command::RevokeStaticApiKey {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            id: id.to_string(),
+        };
+        match self.write_command(cmd).await? {
+            Response::ApiKey(k) => Ok(k),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn get_api_key(&self, id: &str) -> Result<Option<crate::command::ApiKeyData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.get_api_key(id))
+    }
+
+    async fn list_api_keys_for_account(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<crate::command::ApiKeyData>> {
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        Ok(state.list_api_keys_for_account(account_id))
+    }
+}
+
 impl DataStore for RaftStore {
     fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()

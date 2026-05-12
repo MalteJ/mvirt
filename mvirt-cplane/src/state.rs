@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use crate::ca::{InternalCa, new_serial, sign_node_leaf};
 use crate::command::{
-    AccountData, AccountKind, ClusterData, Command, MembershipData, MembershipScope, NetworkData,
-    NicData, NicSpec, NicStatus, NodeData, NodeStatus, OnboardingTokenData, OrgData, ProjectData,
-    Response, RevocationReason, RevokedCertData, Role, SecurityGroupData, SecurityGroupRuleData,
-    ServerCertData, SnapshotData, TemplateData, TemplatePhase, TemplateSpec, TemplateStatus,
-    VmData, VmPhase, VmStatus, VolumeData, VolumeSpec, VolumeStatus,
+    AccountData, AccountKind, ApiKeyData, ClusterData, Command, MembershipData, MembershipScope,
+    NetworkData, NicData, NicSpec, NicStatus, NodeData, NodeStatus, OnboardingTokenData, OrgData,
+    ProjectData, Response, RevocationReason, RevokedCertData, Role, SecurityGroupData,
+    SecurityGroupRuleData, ServerCertData, SnapshotData, TemplateData, TemplatePhase, TemplateSpec,
+    TemplateStatus, VmData, VmPhase, VmStatus, VolumeData, VolumeSpec, VolumeStatus,
 };
 #[cfg(test)]
 use crate::command::{OrgContact, VolumePhase};
@@ -44,6 +44,8 @@ const REVOKED_CERTS: TableDefinition<&str, &[u8]> = TableDefinition::new("revoke
 const PKI: TableDefinition<&str, &[u8]> = TableDefinition::new("pki");
 const ACCOUNTS: TableDefinition<&str, &[u8]> = TableDefinition::new("accounts");
 const MEMBERSHIPS: TableDefinition<&str, &[u8]> = TableDefinition::new("memberships");
+/// Static API keys for ServiceAccounts (ADR-0004). Keyed by key id.
+const API_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("api_keys");
 
 /// Singleton key inside PKI for the CA material.
 const PKI_KEY_CA: &str = "internal_ca";
@@ -65,6 +67,7 @@ const ALL_TABLES: &[TableDefinition<&str, &[u8]>] = &[
     REVOKED_CERTS,
     ACCOUNTS,
     MEMBERSHIPS,
+    API_KEYS,
     PKI,
 ];
 
@@ -554,6 +557,32 @@ impl ApiState {
         read_list::<MembershipData>(&self.read_txn(), MEMBERSHIPS)
             .into_iter()
             .any(|m| m.scope == MembershipScope::Platform && m.role == Role::PlatformAdmin)
+    }
+
+    // =========================================================================
+    // ServiceAccount + API key queries (ADR-0004)
+    // =========================================================================
+
+    /// All ServiceAccounts whose home project is `project_slug`.
+    pub fn list_service_accounts_in_project(&self, project_slug: &str) -> Vec<AccountData> {
+        read_list::<AccountData>(&self.read_txn(), ACCOUNTS)
+            .into_iter()
+            .filter(|a| {
+                a.kind == AccountKind::ServiceAccount
+                    && a.project_slug.as_deref() == Some(project_slug)
+            })
+            .collect()
+    }
+
+    pub fn get_api_key(&self, id: &str) -> Option<ApiKeyData> {
+        read_get(&self.read_txn(), API_KEYS, id)
+    }
+
+    pub fn list_api_keys_for_account(&self, account_id: &str) -> Vec<ApiKeyData> {
+        read_list::<ApiKeyData>(&self.read_txn(), API_KEYS)
+            .into_iter()
+            .filter(|k| k.account_id == account_id)
+            .collect()
     }
 
     // =========================================================================
@@ -2067,6 +2096,8 @@ impl StateMachine<Command, Response> for ApiState {
                     external_sub: None,
                     email: Some(normalized),
                     display_name,
+                    project_slug: None,
+                    description: None,
                     created_at: timestamp.clone(),
                     updated_at: timestamp,
                 };
@@ -2139,6 +2170,8 @@ impl StateMachine<Command, Response> for ApiState {
                         external_sub: Some(sub),
                         email,
                         display_name,
+                        project_slug: None,
+                        description: None,
                         created_at: timestamp.clone(),
                         updated_at: timestamp,
                     };
@@ -2281,6 +2314,202 @@ impl StateMachine<Command, Response> for ApiState {
                 txn_put(&txn, MEMBERSHIPS, &id, &m);
                 txn.commit().expect("commit");
                 (Response::Membership(m), vec![])
+            }
+
+            // =================================================================
+            // ServiceAccount + StaticApiKey Commands (ADR-0004)
+            // =================================================================
+            Command::CreateServiceAccount {
+                timestamp,
+                account_id,
+                membership_id,
+                project_slug,
+                name,
+                description,
+                created_by_account,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                if !txn_has(&txn, PROJECTS, &project_slug) {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Project '{}' not found", project_slug),
+                        },
+                        vec![],
+                    );
+                }
+                // ADR-0004 §"Account model": ServiceAccount per
+                // (project_slug, name) must be unique. Scan accounts within
+                // the project; SA count per project is bounded so the linear
+                // scan is fine.
+                let dup = txn_list::<AccountData>(&txn, ACCOUNTS)
+                    .into_iter()
+                    .any(|a| {
+                        a.kind == AccountKind::ServiceAccount
+                            && a.project_slug.as_deref() == Some(project_slug.as_str())
+                            && a.display_name.as_deref() == Some(name.as_str())
+                    });
+                if dup {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!(
+                                "ServiceAccount '{}' already exists in project '{}'",
+                                name, project_slug
+                            ),
+                        },
+                        vec![],
+                    );
+                }
+                let acc = AccountData {
+                    id: account_id.clone(),
+                    kind: AccountKind::ServiceAccount,
+                    external_iss: None,
+                    external_sub: None,
+                    email: None,
+                    display_name: Some(name),
+                    project_slug: Some(project_slug.clone()),
+                    description,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp.clone(),
+                };
+                txn_put(&txn, ACCOUNTS, &account_id, &acc);
+                // Auto-grant the SA project-admin in its home project. SAs
+                // need explicit memberships just like users — the Account
+                // row alone carries no privileges.
+                let m = MembershipData {
+                    id: membership_id.clone(),
+                    account_id: account_id.clone(),
+                    scope: MembershipScope::Project {
+                        project_slug: project_slug.clone(),
+                    },
+                    role: Role::ProjectAdmin,
+                    created_by_account,
+                    created_at: timestamp,
+                };
+                txn_put(&txn, MEMBERSHIPS, &membership_id, &m);
+                txn.commit().expect("commit");
+                (Response::Account(acc), vec![])
+            }
+
+            Command::DeleteServiceAccount { account_id, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(acc) = txn_get::<AccountData>(&txn, ACCOUNTS, &account_id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Account '{}' not found", account_id),
+                        },
+                        vec![],
+                    );
+                };
+                if acc.kind != AccountKind::ServiceAccount {
+                    return (
+                        Response::Error {
+                            code: 400,
+                            message: "not a ServiceAccount".into(),
+                        },
+                        vec![],
+                    );
+                }
+                // Cascade: keys + memberships before the Account row, so an
+                // interrupted apply can't leave orphan rows pointing at a
+                // dead account.
+                let key_ids: Vec<String> = txn_list::<ApiKeyData>(&txn, API_KEYS)
+                    .into_iter()
+                    .filter(|k| k.account_id == account_id)
+                    .map(|k| k.id)
+                    .collect();
+                for kid in key_ids {
+                    txn_delete(&txn, API_KEYS, &kid);
+                }
+                let mem_ids: Vec<String> = txn_list::<MembershipData>(&txn, MEMBERSHIPS)
+                    .into_iter()
+                    .filter(|m| m.account_id == account_id)
+                    .map(|m| m.id)
+                    .collect();
+                for mid in mem_ids {
+                    txn_delete(&txn, MEMBERSHIPS, &mid);
+                }
+                txn_delete(&txn, ACCOUNTS, &account_id);
+                txn.commit().expect("commit");
+                (Response::Deleted { id: account_id }, vec![])
+            }
+
+            Command::CreateStaticApiKey {
+                timestamp,
+                id,
+                account_id,
+                hash_hex,
+                display_prefix,
+                description,
+                expires_at,
+                created_by_account,
+                ..
+            } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(acc) = txn_get::<AccountData>(&txn, ACCOUNTS, &account_id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("Account '{}' not found", account_id),
+                        },
+                        vec![],
+                    );
+                };
+                if acc.kind != AccountKind::ServiceAccount {
+                    return (
+                        Response::Error {
+                            code: 400,
+                            message: "API keys are only valid for ServiceAccounts".into(),
+                        },
+                        vec![],
+                    );
+                }
+                if txn_has(&txn, API_KEYS, &id) {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!("API key '{}' already exists", id),
+                        },
+                        vec![],
+                    );
+                }
+                let key = ApiKeyData {
+                    id: id.clone(),
+                    account_id,
+                    hash_hex,
+                    display_prefix,
+                    description,
+                    expires_at,
+                    last_used_at: None,
+                    revoked_at: None,
+                    created_at: timestamp,
+                    created_by_account,
+                };
+                txn_put(&txn, API_KEYS, &id, &key);
+                txn.commit().expect("commit");
+                (Response::ApiKey(key), vec![])
+            }
+
+            Command::RevokeStaticApiKey { timestamp, id, .. } => {
+                let txn = self.db.begin_write().expect("begin");
+                let Some(mut key) = txn_get::<ApiKeyData>(&txn, API_KEYS, &id) else {
+                    return (
+                        Response::Error {
+                            code: 404,
+                            message: format!("API key '{}' not found", id),
+                        },
+                        vec![],
+                    );
+                };
+                if key.revoked_at.is_none() {
+                    key.revoked_at = Some(timestamp);
+                    txn_put(&txn, API_KEYS, &id, &key);
+                }
+                txn.commit().expect("commit");
+                (Response::ApiKey(key), vec![])
             }
 
             // =================================================================

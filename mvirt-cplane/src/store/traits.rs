@@ -533,6 +533,55 @@ pub trait AccountStore: Send + Sync {
     async fn has_platform_admin(&self) -> Result<bool>;
 }
 
+/// Create a project-scoped ServiceAccount. The handler hashes nothing —
+/// SA creation produces an Account row + an implicit ProjectAdmin
+/// membership. API keys are minted separately via [`ApiKeyStore`].
+#[derive(Debug, Clone)]
+pub struct CreateServiceAccountRequest {
+    pub project_slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_by_account: String,
+}
+
+/// Mint a fresh static API key. The handler is responsible for
+/// generating the plaintext secret, hashing it with BLAKE3, and passing
+/// `hash_hex` + `display_prefix` here. `expires_at` is caller-explicit
+/// per ADR-0004 — `None` = never expires.
+#[derive(Debug, Clone)]
+pub struct CreateStaticApiKeyRequest {
+    pub account_id: String,
+    pub hash_hex: String,
+    pub display_prefix: String,
+    pub description: Option<String>,
+    pub expires_at: Option<String>,
+    pub created_by_account: String,
+}
+
+/// Store trait for project-scoped ServiceAccounts and their static API
+/// keys (ADR-0004 §"ServiceAccount credentials").
+#[async_trait]
+pub trait ServiceAccountStore: Send + Sync {
+    async fn create_service_account(&self, req: CreateServiceAccountRequest)
+    -> Result<AccountData>;
+    async fn delete_service_account(&self, account_id: &str) -> Result<()>;
+    async fn list_service_accounts_in_project(
+        &self,
+        project_slug: &str,
+    ) -> Result<Vec<AccountData>>;
+
+    async fn create_static_api_key(
+        &self,
+        req: CreateStaticApiKeyRequest,
+    ) -> Result<crate::command::ApiKeyData>;
+    async fn revoke_static_api_key(&self, id: &str) -> Result<crate::command::ApiKeyData>;
+    async fn get_api_key(&self, id: &str) -> Result<Option<crate::command::ApiKeyData>>;
+    async fn list_api_keys_for_account(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<crate::command::ApiKeyData>>;
+}
+
 /// Store trait for node onboarding (ADR-0006). Tokens are issued and
 /// consumed via the bootstrap REST endpoint; revoke targets node certs.
 #[async_trait]
@@ -744,6 +793,7 @@ pub trait DataStore:
     + ProjectStore
     + ClusterStore
     + AccountStore
+    + ServiceAccountStore
     + OnboardingStore
     + VolumeStore
     + TemplateStore

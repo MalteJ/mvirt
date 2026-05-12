@@ -13,6 +13,7 @@ import { StoragePage } from './features/storage/StoragePage'
 import { NetworkPage } from './features/network/NetworkPage'
 import { FirewallPage, SecurityGroupDetailPage } from './features/firewall'
 import { ProjectMembersPage } from './features/project/ProjectMembersPage'
+import { ProjectServiceAccountsPage } from './features/project/ProjectServiceAccountsPage'
 import { LogsPage } from './features/logs/LogsPage'
 import {
   ClusterDetailPage,
@@ -254,6 +255,10 @@ function App() {
                       <Route path="/firewall" element={<FirewallPage />} />
                       <Route path="/firewall/:id" element={<SecurityGroupDetailPage />} />
                       <Route path="/members" element={<ProjectMembersPage />} />
+                      <Route
+                        path="/service-accounts"
+                        element={<ProjectServiceAccountsPage />}
+                      />
                       <Route path="/logs" element={<LogsPage />} />
                     </Routes>
                   }

@@ -1287,3 +1287,101 @@ pub struct UiCreatePodRequest {
 pub struct PodListResponse {
     pub pods: Vec<UiPod>,
 }
+
+// =============================================================================
+// ServiceAccount + StaticApiKey DTOs (ADR-0004)
+// =============================================================================
+
+/// Project-scoped ServiceAccount (an `Account` row with kind = ServiceAccount).
+/// Memberships are managed via the existing Org/Project membership endpoints —
+/// SA creation auto-grants project-admin in the home project.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiServiceAccount {
+    pub id: String,
+    pub project_slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl UiServiceAccount {
+    pub fn from_account(a: crate::command::AccountData) -> Self {
+        Self {
+            id: a.id,
+            project_slug: a.project_slug.unwrap_or_default(),
+            name: a.display_name.unwrap_or_default(),
+            description: a.description,
+            created_at: a.created_at,
+            updated_at: a.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceAccountListResponse {
+    pub service_accounts: Vec<UiServiceAccount>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreateServiceAccountRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// API key metadata — `secret` is `None` everywhere except in the response
+/// of `POST .../api-keys`, where the freshly-minted plaintext appears once
+/// and is never returned again.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiApiKey {
+    pub id: String,
+    pub account_id: String,
+    pub display_prefix: String,
+    pub description: Option<String>,
+    pub expires_at: Option<String>,
+    pub last_used_at: Option<String>,
+    pub revoked_at: Option<String>,
+    pub created_at: String,
+    /// One-time plaintext returned only on creation. The UI must show it
+    /// once and discard it; the cplane stores only the BLAKE3 hash.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+}
+
+impl UiApiKey {
+    pub fn from_data(k: crate::command::ApiKeyData) -> Self {
+        Self {
+            id: k.id,
+            account_id: k.account_id,
+            display_prefix: k.display_prefix,
+            description: k.description,
+            expires_at: k.expires_at,
+            last_used_at: k.last_used_at,
+            revoked_at: k.revoked_at,
+            created_at: k.created_at,
+            secret: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeyListResponse {
+    pub api_keys: Vec<UiApiKey>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCreateApiKeyRequest {
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Caller-explicit RFC3339 expiry. `None` means the key never expires —
+    /// ADR-0004 has no Org-default; rotation is the operator's responsibility.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}

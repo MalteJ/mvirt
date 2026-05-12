@@ -120,6 +120,8 @@ async fn cascade_org_admin_via_state_machine() {
         external_sub: Some("u".into()),
         email: None,
         display_name: None,
+        project_slug: None,
+        description: None,
         created_at: now.clone(),
         updated_at: now.clone(),
     };

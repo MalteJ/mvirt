@@ -33,6 +33,7 @@ use crate::auth::require_auth;
         (name = "vms", description = "VM CRUD and lifecycle operations"),
         (name = "storage", description = "Volumes, templates, and storage pool"),
         (name = "security-groups", description = "Security group and firewall rule management"),
+        (name = "service-accounts", description = "Project-scoped service accounts and their static API keys (ADR-0004)"),
         (name = "pods", description = "Pod and container management (stub)"),
         (name = "logs", description = "Audit log queries")
     ),
@@ -86,6 +87,13 @@ use crate::auth::require_auth;
         ui_handlers::list_project_members,
         ui_handlers::create_project_member,
         ui_handlers::delete_project_member,
+        // ServiceAccounts + StaticApiKeys (ADR-0004)
+        ui_handlers::list_service_accounts,
+        ui_handlers::create_service_account,
+        ui_handlers::delete_service_account,
+        ui_handlers::list_api_keys,
+        ui_handlers::create_api_key,
+        ui_handlers::revoke_api_key,
         // VMs (UI)
         ui_handlers::list_vms,
         ui_handlers::get_vm,
@@ -184,6 +192,13 @@ use crate::auth::require_auth;
         ui_types::MembershipListResponse,
         ui_types::UiCreateOrgMembershipRequest,
         ui_types::UiInviteAccountRequest,
+        // UI schemas - ServiceAccounts (ADR-0004)
+        ui_types::UiServiceAccount,
+        ui_types::UiCreateServiceAccountRequest,
+        ui_types::ServiceAccountListResponse,
+        ui_types::UiApiKey,
+        ui_types::UiCreateApiKeyRequest,
+        ui_types::ApiKeyListResponse,
         // UI schemas - VMs
         ui_types::UiVm,
         ui_types::UiVmState,
@@ -436,7 +451,24 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/members",
             get(ui_handlers::list_project_members).post(ui_handlers::create_project_member),
         )
-        .route("/members/{id}", delete(ui_handlers::delete_project_member));
+        .route("/members/{id}", delete(ui_handlers::delete_project_member))
+        // Service Accounts + static API keys (ADR-0004)
+        .route(
+            "/service-accounts",
+            get(ui_handlers::list_service_accounts).post(ui_handlers::create_service_account),
+        )
+        .route(
+            "/service-accounts/{id}",
+            delete(ui_handlers::delete_service_account),
+        )
+        .route(
+            "/service-accounts/{id}/api-keys",
+            get(ui_handlers::list_api_keys).post(ui_handlers::create_api_key),
+        )
+        .route(
+            "/service-accounts/{id}/api-keys/{key_id}",
+            delete(ui_handlers::revoke_api_key),
+        );
 
     // Bootstrap endpoint (ADR-0006). Token-authed via the Authorization
     // header inside the handler — *not* through the Account JWT middleware.
