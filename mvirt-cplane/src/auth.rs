@@ -351,12 +351,21 @@ pub async fn require_auth(
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
+
+    // No bearer presented. In dev mode (no JWT validator configured) we let
+    // the request through so handlers fall back to the unauthenticated-dev
+    // path; in prod 401 immediately.
     let Some(token) = token else {
+        if state.jwt_validator.is_none() {
+            return next.run(req).await;
+        }
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
 
     // Bearer prefix fork: static API keys take a non-JWT path. ADR-0004
-    // §"Token validation pipeline" reserves `mvirt_sa_*` for this.
+    // §"Token validation pipeline" reserves `mvirt_sa_*` for this. Works
+    // independently of OIDC configuration — operators running CI-only
+    // setups can use SA keys without standing up an IdP.
     if token.starts_with("mvirt_sa_") {
         let ctx = match authenticate_static_api_key(state.as_ref(), token).await {
             Ok(c) => c,
@@ -371,11 +380,10 @@ pub async fn require_auth(
         return next.run(req).await;
     }
 
+    // JWT-style bearer: reject if no validator is configured (the caller
+    // presented credentials we can't verify).
     let Some(validator) = state.jwt_validator.as_ref() else {
-        // Auth was wired up but the validator is missing — defensive: this
-        // codepath shouldn't be reachable because routes.rs only mounts the
-        // middleware when a validator exists.
-        return (StatusCode::SERVICE_UNAVAILABLE, "auth misconfigured").into_response();
+        return (StatusCode::UNAUTHORIZED, "JWT auth not configured").into_response();
     };
     let claims = match validator.validate(token).await {
         Ok(c) => c,

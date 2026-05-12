@@ -4475,4 +4475,247 @@ mod tests {
 
         assert!(matches!(response, Response::Error { code: 404, .. }));
     }
+
+    // =========================================================================
+    // ServiceAccount + StaticApiKey apply-handler tests (ADR-0004)
+    // =========================================================================
+
+    /// Bootstrap a project named `proj` inside TEST_ORG. Returns the slug.
+    fn ensure_test_project(state: &mut ApiState, proj: &str) -> String {
+        ensure_test_org(state);
+        if state.get_project(proj).is_none() {
+            apply(state, create_project_cmd(&format!("setup-{}", proj), proj, proj));
+        }
+        proj.to_string()
+    }
+
+    fn create_sa_cmd(req: &str, account_id: &str, project: &str, name: &str) -> Command {
+        Command::CreateServiceAccount {
+            request_id: req.to_string(),
+            timestamp: "2026-05-12T00:00:00Z".into(),
+            account_id: account_id.to_string(),
+            membership_id: format!("mbr_for_{}", account_id),
+            project_slug: project.to_string(),
+            name: name.to_string(),
+            description: None,
+            created_by_account: "acc_creator".into(),
+        }
+    }
+
+    #[test]
+    fn test_create_service_account_grants_project_admin() {
+        let mut state = ApiState::default();
+        let proj = ensure_test_project(&mut state, "ci");
+
+        let response = apply(&mut state, create_sa_cmd("req-1", "acc_ci", &proj, "github"));
+        match response {
+            Response::Account(a) => {
+                assert_eq!(a.id, "acc_ci");
+                assert_eq!(a.kind, AccountKind::ServiceAccount);
+                assert_eq!(a.project_slug.as_deref(), Some(proj.as_str()));
+                assert_eq!(a.display_name.as_deref(), Some("github"));
+                assert!(a.external_iss.is_none() && a.external_sub.is_none());
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ProjectAdmin membership was auto-granted.
+        let mems = state.list_memberships_for_account("acc_ci");
+        assert_eq!(mems.len(), 1);
+        assert!(matches!(
+            &mems[0].scope,
+            MembershipScope::Project { project_slug } if project_slug == &proj
+        ));
+        assert_eq!(mems[0].role, Role::ProjectAdmin);
+
+        // Shows up in the project's SA list.
+        let sas = state.list_service_accounts_in_project(&proj);
+        assert_eq!(sas.len(), 1);
+        assert_eq!(sas[0].id, "acc_ci");
+    }
+
+    #[test]
+    fn test_create_service_account_rejects_duplicate_name_per_project() {
+        let mut state = ApiState::default();
+        let proj = ensure_test_project(&mut state, "ci");
+
+        apply(&mut state, create_sa_cmd("req-1", "acc_a", &proj, "github"));
+        let dup = apply(&mut state, create_sa_cmd("req-2", "acc_b", &proj, "github"));
+        assert!(matches!(dup, Response::Error { code: 409, .. }));
+
+        // Same name in a *different* project is fine — uniqueness is per-project.
+        let proj2 = ensure_test_project(&mut state, "staging");
+        let ok = apply(&mut state, create_sa_cmd("req-3", "acc_c", &proj2, "github"));
+        assert!(matches!(ok, Response::Account(_)));
+    }
+
+    #[test]
+    fn test_create_service_account_rejects_missing_project() {
+        let mut state = ApiState::default();
+        ensure_test_org(&mut state);
+        let r = apply(
+            &mut state,
+            create_sa_cmd("req-1", "acc_x", "no-such-project", "x"),
+        );
+        assert!(matches!(r, Response::Error { code: 404, .. }));
+    }
+
+    #[test]
+    fn test_create_and_revoke_static_api_key() {
+        let mut state = ApiState::default();
+        let proj = ensure_test_project(&mut state, "ci");
+        apply(&mut state, create_sa_cmd("req-1", "acc_ci", &proj, "github"));
+
+        let create_key = Command::CreateStaticApiKey {
+            request_id: "req-2".into(),
+            timestamp: "2026-05-12T00:00:00Z".into(),
+            id: "key_1".into(),
+            account_id: "acc_ci".into(),
+            hash_hex: "deadbeef".repeat(8),
+            display_prefix: "abcd".into(),
+            description: Some("laptop".into()),
+            expires_at: None,
+            created_by_account: "acc_creator".into(),
+        };
+        let r = apply(&mut state, create_key);
+        match r {
+            Response::ApiKey(k) => {
+                assert_eq!(k.id, "key_1");
+                assert_eq!(k.account_id, "acc_ci");
+                assert!(k.revoked_at.is_none());
+                assert!(k.expires_at.is_none());
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        let revoke = Command::RevokeStaticApiKey {
+            request_id: "req-3".into(),
+            timestamp: "2026-05-12T00:01:00Z".into(),
+            id: "key_1".into(),
+        };
+        let r = apply(&mut state, revoke);
+        match r {
+            Response::ApiKey(k) => {
+                assert_eq!(k.revoked_at.as_deref(), Some("2026-05-12T00:01:00Z"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // Second revoke is idempotent — keeps the original revoked_at.
+        let r = apply(
+            &mut state,
+            Command::RevokeStaticApiKey {
+                request_id: "req-4".into(),
+                timestamp: "2026-05-12T99:99:99Z".into(),
+                id: "key_1".into(),
+            },
+        );
+        match r {
+            Response::ApiKey(k) => {
+                assert_eq!(k.revoked_at.as_deref(), Some("2026-05-12T00:01:00Z"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_create_api_key_rejects_user_account() {
+        let mut state = ApiState::default();
+        // A bare User account from EnsureAccountFromOidc — not an SA.
+        apply(
+            &mut state,
+            Command::EnsureAccountFromOidc {
+                request_id: "req-u".into(),
+                timestamp: "2026-05-12T00:00:00Z".into(),
+                new_id: "acc_user".into(),
+                iss: "idp".into(),
+                sub: "u1".into(),
+                email: None,
+                display_name: None,
+            },
+        );
+        let r = apply(
+            &mut state,
+            Command::CreateStaticApiKey {
+                request_id: "req-k".into(),
+                timestamp: "2026-05-12T00:00:00Z".into(),
+                id: "key_x".into(),
+                account_id: "acc_user".into(),
+                hash_hex: "00".repeat(32),
+                display_prefix: "0000".into(),
+                description: None,
+                expires_at: None,
+                created_by_account: "acc_user".into(),
+            },
+        );
+        assert!(matches!(r, Response::Error { code: 400, .. }));
+    }
+
+    #[test]
+    fn test_delete_service_account_cascades_keys_and_memberships() {
+        let mut state = ApiState::default();
+        let proj = ensure_test_project(&mut state, "ci");
+        apply(&mut state, create_sa_cmd("req-1", "acc_ci", &proj, "github"));
+        apply(
+            &mut state,
+            Command::CreateStaticApiKey {
+                request_id: "req-2".into(),
+                timestamp: "2026-05-12T00:00:00Z".into(),
+                id: "key_1".into(),
+                account_id: "acc_ci".into(),
+                hash_hex: "ab".repeat(32),
+                display_prefix: "abab".into(),
+                description: None,
+                expires_at: None,
+                created_by_account: "acc_creator".into(),
+            },
+        );
+        // Pre-conditions.
+        assert!(state.get_account("acc_ci").is_some());
+        assert!(state.get_api_key("key_1").is_some());
+        assert_eq!(state.list_memberships_for_account("acc_ci").len(), 1);
+
+        let r = apply(
+            &mut state,
+            Command::DeleteServiceAccount {
+                request_id: "req-3".into(),
+                timestamp: "2026-05-12T00:01:00Z".into(),
+                account_id: "acc_ci".into(),
+            },
+        );
+        assert!(matches!(r, Response::Deleted { .. }));
+
+        // All three rows gone.
+        assert!(state.get_account("acc_ci").is_none());
+        assert!(state.get_api_key("key_1").is_none());
+        assert_eq!(state.list_memberships_for_account("acc_ci").len(), 0);
+    }
+
+    #[test]
+    fn test_delete_service_account_rejects_user_account() {
+        let mut state = ApiState::default();
+        apply(
+            &mut state,
+            Command::EnsureAccountFromOidc {
+                request_id: "req-u".into(),
+                timestamp: "2026-05-12T00:00:00Z".into(),
+                new_id: "acc_user".into(),
+                iss: "idp".into(),
+                sub: "u1".into(),
+                email: None,
+                display_name: None,
+            },
+        );
+        let r = apply(
+            &mut state,
+            Command::DeleteServiceAccount {
+                request_id: "req-d".into(),
+                timestamp: "2026-05-12T00:00:00Z".into(),
+                account_id: "acc_user".into(),
+            },
+        );
+        assert!(matches!(r, Response::Error { code: 400, .. }));
+        // User row survives.
+        assert!(state.get_account("acc_user").is_some());
+    }
 }

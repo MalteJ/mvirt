@@ -254,10 +254,11 @@ use crate::auth::require_auth;
 pub struct ApiDoc;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    // The middleware reaches the JWT validator + DataStore via AppState,
-    // so we no longer need a separate validator parameter — auth is on
-    // iff `state.jwt_validator.is_some()`.
-    let auth_enabled = state.jwt_validator.is_some();
+    // The middleware reaches the JWT validator + DataStore via AppState.
+    // It always runs: it lets unauthenticated requests through when no
+    // JWT validator is configured (dev/tests), and accepts SA bearers
+    // regardless of whether OIDC is set up (CI-only deployments).
+    let auth_enabled = true;
     // Internal API routes (for hypervisor nodes, cluster management)
     let internal_routes = Router::new()
         // System
