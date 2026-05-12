@@ -58,9 +58,11 @@ impl IntoResponse for ApiError {
         let status = match self.code {
             400 => StatusCode::BAD_REQUEST,
             401 => StatusCode::UNAUTHORIZED,
+            403 => StatusCode::FORBIDDEN,
             404 => StatusCode::NOT_FOUND,
             409 => StatusCode::CONFLICT,
             410 => StatusCode::GONE,
+            422 => StatusCode::UNPROCESSABLE_ENTITY,
             501 => StatusCode::NOT_IMPLEMENTED,
             503 => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,

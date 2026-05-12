@@ -1300,7 +1300,9 @@ pub async fn list_vms(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
     Query(query): Query<ListVmsQuery>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<VmListResponse>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let vms = state.store.list_vms_by_project(&project_slug).await?;
 
     // Further filter by node if specified
@@ -1323,6 +1325,7 @@ pub async fn list_vms(
 pub async fn get_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiVm>, ApiError> {
     let vm = state
         .store
@@ -1330,13 +1333,12 @@ pub async fn get_vm(
         .await?
         .or(state.store.get_vm_by_name(&id).await?);
 
-    match vm {
-        Some(data) => Ok(Json(UiVm::from(data))),
-        None => Err(ApiError {
-            error: "VM not found".to_string(),
-            code: 404,
-        }),
-    }
+    let vm = vm.ok_or_else(|| ApiError {
+        error: "VM not found".to_string(),
+        code: 404,
+    })?;
+    require_project_access(&state, &auth, &vm.spec.project_slug).await?;
+    Ok(Json(UiVm::from(vm)))
 }
 
 /// Create a new VM
@@ -1545,7 +1547,9 @@ pub async fn vm_events(
 pub async fn list_networks(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<NetworkListResponse>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let networks = state.store.list_networks_by_project(&project_slug).await?;
     Ok(Json(NetworkListResponse {
         networks: networks.into_iter().map(UiNetwork::from).collect(),
@@ -1557,6 +1561,7 @@ pub async fn list_networks(
 pub async fn get_network(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiNetwork>, ApiError> {
     let network = state
         .store
@@ -1564,13 +1569,12 @@ pub async fn get_network(
         .await?
         .or(state.store.get_network_by_name(&id).await?);
 
-    match network {
-        Some(data) => Ok(Json(UiNetwork::from(data))),
-        None => Err(ApiError {
-            error: "Network not found".to_string(),
-            code: 404,
-        }),
-    }
+    let network = network.ok_or_else(|| ApiError {
+        error: "Network not found".to_string(),
+        code: 404,
+    })?;
+    require_project_access(&state, &auth, &network.project_slug).await?;
+    Ok(Json(UiNetwork::from(network)))
 }
 
 /// Create a new network
@@ -1632,7 +1636,9 @@ pub async fn list_nics(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
     Query(query): Query<ListNicsQuery>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<NicListResponse>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let nics = state.store.list_nics_by_project(&project_slug).await?;
     // Further filter by network if specified
     let nics: Vec<UiNic> = nics
@@ -1653,6 +1659,7 @@ pub async fn list_nics(
 pub async fn get_nic(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiNic>, ApiError> {
     let nic = state
         .store
@@ -1660,13 +1667,12 @@ pub async fn get_nic(
         .await?
         .or(state.store.get_nic_by_name(&id).await?);
 
-    match nic {
-        Some(data) => Ok(Json(UiNic::from(data))),
-        None => Err(ApiError {
-            error: "NIC not found".to_string(),
-            code: 404,
-        }),
-    }
+    let nic = nic.ok_or_else(|| ApiError {
+        error: "NIC not found".to_string(),
+        code: 404,
+    })?;
+    require_project_access(&state, &auth, &nic.spec.project_slug).await?;
+    Ok(Json(UiNic::from(nic)))
 }
 
 /// Create a new NIC
@@ -1763,7 +1769,9 @@ pub async fn list_volumes(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
     Query(query): Query<ListVolumesQuery>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<VolumeListResponse>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let volumes = state
         .store
         .list_volumes(Some(&project_slug), query.node_id.as_deref())
@@ -1778,14 +1786,14 @@ pub async fn list_volumes(
 pub async fn get_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiVolume>, ApiError> {
-    match state.store.get_volume(&id).await? {
-        Some(data) => Ok(Json(UiVolume::from(data))),
-        None => Err(ApiError {
-            error: "Volume not found".to_string(),
-            code: 404,
-        }),
-    }
+    let volume = state.store.get_volume(&id).await?.ok_or_else(|| ApiError {
+        error: "Volume not found".to_string(),
+        code: 404,
+    })?;
+    require_project_access(&state, &auth, &volume.spec.project_slug).await?;
+    Ok(Json(UiVolume::from(volume)))
 }
 
 /// Create a new volume
@@ -1880,7 +1888,9 @@ pub async fn create_snapshot(
 pub async fn list_templates(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<TemplateListResponse>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let templates = state.store.list_templates_by_project(&project_slug).await?;
     Ok(Json(TemplateListResponse {
         templates: templates.into_iter().map(UiTemplate::from).collect(),
@@ -1915,14 +1925,14 @@ pub async fn import_template(
 pub async fn get_import_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiImportJob>, ApiError> {
-    match state.store.get_template(&id).await? {
-        Some(data) => Ok(Json(UiImportJob::from(data))),
-        None => Err(ApiError {
-            error: "Import job not found".to_string(),
-            code: 404,
-        }),
-    }
+    let template = state.store.get_template(&id).await?.ok_or_else(|| ApiError {
+        error: "Import job not found".to_string(),
+        code: 404,
+    })?;
+    require_project_access(&state, &auth, &template.spec.project_slug).await?;
+    Ok(Json(UiImportJob::from(template)))
 }
 
 /// Get storage pool statistics (global)
@@ -2117,7 +2127,9 @@ pub async fn console_ws(
 pub async fn list_security_groups(
     State(state): State<Arc<AppState>>,
     Path(project_slug): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<SecurityGroupListResponse>, ApiError> {
+    require_project_access(&state, &auth, &project_slug).await?;
     let groups = state
         .store
         .list_security_groups(Some(&project_slug))
@@ -2132,11 +2144,13 @@ pub async fn list_security_groups(
 pub async fn get_security_group(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiSecurityGroup>, ApiError> {
     let sg = state.store.get_security_group(&id).await?.ok_or(ApiError {
         error: "Security group not found".to_string(),
         code: 404,
     })?;
+    require_project_access(&state, &auth, &sg.project_slug).await?;
     Ok(Json(UiSecurityGroup::from(sg)))
 }
 
