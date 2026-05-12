@@ -187,7 +187,7 @@
           ];
           services.mvirt.node = {
             enable = true;
-            apiEndpoint = "http://10.0.0.1:50056";
+            apiEndpoint = "10.0.0.1:50056";
           };
         };
 
@@ -198,6 +198,7 @@
           };
           networking.hostName = "mvirt-node-1";
           networking.hostId = "a1b2c3d1";
+          services.mvirt.node.nodeId = "1";
         };
 
         node-2 = { ... }: {
@@ -207,6 +208,7 @@
           };
           networking.hostName = "mvirt-node-2";
           networking.hostId = "a1b2c3d2";
+          services.mvirt.node.nodeId = "2";
         };
 
         node-3 = { ... }: {
@@ -216,6 +218,7 @@
           };
           networking.hostName = "mvirt-node-3";
           networking.hostId = "a1b2c3d3";
+          services.mvirt.node.nodeId = "3";
         };
       };
 

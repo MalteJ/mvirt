@@ -132,6 +132,13 @@ in {
         description = "mvirt-cplane reverse-tunnel endpoint (host:port; the node TCP-dials here)";
       };
 
+      nodeId = mkOption {
+        type = types.str;
+        default = "";
+        example = "1";
+        description = "Stable node id sent in the Identify RPC. Required.";
+      };
+
       extraArgs = mkOption {
         type = types.listOf types.str;
         default = [];
@@ -337,7 +344,7 @@ in {
       serviceConfig = {
         Type = "simple";
         User = "root";
-        ExecStart = "${mvirtPkgs}/bin/mvirt-node --api-endpoint ${cfg.node.apiEndpoint} --vmm-endpoint http://[::1]:${toString cfg.vmm.port} --zfs-endpoint http://[::1]:${toString cfg.zfs.port} --net-endpoint http://[::1]:${toString cfg.ebpf.port} --log-endpoint http://[::1]:${toString cfg.log.port} ${concatStringsSep " " cfg.node.extraArgs}";
+        ExecStart = "${mvirtPkgs}/bin/mvirt-node --api-endpoint ${cfg.node.apiEndpoint} --node-id ${cfg.node.nodeId} --vmm-endpoint http://[::1]:${toString cfg.vmm.port} --zfs-endpoint http://[::1]:${toString cfg.zfs.port} --net-endpoint http://[::1]:${toString cfg.ebpf.port} ${concatStringsSep " " cfg.node.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
