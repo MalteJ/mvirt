@@ -12,9 +12,9 @@ export default defineConfig({
   server: {
     host: '127.0.0.1',
     port: 3000,
-    allowedHosts: ['console.mvirt.malte.io'],
+    allowedHosts: ['console.mvirt.io'],
     hmr: {
-      host: 'console.mvirt.malte.io',
+      host: 'console.mvirt.io',
       protocol: 'wss',
       clientPort: 443,
     },

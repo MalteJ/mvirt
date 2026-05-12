@@ -255,7 +255,7 @@ in
 
     Welcome to mvirt Hypervisor
 
-    Installation guide: https://mvirt.malte.io/install
+    Installation guide: https://mvirt.io/install
 
   '';
 
