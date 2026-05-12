@@ -3,6 +3,10 @@
 //! Adapted from mvirt-net's test utilities, but without virtio-net headers.
 //! Packets start directly with the Ethernet header for TAP device usage.
 
+// Packet builders take one positional arg per header field; collapsing into a
+// struct would obscure callers more than it helps.
+#![allow(clippy::too_many_arguments)]
+
 use dhcproto::v6::{DhcpOption, IAAddr, IANA, Message, MessageType, ORO, OptionCode};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 use smoltcp::wire::{
@@ -1167,7 +1171,7 @@ impl TcpFlags {
     }
 
     /// Convert to TCP flags byte
-    fn to_byte(&self) -> u8 {
+    fn to_byte(self) -> u8 {
         let mut flags = 0u8;
         if self.fin {
             flags |= 0x01;

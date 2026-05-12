@@ -18,10 +18,12 @@ use tokio::sync::{RwLock, broadcast};
 
 /// Helper struct for managing multiple test nodes.
 struct TestCluster {
+    #[allow(dead_code)]
     nodes: Vec<TestNode>,
 }
 
 struct TestNode {
+    #[allow(dead_code)]
     id: u64,
     raft_addr: String,
     rest_addr: String,

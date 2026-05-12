@@ -461,7 +461,7 @@ fn test_rule_protocols() {
     let sg = create_test_security_group(&storage, "protocol-test");
 
     // Test all protocol types
-    let protocols = vec![
+    let protocols = [
         RuleProtocol::All,
         RuleProtocol::Tcp,
         RuleProtocol::Udp,
@@ -498,7 +498,7 @@ fn test_rule_protocols() {
         };
         storage
             .create_security_group_rule(&rule)
-            .expect(&format!("Failed to create {:?} rule", protocol));
+            .unwrap_or_else(|_| panic!("Failed to create {:?} rule", protocol));
     }
 
     let rules = storage.list_rules_for_security_group(&sg.id).unwrap();
@@ -586,7 +586,7 @@ fn test_ipv4_cidr_rules() {
         };
         storage
             .create_security_group_rule(&rule)
-            .expect(&format!("Failed to create rule with CIDR {}", cidr));
+            .unwrap_or_else(|_| panic!("Failed to create rule with CIDR {}", cidr));
     }
 
     let rules = storage.list_rules_for_security_group(&sg.id).unwrap();
@@ -620,7 +620,7 @@ fn test_ipv6_cidr_rules() {
         };
         storage
             .create_security_group_rule(&rule)
-            .expect(&format!("Failed to create rule with CIDR {}", cidr));
+            .unwrap_or_else(|_| panic!("Failed to create rule with CIDR {}", cidr));
     }
 
     let rules = storage.list_rules_for_security_group(&sg.id).unwrap();

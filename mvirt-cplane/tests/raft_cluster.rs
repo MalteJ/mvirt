@@ -93,22 +93,14 @@ impl TestCluster {
 
     /// Get the leader node (if any).
     fn leader(&self) -> Option<&RaftNode<Command, Response, ApiState>> {
-        for node in &self.nodes {
-            if node.is_leader() {
-                return Some(node);
-            }
-        }
-        None
+        self.nodes.iter().find(|n| n.is_leader())
     }
 
     /// Get a follower node (any non-leader).
     fn follower(&self) -> Option<&RaftNode<Command, Response, ApiState>> {
-        for node in &self.nodes {
-            if !node.is_leader() && node.current_leader().is_some() {
-                return Some(node);
-            }
-        }
-        None
+        self.nodes
+            .iter()
+            .find(|n| !n.is_leader() && n.current_leader().is_some())
     }
 
     /// Wait for a network to be replicated to all nodes.
@@ -215,11 +207,11 @@ async fn test_leader_election_on_failure() {
             if i == leader_idx {
                 continue; // Skip the shut down node
             }
-            if let Some(leader) = node.current_leader() {
-                if leader != old_leader {
-                    new_leader = Some(leader);
-                    break;
-                }
+            if let Some(leader) = node.current_leader()
+                && leader != old_leader
+            {
+                new_leader = Some(leader);
+                break;
             }
         }
         if new_leader.is_some() {
