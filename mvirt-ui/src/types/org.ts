@@ -15,8 +15,6 @@ export interface OrgContact {
 export interface Org {
   slug: string
   name: string
-  defaultStaticKeyTtlDays: number
-  disallowStaticKeys: boolean
   contact: OrgContact
   createdAt: string
   updatedAt: string
@@ -29,13 +27,9 @@ export interface OrgListResponse {
 export interface CreateOrgRequest {
   slug: string
   name: string
-  defaultStaticKeyTtlDays?: number
-  disallowStaticKeys?: boolean
 }
 
 export interface UpdateOrgRequest {
   name?: string
-  defaultStaticKeyTtlDays?: number
-  disallowStaticKeys?: boolean
   contact?: OrgContact
 }

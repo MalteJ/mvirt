@@ -186,8 +186,6 @@ pub async fn create_org(
     let store_req = StoreCreateOrgRequest {
         slug: req.slug,
         name: req.name,
-        default_static_key_ttl_days: req.default_static_key_ttl_days,
-        disallow_static_keys: req.disallow_static_keys,
     };
     let data = state.store.create_org(store_req).await?;
 
@@ -232,8 +230,6 @@ pub async fn update_org(
     })?;
     let store_req = StoreUpdateOrgRequest {
         name: req.name,
-        default_static_key_ttl_days: req.default_static_key_ttl_days,
-        disallow_static_keys: req.disallow_static_keys,
         contact: req.contact.map(Into::into),
     };
     let data = state.store.update_org(&org.slug, store_req).await?;

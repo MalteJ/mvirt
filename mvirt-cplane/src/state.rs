@@ -1321,8 +1321,6 @@ impl StateMachine<Command, Response> for ApiState {
                 timestamp,
                 slug,
                 name,
-                default_static_key_ttl_days,
-                disallow_static_keys,
                 contact,
                 ..
             } => {
@@ -1341,8 +1339,6 @@ impl StateMachine<Command, Response> for ApiState {
                 let org = OrgData {
                     slug: slug.clone(),
                     name,
-                    default_static_key_ttl_days,
-                    disallow_static_keys,
                     contact,
                     created_at: timestamp.clone(),
                     updated_at: timestamp,
@@ -1357,8 +1353,6 @@ impl StateMachine<Command, Response> for ApiState {
                 slug,
                 timestamp,
                 name,
-                default_static_key_ttl_days,
-                disallow_static_keys,
                 contact,
                 ..
             } => {
@@ -1374,12 +1368,6 @@ impl StateMachine<Command, Response> for ApiState {
                 };
                 if let Some(n) = name {
                     org.name = n;
-                }
-                if let Some(t) = default_static_key_ttl_days {
-                    org.default_static_key_ttl_days = t;
-                }
-                if let Some(d) = disallow_static_keys {
-                    org.disallow_static_keys = d;
                 }
                 if let Some(c) = contact {
                     // Whole-record replace. The REST handler echoes the
@@ -3472,8 +3460,6 @@ mod tests {
             timestamp: "2024-01-01T00:00:00Z".to_string(),
             slug: slug.to_string(),
             name: format!("Org {}", slug),
-            default_static_key_ttl_days: 90,
-            disallow_static_keys: false,
             contact: OrgContact::default(),
         }
     }
@@ -3504,7 +3490,7 @@ mod tests {
         match response {
             Response::Org(data) => {
                 assert_eq!(data.slug, "acme");
-                assert_eq!(data.default_static_key_ttl_days, 90);
+                assert_eq!(data.name, "Org acme");
             }
             other => panic!("unexpected: {:?}", other),
         }

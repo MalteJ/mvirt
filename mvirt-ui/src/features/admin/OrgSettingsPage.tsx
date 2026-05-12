@@ -10,8 +10,7 @@ import type { OrgContact } from '@/types'
 const emptyContact: OrgContact = {}
 
 /**
- * Org-level settings: display name, contact / billing details, security
- * policy knobs (static-key TTL, disallow-static-keys). Lives at
+ * Org-level settings: display name and contact / billing details. Lives at
  * `/orgs/:orgSlug/settings`. The slug itself is immutable per ADR-0004,
  * so it's read-only here.
  */
@@ -23,24 +22,18 @@ export function OrgSettingsPage() {
 
   const [name, setName] = useState('')
   const [contact, setContact] = useState<OrgContact>(emptyContact)
-  const [ttlDays, setTtlDays] = useState<string>('90')
-  const [disallowStaticKeys, setDisallowStaticKeys] = useState(false)
 
   // Reset form when the loaded Org changes.
   useEffect(() => {
     if (org) {
       setName(org.name)
       setContact(org.contact ?? emptyContact)
-      setTtlDays(String(org.defaultStaticKeyTtlDays))
-      setDisallowStaticKeys(org.disallowStaticKeys)
     }
   }, [org])
 
   const dirty = useMemo(() => {
     if (!org) return false
     if (name !== org.name) return true
-    if (Number(ttlDays) !== org.defaultStaticKeyTtlDays) return true
-    if (disallowStaticKeys !== org.disallowStaticKeys) return true
     const cur = org.contact ?? emptyContact
     return (
       contact.legalName !== cur.legalName ||
@@ -52,7 +45,7 @@ export function OrgSettingsPage() {
       contact.billingContactEmail !== cur.billingContactEmail ||
       contact.vatId !== cur.vatId
     )
-  }, [org, name, contact, ttlDays, disallowStaticKeys])
+  }, [org, name, contact])
 
   const setContactField = <K extends keyof OrgContact>(key: K, value: string) => {
     // Empty string → drop the field so the server stores `null` for it
@@ -63,12 +56,8 @@ export function OrgSettingsPage() {
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault()
     if (!org || !dirty) return
-    const ttl = Number(ttlDays)
     updateOrg.mutate({
       name: name !== org.name ? name : undefined,
-      defaultStaticKeyTtlDays: ttl !== org.defaultStaticKeyTtlDays ? ttl : undefined,
-      disallowStaticKeys:
-        disallowStaticKeys !== org.disallowStaticKeys ? disallowStaticKeys : undefined,
       contact,
     })
   }
@@ -191,41 +180,6 @@ export function OrgSettingsPage() {
               value={contact.vatId ?? ''}
               onChange={(e) => setContactField('vatId', e.target.value)}
             />
-          </div>
-        </div>
-      </section>
-
-      <section className="space-y-4">
-        <div>
-          <h3 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-            Security
-          </h3>
-        </div>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="grid gap-2">
-            <Label htmlFor="ttl">Default static-key TTL (days)</Label>
-            <Input
-              id="ttl"
-              type="number"
-              min="1"
-              value={ttlDays}
-              onChange={(e) => setTtlDays(e.target.value)}
-              disabled={disallowStaticKeys}
-            />
-          </div>
-          <div className="grid gap-2">
-            <Label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={disallowStaticKeys}
-                onChange={(e) => setDisallowStaticKeys(e.target.checked)}
-                className="h-4 w-4 rounded border-border bg-secondary"
-              />
-              Disallow static API keys for ServiceAccounts
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              Stricter setups force FederatedTrust / SignedJwt only.
-            </p>
           </div>
         </div>
       </section>

@@ -118,18 +118,6 @@ export function OrgsPage() {
       ),
     },
     {
-      accessorKey: 'defaultStaticKeyTtlDays',
-      header: 'Static Key TTL',
-      cell: ({ row }) =>
-        row.original.disallowStaticKeys ? (
-          <span className="text-muted-foreground">disallowed</span>
-        ) : (
-          <span className="text-sm font-mono">
-            {row.original.defaultStaticKeyTtlDays} d
-          </span>
-        ),
-    },
-    {
       accessorKey: 'createdAt',
       header: 'Created',
       cell: ({ row }) => (

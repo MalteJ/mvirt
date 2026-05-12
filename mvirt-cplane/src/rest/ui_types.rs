@@ -353,8 +353,6 @@ impl From<UiOrgContact> for OrgContact {
 pub struct UiOrg {
     pub slug: String,
     pub name: String,
-    pub default_static_key_ttl_days: u32,
-    pub disallow_static_keys: bool,
     pub contact: UiOrgContact,
     pub created_at: String,
     pub updated_at: String,
@@ -365,8 +363,6 @@ impl From<OrgData> for UiOrg {
         Self {
             slug: data.slug,
             name: data.name,
-            default_static_key_ttl_days: data.default_static_key_ttl_days,
-            disallow_static_keys: data.disallow_static_keys,
             contact: UiOrgContact::from(data.contact),
             created_at: data.created_at,
             updated_at: data.updated_at,
@@ -381,10 +377,6 @@ pub struct UiCreateOrgRequest {
     /// URL identifier — kebab-case, platform-wide unique, immutable.
     pub slug: String,
     pub name: String,
-    #[serde(default)]
-    pub default_static_key_ttl_days: Option<u32>,
-    #[serde(default)]
-    pub disallow_static_keys: Option<bool>,
 }
 
 /// Request to update an Org. All fields optional; unset = unchanged.
@@ -393,10 +385,6 @@ pub struct UiCreateOrgRequest {
 pub struct UiUpdateOrgRequest {
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
-    pub default_static_key_ttl_days: Option<u32>,
-    #[serde(default)]
-    pub disallow_static_keys: Option<bool>,
     /// Whole new contact record (partial updates are done client-side: the
     /// UI fetches the current Org, lets the user edit, and posts the
     /// resulting full record).

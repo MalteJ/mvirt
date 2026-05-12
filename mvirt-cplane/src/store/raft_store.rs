@@ -576,8 +576,6 @@ impl OrgStore for RaftStore {
             timestamp: Utc::now().to_rfc3339(),
             slug: req.slug,
             name: req.name,
-            default_static_key_ttl_days: req.default_static_key_ttl_days.unwrap_or(90),
-            disallow_static_keys: req.disallow_static_keys.unwrap_or(false),
             contact: OrgContact::default(),
         };
 
@@ -595,8 +593,6 @@ impl OrgStore for RaftStore {
             slug: slug.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             name: req.name,
-            default_static_key_ttl_days: req.default_static_key_ttl_days,
-            disallow_static_keys: req.disallow_static_keys,
             contact: req.contact,
         };
 

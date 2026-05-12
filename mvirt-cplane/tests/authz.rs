@@ -267,8 +267,6 @@ mod state_tests {
             timestamp: "t".into(),
             slug: "alpha".into(),
             name: "Alpha".into(),
-            default_static_key_ttl_days: 90,
-            disallow_static_keys: false,
             contact: Default::default(),
         });
         let (r1, _) = s.apply(Command::CreateMembership {

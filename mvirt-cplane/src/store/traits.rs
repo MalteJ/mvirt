@@ -122,8 +122,6 @@ pub struct CreateOrgRequest {
     pub slug: String,
     /// Display name (mutable).
     pub name: String,
-    pub default_static_key_ttl_days: Option<u32>,
-    pub disallow_static_keys: Option<bool>,
 }
 
 /// Request to update an Org. All fields optional; unset fields are unchanged.
@@ -132,8 +130,6 @@ pub struct CreateOrgRequest {
 #[derive(Debug, Clone, Default)]
 pub struct UpdateOrgRequest {
     pub name: Option<String>,
-    pub default_static_key_ttl_days: Option<u32>,
-    pub disallow_static_keys: Option<bool>,
     pub contact: Option<OrgContact>,
 }
 

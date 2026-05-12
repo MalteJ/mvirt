@@ -140,8 +140,6 @@ pub enum Command {
         timestamp: String,
         slug: String,
         name: String,
-        default_static_key_ttl_days: u32,
-        disallow_static_keys: bool,
         contact: OrgContact,
     },
     UpdateOrg {
@@ -149,8 +147,6 @@ pub enum Command {
         slug: String,
         timestamp: String,
         name: Option<String>,
-        default_static_key_ttl_days: Option<u32>,
-        disallow_static_keys: Option<bool>,
         // Contact patch — `Some(value)` writes that value (including
         // `Some(None)` to clear an individual sub-field), `None` leaves the
         // sub-field unchanged. The outer `Option` distinguishes "patch not
@@ -784,8 +780,6 @@ pub struct OrgContact {
 pub struct OrgData {
     pub slug: String,
     pub name: String,
-    pub default_static_key_ttl_days: u32,
-    pub disallow_static_keys: bool,
     pub contact: OrgContact,
     pub created_at: String,
     pub updated_at: String,
