@@ -1233,11 +1233,25 @@ impl StateMachine<Command, Response> for ApiState {
                     return (Response::Vm(existing), vec![]);
                 }
 
-                if !txn_has(&txn, NICS, &spec.nic_id) {
+                let Some(mut nic) = txn_get::<NicData>(&txn, NICS, &spec.nic_id) else {
                     return (
                         Response::Error {
                             code: 404,
                             message: format!("NIC '{}' not found", spec.nic_id),
+                        },
+                        vec![],
+                    );
+                };
+                if let Some(other_vm) = &nic.spec.vm_id
+                    && other_vm != &id
+                {
+                    return (
+                        Response::Error {
+                            code: 409,
+                            message: format!(
+                                "NIC '{}' is already attached to VM '{}'",
+                                spec.nic_id, other_vm
+                            ),
                         },
                         vec![],
                     );
@@ -1254,9 +1268,30 @@ impl StateMachine<Command, Response> for ApiState {
                     updated_at: timestamp,
                 };
 
+                // Back-link the NIC to this VM in the same raft commit so the
+                // UI's "is this NIC attached?" view doesn't dangle until the
+                // (out-of-band) AttachNic command happens to fire. Emit both
+                // events; the NIC reconciler short-circuits on Active and the
+                // back-link is what the UI cares about.
+                let nic_id = nic.id.clone();
+                let old_nic = nic.clone();
+                nic.spec.vm_id = Some(id.clone());
+                nic.updated_at = vm.updated_at.clone();
+                txn_put(&txn, NICS, &nic_id, &nic);
+
                 txn_put(&txn, VMS, &id, &vm);
                 txn.commit().expect("commit");
-                (Response::Vm(vm.clone()), vec![Event::VmCreated(vm)])
+                (
+                    Response::Vm(vm.clone()),
+                    vec![
+                        Event::VmCreated(vm),
+                        Event::NicUpdated {
+                            id: nic_id,
+                            old: old_nic,
+                            new: nic,
+                        },
+                    ],
+                )
             }
 
             Command::UpdateVmSpec {
@@ -1323,7 +1358,7 @@ impl StateMachine<Command, Response> for ApiState {
 
             Command::DeleteVm { id, .. } => {
                 let txn = self.db.begin_write().expect("begin");
-                if !txn_has(&txn, VMS, &id) {
+                let Some(vm) = txn_get::<VmData>(&txn, VMS, &id) else {
                     return (
                         Response::Error {
                             code: 404,
@@ -1331,13 +1366,37 @@ impl StateMachine<Command, Response> for ApiState {
                         },
                         vec![],
                     );
+                };
+
+                // Release the back-link on the NIC so it can be reattached.
+                // The reverse linkage was established in CreateVm; without
+                // releasing it here, the NIC stays pinned to a deleted VM
+                // and any future CreateVm with the same nic_id is rejected
+                // with 409 "already attached".
+                let mut nic_event = None;
+                if !vm.spec.nic_id.is_empty()
+                    && let Some(old_nic) = txn_get::<NicData>(&txn, NICS, &vm.spec.nic_id)
+                    && old_nic.spec.vm_id.as_deref() == Some(id.as_str())
+                {
+                    let mut new_nic = old_nic.clone();
+                    new_nic.spec.vm_id = None;
+                    new_nic.updated_at = chrono::Utc::now().to_rfc3339();
+                    let nic_id = old_nic.id.clone();
+                    txn_put(&txn, NICS, &nic_id, &new_nic);
+                    nic_event = Some(Event::NicUpdated {
+                        id: nic_id,
+                        old: old_nic,
+                        new: new_nic,
+                    });
                 }
+
                 txn_delete(&txn, VMS, &id);
                 txn.commit().expect("commit");
-                (
-                    Response::Deleted { id: id.clone() },
-                    vec![Event::VmDeleted { id }],
-                )
+                let mut events = vec![Event::VmDeleted { id: id.clone() }];
+                if let Some(e) = nic_event {
+                    events.push(e);
+                }
+                (Response::Deleted { id }, events)
             }
 
             // =================================================================
