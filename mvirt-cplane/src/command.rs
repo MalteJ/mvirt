@@ -733,6 +733,12 @@ pub struct VmSpec {
     pub volume_id: String, // Boot volume reference
     pub nic_id: String,    // NIC reference (network comes via NIC)
     pub image: String,     // Boot image reference
+    /// Cloud-init user-data (YAML). Empty/None → reconciler supplies a
+    /// minimal `#cloud-config\nhostname: <vm.name>` stub so cloud-init has
+    /// a NoCloud datasource and proceeds far enough to apply netplan +
+    /// fire DHCP.
+    #[serde(default)]
+    pub user_data: Option<String>,
     pub desired_state: VmDesiredState,
 }
 

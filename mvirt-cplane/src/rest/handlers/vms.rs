@@ -160,6 +160,7 @@ pub async fn create_vm(
         volume_id: req.volume_id,
         nic_id: req.nic_id,
         image: req.image,
+        user_data: None,
         desired_state,
     };
 

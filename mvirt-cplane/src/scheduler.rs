@@ -212,6 +212,7 @@ mod tests {
             volume_id: "vol-1".to_string(),
             nic_id: "nic-1".to_string(),
             image: "ubuntu:22.04".to_string(),
+            user_data: None,
             desired_state: VmDesiredState::Running,
         }
     }

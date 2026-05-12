@@ -135,6 +135,13 @@ pub struct UiCreateVmConfig {
     pub volume_id: String,
     pub nic_id: String,
     pub image: String,
+    /// Optional cloud-init user-data (YAML). If empty/missing, the cplane
+    /// supplies a minimal `#cloud-config\nhostname: <vm-name>` stub so
+    /// cloud-init has a NoCloud datasource to consume and proceeds to the
+    /// network stage. Without that stub, Ubuntu cloud-image hangs in the
+    /// metadata-probe loop and never applies netplan, so DHCP never fires.
+    #[serde(default)]
+    pub user_data: Option<String>,
 }
 
 /// Response wrapper for VM list

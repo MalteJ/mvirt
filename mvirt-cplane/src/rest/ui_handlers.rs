@@ -1359,6 +1359,7 @@ pub async fn create_vm(
         volume_id: req.config.volume_id,
         nic_id: req.config.nic_id,
         image: req.config.image,
+        user_data: req.config.user_data.filter(|s| !s.is_empty()),
         desired_state: VmDesiredState::Running,
     };
 
