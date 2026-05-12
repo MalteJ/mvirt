@@ -1,6 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_prost_build::compile_protos("proto/mvirt.proto")?;
-    tonic_prost_build::compile_protos("proto/zfs.proto")?;
-    tonic_prost_build::compile_protos("proto/net.proto")?;
+    for p in ["proto/mvirt.proto", "proto/zfs.proto", "proto/net.proto"] {
+        println!("cargo:rerun-if-changed={p}");
+        tonic_prost_build::compile_protos(p)?;
+    }
     Ok(())
 }
