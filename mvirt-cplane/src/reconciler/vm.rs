@@ -17,8 +17,8 @@
 use anyhow::Result;
 use chrono::Utc;
 use mvirt_daemon_protos::vmm::{
-    BootMode, CreateVmRequest, DiskConfig, GetVmRequest, NicConfig, StartVmRequest,
-    StopVmRequest, Vm, VmConfig, VmState,
+    BootMode, CreateVmRequest, DiskConfig, GetVmRequest, NicConfig, StartVmRequest, StopVmRequest,
+    Vm, VmConfig, VmState,
 };
 use tonic::Code;
 use tracing::{info, warn};
@@ -99,7 +99,14 @@ pub async fn reconcile(ctx: &Ctx, id: &str) -> Result<()> {
 
     info!(vm = %id, node = %node_id, name = %vm.spec.name, phase = ?vm.status.phase, "reconciling vm");
 
-    let outcome = drive(&node, &vm, &disk_path, nic_socket.as_deref(), target_running).await;
+    let outcome = drive(
+        &node,
+        &vm,
+        &disk_path,
+        nic_socket.as_deref(),
+        target_running,
+    )
+    .await;
 
     let cmd = match outcome {
         Ok(new_phase) => Command::UpdateVmStatus {
@@ -184,12 +191,7 @@ async fn drive(
 
 async fn get_vm(node: &NodeHandle, id: &str) -> std::result::Result<Option<Vm>, String> {
     let mut vmm = node.vmm.clone();
-    match vmm
-        .get_vm(GetVmRequest {
-            id: id.to_string(),
-        })
-        .await
-    {
+    match vmm.get_vm(GetVmRequest { id: id.to_string() }).await {
         Ok(resp) => Ok(Some(resp.into_inner())),
         Err(s) if s.code() == Code::NotFound => Ok(None),
         Err(s) => Err(format!("get_vm: {}", s.message())),
@@ -249,12 +251,10 @@ async fn create_vm(
 
 async fn start_vm(node: &NodeHandle, id: &str) -> std::result::Result<(), String> {
     let mut vmm = node.vmm.clone();
-    vmm.start_vm(StartVmRequest {
-        id: id.to_string(),
-    })
-    .await
-    .map(|_| ())
-    .map_err(|s| format!("start_vm: {}", s.message()))
+    vmm.start_vm(StartVmRequest { id: id.to_string() })
+        .await
+        .map(|_| ())
+        .map_err(|s| format!("start_vm: {}", s.message()))
 }
 
 async fn stop_vm(node: &NodeHandle, id: &str) -> std::result::Result<(), String> {

@@ -920,8 +920,7 @@ pub async fn post_signin(
     {
         let new_display_name = profile.best_display_name();
         let new_email = profile.email.clone();
-        let needs_update = (new_display_name.is_some()
-            && new_display_name != account.display_name)
+        let needs_update = (new_display_name.is_some() && new_display_name != account.display_name)
             || (new_email.is_some() && new_email != account.email);
         if needs_update {
             account = state

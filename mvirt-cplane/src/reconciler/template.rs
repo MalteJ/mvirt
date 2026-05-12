@@ -135,7 +135,11 @@ async fn find_template(
         .list_templates(ListTemplatesRequest {})
         .await
         .map_err(|s| format!("list_templates: {}", s.message()))?;
-    Ok(resp.into_inner().templates.into_iter().find(|t| t.name == name))
+    Ok(resp
+        .into_inner()
+        .templates
+        .into_iter()
+        .find(|t| t.name == name))
 }
 
 async fn find_active_job(

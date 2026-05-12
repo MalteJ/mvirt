@@ -2460,11 +2460,7 @@ impl StateMachine<Command, Response> for ApiState {
                 txn.commit().expect("commit");
                 (
                     Response::Volume(vol.clone()),
-                    vec![Event::VolumeStatusUpdated {
-                        id,
-                        old,
-                        new: vol,
-                    }],
+                    vec![Event::VolumeStatusUpdated { id, old, new: vol }],
                 )
             }
 
