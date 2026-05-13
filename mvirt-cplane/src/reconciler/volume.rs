@@ -46,9 +46,9 @@ pub async fn reconcile(ctx: &Ctx, id: &str) -> Result<()> {
             .get_template(template_id)
             .map(|t| t.spec.name)
             .unwrap_or_else(|| template_id.clone());
-        clone_from_template(&node, &template_name, &spec.name, spec.size_bytes).await
+        clone_from_template(&node, id, &template_name, &spec.name, spec.size_bytes).await
     } else {
-        create_volume(&node, &spec.name, spec.size_bytes).await
+        create_volume(&node, id, &spec.name, spec.size_bytes).await
     };
 
     let cmd = match result {
@@ -81,6 +81,7 @@ pub async fn reconcile(ctx: &Ctx, id: &str) -> Result<()> {
 
 async fn create_volume(
     node: &Arc<NodeHandle>,
+    id: &str,
     name: &str,
     size_bytes: u64,
 ) -> std::result::Result<Volume, String> {
@@ -96,6 +97,7 @@ async fn create_volume(
         Err(s) => return Err(format!("get_volume: {}", s.message())),
     }
     zfs.create_volume(CreateVolumeRequest {
+        id: id.to_string(),
         name: name.to_string(),
         size_bytes,
         volblocksize: None,
@@ -107,6 +109,7 @@ async fn create_volume(
 
 async fn clone_from_template(
     node: &Arc<NodeHandle>,
+    id: &str,
     template_name: &str,
     new_volume_name: &str,
     size_bytes: u64,
@@ -123,6 +126,7 @@ async fn clone_from_template(
         Err(s) => return Err(format!("get_volume: {}", s.message())),
     }
     zfs.clone_from_template(CloneFromTemplateRequest {
+        id: id.to_string(),
         template_name: template_name.to_string(),
         new_volume_name: new_volume_name.to_string(),
         size_bytes: Some(size_bytes),

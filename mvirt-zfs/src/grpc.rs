@@ -858,8 +858,14 @@ impl ZfsService for ZfsServiceImpl {
             )));
         }
 
-        // Generate volume UUID
-        let volume_id = uuid::Uuid::new_v4().to_string();
+        // Use caller-supplied id when provided (see create_volume).
+        let volume_id = if req.id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            uuid::Uuid::parse_str(&req.id)
+                .map_err(|_| Status::invalid_argument(format!("invalid volume id: {}", req.id)))?
+                .to_string()
+        };
 
         // Clone from template's @img snapshot
         let mut vol = self

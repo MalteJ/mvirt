@@ -151,6 +151,12 @@ message CreateVolumeRequest {
   string name = 1;
   uint64 size_bytes = 2;
   optional uint32 volblocksize = 3;  // Default: 16k
+  // Optional caller-supplied id (cplane volume id). When set, the
+  // zfs daemon stores the volume under this id instead of generating
+  // a fresh UUID, so WatchVolumes events reference the same id the
+  // cplane has in raft. Without this the daemon-side id and the
+  // cplane-side id diverge and status push fails with "not found".
+  string id = 4;
 }
 
 message ListVolumesRequest {}
@@ -250,6 +256,9 @@ message CloneFromTemplateRequest {
   string template_name = 1;          // Template name (not full snapshot path)
   string new_volume_name = 2;
   optional uint64 size_bytes = 3;    // Optional: expand volume to this size (must be >= template size)
+  // Optional caller-supplied id (cplane volume id), same semantics as
+  // CreateVolumeRequest.id.
+  string id = 4;
 }
 
 message PromoteSnapshotRequest {
