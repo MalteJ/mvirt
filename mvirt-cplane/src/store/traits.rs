@@ -348,6 +348,23 @@ pub trait NetworkStore: Send + Sync {
 
     /// Delete a network.
     async fn delete_network(&self, id: &str, force: bool) -> Result<DeleteNetworkResult>;
+
+    /// Write back observed state for a network (from the owning node).
+    /// Today this is a no-op marker — NetworkData currently has no
+    /// status fields the api derives separately from the daemon view.
+    /// Wire is in place for when we grow them (e.g. observed prefix
+    /// allocation, masquerade health).
+    async fn update_network_status(
+        &self,
+        id: &str,
+        req: UpdateNetworkStatusRequest,
+    ) -> Result<NetworkData>;
+}
+
+/// Request to update a network's observed status (from node).
+#[derive(Debug, Clone, Default)]
+pub struct UpdateNetworkStatusRequest {
+    pub message: Option<String>,
 }
 
 /// Store trait for NIC operations.
@@ -379,6 +396,17 @@ pub trait NicStore: Send + Sync {
 
     /// Detach a NIC from a VM.
     async fn detach_nic(&self, id: &str) -> Result<NicData>;
+
+    /// Write back observed state for a NIC (from the owning node).
+    async fn update_nic_status(&self, id: &str, req: UpdateNicStatusRequest) -> Result<NicData>;
+}
+
+/// Request to update a NIC's observed status (from node).
+#[derive(Debug, Clone)]
+pub struct UpdateNicStatusRequest {
+    pub phase: crate::command::NicPhase,
+    pub socket_path: String,
+    pub message: Option<String>,
 }
 
 /// Store trait for VM operations.
@@ -652,6 +680,22 @@ pub trait VolumeStore: Send + Sync {
         volume_id: &str,
         req: CreateSnapshotRequest,
     ) -> Result<VolumeData>;
+
+    /// Write back observed state for a volume (from the owning node).
+    async fn update_volume_status(
+        &self,
+        id: &str,
+        req: UpdateVolumeStatusRequest,
+    ) -> Result<VolumeData>;
+}
+
+/// Request to update a volume's observed status (from node).
+#[derive(Debug, Clone)]
+pub struct UpdateVolumeStatusRequest {
+    pub phase: crate::command::VolumePhase,
+    pub path: Option<String>,
+    pub used_bytes: u64,
+    pub error: Option<String>,
 }
 
 /// Store trait for template operations.

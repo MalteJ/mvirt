@@ -66,53 +66,108 @@ async fn handle_node_event<S: DataStore + ?Sized>(
     store: &Arc<S>,
     node_id: &str,
 ) {
-    use tracing::debug;
+    use crate::command::{NicPhase, VolumePhase};
     let Some(kind) = event.kind else {
         return;
     };
     let vs = match kind {
         NodeEventKind::VmState(vs) => vs,
-        // Volume / template / nic / network snapshots flow through the
-        // same NodeEvent oneof. They're not yet wired through to raft
-        // because DataStore lacks UpdateVolumeStatus etc on the trait
-        // — the volume/nic reconcilers submit Commands directly via the
-        // concrete RaftStore. Hoisting them onto the trait so this
-        // handler can call them is the next step; for now we log so the
-        // wire activity is visible.
         NodeEventKind::VolumeState(v) => {
-            debug!(
-                node_id,
-                volume_id = %v.volume_id,
-                present = v.volume.is_some(),
-                "node-pushed volume state (handler stub)"
-            );
+            // K8s envelope: None payload ⇒ deletion. We currently mark
+            // surviving cplane rows Failed in that case so the reconciler
+            // sees drift; future finalizer work will delete instead.
+            let (phase, path, used_bytes, error) = match v.volume.as_ref() {
+                Some(vol) => {
+                    let phase = if vol.path.is_empty() {
+                        VolumePhase::Creating
+                    } else {
+                        VolumePhase::Ready
+                    };
+                    (phase, Some(vol.path.clone()), vol.used_bytes, None)
+                }
+                None => (VolumePhase::Failed, None, 0, Some("daemon reports gone".to_string())),
+            };
+            let req = crate::store::UpdateVolumeStatusRequest {
+                phase,
+                path,
+                used_bytes,
+                error,
+            };
+            if let Err(e) = store.update_volume_status(&v.volume_id, req).await {
+                warn!(node_id, volume = %v.volume_id, error = %e, "update_volume_status from node event failed");
+            }
             return;
         }
         NodeEventKind::TemplateState(t) => {
-            debug!(
-                node_id,
-                template_id = %t.template_id,
-                present = t.template.is_some(),
-                "node-pushed template state (handler stub)"
-            );
+            // Template updates funnel through update_template_status — same
+            // request DTO the template reconciler uses. Pull phase from the
+            // ImportJob if present, otherwise treat presence-only as Ready.
+            use mvirt_daemon_protos::zfs::ImportJobState;
+            use crate::command::TemplatePhase;
+            let (phase, bytes_written, size_bytes, error) = match (&t.template, &t.import_job) {
+                (_, Some(job)) => {
+                    let phase = match ImportJobState::try_from(job.state)
+                        .unwrap_or(ImportJobState::Unspecified)
+                    {
+                        ImportJobState::Completed => TemplatePhase::Ready,
+                        ImportJobState::Failed | ImportJobState::Cancelled => TemplatePhase::Failed,
+                        _ => TemplatePhase::Importing,
+                    };
+                    (
+                        phase,
+                        job.bytes_written,
+                        job.total_bytes,
+                        job.error.clone().filter(|s| !s.is_empty()),
+                    )
+                }
+                (Some(tpl), None) => (TemplatePhase::Ready, tpl.size_bytes, tpl.size_bytes, None),
+                (None, None) => (TemplatePhase::Failed, 0, 0, Some("daemon reports gone".to_string())),
+            };
+            let req = crate::store::UpdateTemplateStatusRequest {
+                phase,
+                bytes_written,
+                size_bytes,
+                error,
+            };
+            if let Err(e) = store.update_template_status(&t.template_id, req).await {
+                warn!(node_id, template = %t.template_id, error = %e, "update_template_status from node event failed");
+            }
             return;
         }
         NodeEventKind::NicState(n) => {
-            debug!(
-                node_id,
-                nic_id = %n.nic_id,
-                present = n.nic.is_some(),
-                "node-pushed nic state (handler stub)"
-            );
+            use mvirt_daemon_protos::net::NicState as DaemonNicState;
+            let (phase, socket_path) = match n.nic.as_ref() {
+                Some(nic) => {
+                    let phase = match DaemonNicState::try_from(nic.state)
+                        .unwrap_or(DaemonNicState::Unspecified)
+                    {
+                        DaemonNicState::Active | DaemonNicState::Created => NicPhase::Active,
+                        DaemonNicState::Error => NicPhase::Failed,
+                        DaemonNicState::Unspecified => NicPhase::Pending,
+                    };
+                    (phase, nic.socket_path.clone())
+                }
+                None => (NicPhase::Failed, String::new()),
+            };
+            let req = crate::store::UpdateNicStatusRequest {
+                phase,
+                socket_path,
+                message: None,
+            };
+            if let Err(e) = store.update_nic_status(&n.nic_id, req).await {
+                warn!(node_id, nic = %n.nic_id, error = %e, "update_nic_status from node event failed");
+            }
             return;
         }
         NodeEventKind::NetworkState(n) => {
-            debug!(
-                node_id,
-                network_id = %n.network_id,
-                present = n.network.is_some(),
-                "node-pushed network state (handler stub)"
-            );
+            // Network state today has nothing for the api to write back —
+            // call update_network_status purely to keep the wire active
+            // (it's a fetch+return) and as a placeholder for when we grow
+            // observed-on-network fields.
+            let req = crate::store::UpdateNetworkStatusRequest::default();
+            if let Err(e) = store.update_network_status(&n.network_id, req).await {
+                warn!(node_id, network = %n.network_id, error = %e, "update_network_status from node event failed");
+            }
             return;
         }
         NodeEventKind::Resources(_) | NodeEventKind::DaemonHealth(_) => return,

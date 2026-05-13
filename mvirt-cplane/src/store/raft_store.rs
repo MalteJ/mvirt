@@ -26,9 +26,10 @@ use super::traits::{
     EnsureAccountRequest, Membership, MembershipPeer, NetworkStore, NicStore, NodeStore,
     OnboardingStore, OrgStore, ProjectStore, RedeemOnboardingTokenRequest, RegisterNodeRequest,
     ResizeVolumeRequest, SecurityGroupStore, TemplateStore, UpdateClusterRequest,
-    UpdateNetworkRequest, UpdateNicRequest, UpdateNodeStatusRequest, UpdateOrgRequest,
-    UpdateSecurityGroupRequest, UpdateSecurityGroupRuleRequest, UpdateTemplateStatusRequest,
-    UpdateVmSpecRequest, UpdateVmStatusRequest, VmStore, VolumeStore,
+    UpdateNetworkRequest, UpdateNetworkStatusRequest, UpdateNicRequest, UpdateNicStatusRequest,
+    UpdateNodeStatusRequest, UpdateOrgRequest, UpdateSecurityGroupRequest,
+    UpdateSecurityGroupRuleRequest, UpdateTemplateStatusRequest, UpdateVmSpecRequest,
+    UpdateVmStatusRequest, UpdateVolumeStatusRequest, VmStore, VolumeStore,
 };
 
 /// RaftStore wraps a RaftNode and implements the DataStore trait.
@@ -248,6 +249,23 @@ impl NetworkStore for RaftStore {
             _ => Err(StoreError::Internal("unexpected response".into())),
         }
     }
+
+    async fn update_network_status(
+        &self,
+        id: &str,
+        _req: UpdateNetworkStatusRequest,
+    ) -> Result<NetworkData> {
+        // No Command::UpdateNetworkStatus on raft today — NetworkData is
+        // spec-only. We accept the call (so the trait surface is uniform
+        // across all five resources) but treat it as a no-op: just fetch
+        // and return the current row. When NetworkData grows status
+        // fields, swap in a real Command + Response variant.
+        let node = self.node.read().await;
+        let state = node.get_state().await;
+        state
+            .get_network(id)
+            .ok_or_else(|| StoreError::NotFound(format!("Network '{}' not found", id)))
+    }
 }
 
 #[async_trait]
@@ -353,6 +371,27 @@ impl NicStore for RaftStore {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: id.to_string(),
             timestamp: Utc::now().to_rfc3339(),
+        };
+        match self.write_command(cmd).await? {
+            Response::Nic(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn update_nic_status(
+        &self,
+        id: &str,
+        req: UpdateNicStatusRequest,
+    ) -> Result<NicData> {
+        let cmd = Command::UpdateNicStatus {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            phase: req.phase,
+            socket_path: req.socket_path,
+            message: req.message,
         };
         match self.write_command(cmd).await? {
             Response::Nic(data) => Ok(data),
@@ -871,6 +910,28 @@ impl VolumeStore for RaftStore {
             Response::Volume(data) => Ok(data),
             Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
             Response::Error { code: 409, message } => Err(StoreError::Conflict(message)),
+            Response::Error { message, .. } => Err(StoreError::Internal(message)),
+            _ => Err(StoreError::Internal("unexpected response".into())),
+        }
+    }
+
+    async fn update_volume_status(
+        &self,
+        id: &str,
+        req: UpdateVolumeStatusRequest,
+    ) -> Result<VolumeData> {
+        let cmd = Command::UpdateVolumeStatus {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            phase: req.phase,
+            path: req.path,
+            used_bytes: req.used_bytes,
+            error: req.error,
+        };
+        match self.write_command(cmd).await? {
+            Response::Volume(data) => Ok(data),
+            Response::Error { code: 404, message } => Err(StoreError::NotFound(message)),
             Response::Error { message, .. } => Err(StoreError::Internal(message)),
             _ => Err(StoreError::Internal("unexpected response".into())),
         }
