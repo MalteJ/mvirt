@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
+import { LogsList } from '@/features/logs/LogsList'
 import { NodeStatus } from '@/types'
 
 function formatMb(mb: number): string {
@@ -88,6 +89,7 @@ export function NodeDetailPage() {
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="hardware">Hardware</TabsTrigger>
+          <TabsTrigger value="logs">Logs</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="space-y-4">
@@ -244,6 +246,17 @@ export function NodeDetailPage() {
               </dl>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="logs" className="space-y-4">
+          {/*
+            objectId={node.id} filters by the canonical cplane-assigned node
+            identifier — the same string mvirt-node writes to MVIRT_NODE_ID
+            via the env sidecar, which mvirt-shipper attaches to every
+            journald entry it ships. Cluster-level audit events
+            (node_joined / hypervisor_node_registered) tag with the same id.
+          */}
+          <LogsList objectId={node.id} />
         </TabsContent>
       </Tabs>
     </div>

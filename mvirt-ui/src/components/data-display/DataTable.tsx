@@ -19,6 +19,12 @@ interface DataTableProps<TData, TValue> {
   searchPlaceholder?: string
   searchColumn?: string
   onRowClick?: (row: TData) => void
+  /// Compact row density. Use for high-volume tables (logs, audit trails)
+  /// where the default `p-4` per cell wastes vertical space.
+  compact?: boolean
+  /// Initial sorting applied on mount; user can still re-sort by clicking
+  /// column headers. e.g. `[{ id: 'timestamp', desc: true }]` for logs.
+  defaultSorting?: SortingState
 }
 
 export function DataTable<TData, TValue>({
@@ -27,8 +33,10 @@ export function DataTable<TData, TValue>({
   searchPlaceholder = 'Search...',
   searchColumn,
   onRowClick,
+  compact,
+  defaultSorting,
 }: DataTableProps<TData, TValue>) {
-  const [sorting, setSorting] = useState<SortingState>([])
+  const [sorting, setSorting] = useState<SortingState>(defaultSorting ?? [])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
 
   const table = useReactTable({
@@ -103,7 +111,13 @@ export function DataTable<TData, TValue>({
                   onClick={() => onRowClick?.(row.original)}
                 >
                   {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} className="p-4 align-middle text-sm">
+                    <td
+                      key={cell.id}
+                      className={cn(
+                        'align-middle',
+                        compact ? 'px-3 py-1.5 text-xs' : 'p-4 text-sm',
+                      )}
+                    >
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
                   ))}

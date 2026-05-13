@@ -1,26 +1,25 @@
 export enum LogLevel {
-  DEBUG = 'DEBUG',
-  INFO = 'INFO',
-  WARN = 'WARN',
-  ERROR = 'ERROR',
-  AUDIT = 'AUDIT',
+  DEBUG = 'Debug',
+  INFO = 'Info',
+  WARN = 'Warn',
+  ERROR = 'Error',
+  AUDIT = 'Audit',
+  NOTICE = 'Notice',
+  CRITICAL = 'Critical',
+  ALERT = 'Alert',
+  EMERGENCY = 'Emergency',
 }
 
 export interface LogEntry {
   id: string
-  projectId: string
-  timestampNs: number
+  timestamp: string
   message: string
-  level: LogLevel
+  level: string
   component: string
   relatedObjectIds: string[]
 }
 
 export interface LogQueryRequest {
-  projectId?: string
   objectId?: string
-  level?: LogLevel
-  component?: string
   limit?: number
-  beforeId?: string
 }

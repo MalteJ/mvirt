@@ -5,14 +5,18 @@ import { StatCard } from '@/components/data-display/StatCard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { formatBytes } from '@/lib/utils'
-import { VmState, LogLevel } from '@/types'
+import { VmState } from '@/types'
 
-const levelVariants: Record<LogLevel, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  [LogLevel.DEBUG]: 'outline',
-  [LogLevel.INFO]: 'secondary',
-  [LogLevel.WARN]: 'default',
-  [LogLevel.ERROR]: 'destructive',
-  [LogLevel.AUDIT]: 'secondary',
+const levelVariants: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
+  Debug: 'outline',
+  Info: 'secondary',
+  Notice: 'secondary',
+  Warn: 'default',
+  Error: 'destructive',
+  Critical: 'destructive',
+  Alert: 'destructive',
+  Emergency: 'destructive',
+  Audit: 'secondary',
 }
 
 export function DashboardPage() {
@@ -104,7 +108,7 @@ export function DashboardPage() {
               <ul className="space-y-3">
                 {recentLogs.slice(0, 5).map((log) => (
                   <li key={log.id} className="flex items-start gap-2 text-sm">
-                    <Badge variant={levelVariants[log.level]} className="shrink-0 text-xs">
+                    <Badge variant={levelVariants[log.level] ?? 'secondary'} className="shrink-0 text-xs">
                       {log.level}
                     </Badge>
                     <span className="text-muted-foreground truncate">

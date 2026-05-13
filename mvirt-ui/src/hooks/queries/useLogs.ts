@@ -1,6 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
 import { queryLogs } from '@/api/endpoints'
-import { useProject } from '@/hooks/useProject'
 import type { LogQueryRequest } from '@/types'
 
 export const logKeys = {
@@ -9,16 +8,10 @@ export const logKeys = {
   query: (params: LogQueryRequest) => [...logKeys.queries(), params] as const,
 }
 
-export function useLogs(params: Omit<LogQueryRequest, 'projectId'> = {}) {
-  const { currentProject } = useProject()
-  const fullParams: LogQueryRequest = {
-    ...params,
-    projectId: currentProject?.slug,
-  }
+export function useLogs(params: LogQueryRequest = {}) {
   return useQuery({
-    queryKey: logKeys.query(fullParams),
-    queryFn: () => queryLogs(fullParams),
-    enabled: !!currentProject,
+    queryKey: logKeys.query(params),
+    queryFn: () => queryLogs(params),
     refetchInterval: 5000,
   })
 }
