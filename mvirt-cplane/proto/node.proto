@@ -1,6 +1,8 @@
 syntax = "proto3";
 package mvirt.node;
 
+import "mvirt.proto";
+
 // =============================================================================
 // Reverse-tunnel architecture
 // =============================================================================
@@ -92,6 +94,10 @@ message VmStateChanged {
     string vm_id = 1;
     NodeVmState state = 2;
     optional string message = 3;
+    // Full vmm-side Vm snapshot at the time of the event, identical to
+    // what mvirt-vmm.GetVm would return. Consumers can use this to update
+    // every observed field in one pass rather than re-fetching.
+    optional mvirt.Vm vm = 4;
 }
 
 message ResourcesChanged {

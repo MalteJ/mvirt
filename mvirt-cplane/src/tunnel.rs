@@ -73,6 +73,8 @@ async fn handle_node_event<S: DataStore + ?Sized>(
         vm_id,
         state,
         message,
+        vm: _vm, // full vmm.Vm snapshot, currently unused — extract more
+                 // observed fields (ip_address, etc.) here as we grow them.
     } = vs;
     let phase = match NodeVmState::try_from(state).unwrap_or(NodeVmState::Unspecified) {
         NodeVmState::Running => VmPhase::Running,

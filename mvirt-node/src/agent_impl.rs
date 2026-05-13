@@ -115,6 +115,7 @@ async fn forward_vm_events(
                     vm_id: ev.vm_id,
                     state: phase as i32,
                     message: None,
+                    vm: ev.vm,
                 })),
             };
             if tx.send(Ok(node_event)).await.is_err() {
