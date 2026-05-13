@@ -359,7 +359,7 @@ fn process_packet(config: &NicConfig, packet: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Process ARP request.
-fn process_arp(config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<Vec<u8>> {
+fn process_arp(_config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<Vec<u8>> {
     let arp_packet = ArpPacket::new_checked(eth_frame.payload()).ok()?;
     let arp_repr = ArpRepr::parse(&arp_packet).ok()?;
 
@@ -381,27 +381,10 @@ fn process_arp(config: &NicConfig, eth_frame: &EthernetFrame<&[u8]>) -> Option<V
             "ARP REQUEST: who-has"
         );
 
-        // Proxy-ARP for the gateway (169.254.0.1) plus any address in the
-        // NIC's own /N subnet. The latter handles VM↔VM ping in the same
-        // network: VMs see siblings as on-subnet (per DHCP-issued mask) and
-        // ARP for them directly. We answer with the gateway MAC so the IP
-        // packet lands on the TAP, where the host's IP-forwarding routes
-        // it to the destination VM's TAP using the per-NIC /32 routes
-        // already installed at NIC create time.
+        // Check if they're asking for the link-local gateway (169.254.0.1)
         let gateway_addr = Ipv4Address::from_bytes(&GATEWAY_IPV4_LINK_LOCAL.octets());
-        let target_ip = std::net::Ipv4Addr::new(
-            target_protocol_addr.0[0],
-            target_protocol_addr.0[1],
-            target_protocol_addr.0[2],
-            target_protocol_addr.0[3],
-        );
-        let in_subnet = config
-            .network
-            .ipv4_subnet
-            .map(|s| s.contains(&target_ip))
-            .unwrap_or(false);
-        if target_protocol_addr != gateway_addr && !in_subnet {
-            debug!(target_ip = %target_protocol_addr, "ARP not for gateway or in-subnet peer, ignoring");
+        if target_protocol_addr != gateway_addr {
+            debug!(target_ip = %target_protocol_addr, gateway = %gateway_addr, "ARP not for gateway, ignoring");
             return None;
         }
 
