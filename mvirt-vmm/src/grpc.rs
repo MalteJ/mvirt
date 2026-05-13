@@ -20,15 +20,36 @@ pub struct VmServiceImpl {
     store: Arc<VmStore>,
     hypervisor: Arc<Hypervisor>,
     audit: Arc<AuditLogger>,
+    /// Broadcast bus for VM lifecycle events; subscribed via WatchVms.
+    /// Mutator paths (create/start/stop/delete) and the hypervisor's
+    /// child-watch task publish here.
+    events: tokio::sync::broadcast::Sender<VmEvent>,
 }
 
 impl VmServiceImpl {
-    pub fn new(store: Arc<VmStore>, hypervisor: Arc<Hypervisor>, audit: Arc<AuditLogger>) -> Self {
+    pub fn new(
+        store: Arc<VmStore>,
+        hypervisor: Arc<Hypervisor>,
+        audit: Arc<AuditLogger>,
+        events: tokio::sync::broadcast::Sender<VmEvent>,
+    ) -> Self {
         Self {
             store,
             hypervisor,
             audit,
+            events,
         }
+    }
+
+    /// Publish a lifecycle event. Errors are intentionally ignored — a
+    /// no-subscriber broadcast just discards.
+    fn publish_vm_event(&self, vm_id: &str, ty: VmEventType, vm: Option<Vm>) {
+        let _ = self.events.send(VmEvent {
+            vm_id: vm_id.to_string(),
+            r#type: ty as i32,
+            timestamp: chrono::Utc::now().timestamp(),
+            vm,
+        });
     }
 }
 
@@ -142,6 +163,8 @@ impl VmService for VmServiceImpl {
         };
 
         info!(id = %entry.id, "VM created");
+        let proto = entry.to_proto();
+        self.publish_vm_event(&entry.id, VmEventType::VmEventCreated, Some(proto.clone()));
         self.audit
             .log(
                 LogLevel::Audit,
@@ -149,7 +172,7 @@ impl VmService for VmServiceImpl {
                 vec![entry.id.clone()],
             )
             .await;
-        Ok(Response::new(entry.to_proto()))
+        Ok(Response::new(proto))
     }
 
     async fn get_vm(&self, request: Request<GetVmRequest>) -> Result<Response<Vm>, Status> {
@@ -200,6 +223,7 @@ impl VmService for VmServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         info!(id = %req.id, "VM deleted");
+        self.publish_vm_event(&req.id, VmEventType::VmEventDeleted, None);
         self.audit
             .log(
                 LogLevel::Audit,
@@ -260,6 +284,8 @@ impl VmService for VmServiceImpl {
             .ok_or_else(|| Status::internal("Failed to update VM state"))?;
 
         info!(id = %req.id, "VM started");
+        let proto = entry.to_proto();
+        self.publish_vm_event(&entry.id, VmEventType::VmEventStarted, Some(proto.clone()));
         self.audit
             .log(
                 LogLevel::Audit,
@@ -267,7 +293,7 @@ impl VmService for VmServiceImpl {
                 vec![entry.id.clone()],
             )
             .await;
-        Ok(Response::new(entry.to_proto()))
+        Ok(Response::new(proto))
     }
 
     async fn stop_vm(&self, request: Request<StopVmRequest>) -> Result<Response<Vm>, Status> {
@@ -554,6 +580,24 @@ impl VmService for VmServiceImpl {
         &self,
         _request: Request<WatchVmsRequest>,
     ) -> Result<Response<Self::WatchVmsStream>, Status> {
-        Err(Status::unimplemented("WatchVms not yet implemented"))
+        // Forward each broadcast event to the gRPC stream. Lagged receivers
+        // (broadcast Sender's RecvError::Lagged) get dropped silently — the
+        // cplane's reconciler resync compensates if a transition is missed.
+        let mut rx = self.events.subscribe();
+        let (tx, out_rx) = mpsc::channel::<Result<VmEvent, Status>>(64);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if tx.send(Ok(ev)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(out_rx)))
     }
 }

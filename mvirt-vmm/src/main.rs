@@ -42,8 +42,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize store
     let store = Arc::new(VmStore::new(&args.data_dir).await?);
 
+    // Broadcast bus for VM lifecycle events — fans out to WatchVms gRPC
+    // subscribers. Buffer of 64 absorbs short-lived bursts (boot storms,
+    // batch deletes); on overflow late subscribers see lag errors and the
+    // 30s cplane resync covers gaps.
+    let (vm_events_tx, _) = tokio::sync::broadcast::channel::<mvirt_vmm::VmEvent>(64);
+
     // Initialize hypervisor
-    let hypervisor = Arc::new(Hypervisor::new(args.data_dir.clone(), store.clone()).await?);
+    let hypervisor =
+        Arc::new(Hypervisor::new(args.data_dir.clone(), store.clone(), vm_events_tx.clone()).await?);
 
     // Recover VMs from previous run
     hypervisor.recover_vms().await?;
@@ -55,7 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let audit = create_audit_logger("http://[::1]:50052", "vmm");
 
     // Create gRPC services
-    let vm_service = VmServiceImpl::new(store.clone(), hypervisor.clone(), audit.clone());
+    let vm_service =
+        VmServiceImpl::new(store.clone(), hypervisor.clone(), audit.clone(), vm_events_tx);
     let pod_service = PodServiceImpl::new(store, hypervisor, audit);
 
     let addr = args.listen.parse()?;

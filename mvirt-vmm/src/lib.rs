@@ -13,3 +13,5 @@ pub mod vsock_client;
 pub mod proto {
     tonic::include_proto!("mvirt");
 }
+
+pub use proto::VmEvent;

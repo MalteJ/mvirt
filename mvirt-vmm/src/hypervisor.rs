@@ -22,15 +22,29 @@ pub struct Hypervisor {
     data_dir: PathBuf,
     processes: Arc<RwLock<HashMap<String, Child>>>,
     store: Arc<VmStore>,
+    /// Broadcast bus for VM lifecycle events. The grpc service subscribes via
+    /// WatchVms; the hypervisor's child-watch task pushes STOPPED here when
+    /// a cloud-hypervisor process exits unexpectedly. Recv-end can lag — that
+    /// is acceptable, the cplane's 30s resync is the safety net.
+    events: tokio::sync::broadcast::Sender<crate::proto::VmEvent>,
 }
 
 impl Hypervisor {
-    pub async fn new(data_dir: PathBuf, store: Arc<VmStore>) -> Result<Self> {
+    pub async fn new(
+        data_dir: PathBuf,
+        store: Arc<VmStore>,
+        events: tokio::sync::broadcast::Sender<crate::proto::VmEvent>,
+    ) -> Result<Self> {
         Ok(Self {
             data_dir,
             processes: Arc::new(RwLock::new(HashMap::new())),
             store,
+            events,
         })
+    }
+
+    pub fn events_tx(&self) -> tokio::sync::broadcast::Sender<crate::proto::VmEvent> {
+        self.events.clone()
     }
 
     /// Check if enough 2MiB hugepages are available for the given memory size
@@ -551,11 +565,22 @@ ethernets:
     }
 
     async fn handle_vm_exit(&self, vm_id: &str) -> Result<()> {
-        use crate::proto::VmState;
+        use crate::proto::{VmEvent, VmEventType, VmState};
 
         self.processes.write().await.remove(vm_id);
         self.store.clear_runtime(vm_id).await?;
         self.store.update_state(vm_id, VmState::Stopped).await?;
+
+        // Notify subscribers (cplane via mvirt-node) that this VM transitioned
+        // to Stopped — without this, the cplane keeps a stale Running view
+        // until the 30s reconciler resync stumbles over it.
+        let vm = self.store.get(vm_id).await.ok().flatten().map(|e| e.to_proto());
+        let _ = self.events.send(VmEvent {
+            vm_id: vm_id.to_string(),
+            r#type: VmEventType::VmEventStopped as i32,
+            timestamp: chrono::Utc::now().timestamp(),
+            vm,
+        });
 
         // Cleanup socket dir
         let vm_dir = self.vm_dir(vm_id);

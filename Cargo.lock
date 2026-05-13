@@ -2402,6 +2402,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
+ "mvirt-daemon-protos",
  "prost",
  "rcgen",
  "reqwest",
@@ -2476,6 +2477,7 @@ name = "mvirt-vmm"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "http-body-util",
  "hyper",

@@ -12,6 +12,7 @@ prost = "0.14"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+chrono = "0.4"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
