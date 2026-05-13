@@ -69,7 +69,29 @@ message NodeEvent {
     oneof kind {
         ResourcesChanged resources = 1;
         DaemonHealthChanged daemon_health = 2;
+        // mvirt-vmm reported a VM state transition (or a VM disappeared).
+        // The api consumes this to keep its VmStatus phase in sync without
+        // waiting for the 30s reconciler resync.
+        VmStateChanged vm_state = 3;
     }
+}
+
+enum NodeVmState {
+    NODE_VM_STATE_UNSPECIFIED = 0;
+    NODE_VM_STATE_STOPPED = 1;
+    NODE_VM_STATE_STARTING = 2;
+    NODE_VM_STATE_RUNNING = 3;
+    NODE_VM_STATE_STOPPING = 4;
+    // The VM is no longer present in vmm at all (deleted out-of-band,
+    // or stopped + recovery removed the entry). The api should mark it
+    // Failed if its spec still demanded Running.
+    NODE_VM_STATE_GONE = 5;
+}
+
+message VmStateChanged {
+    string vm_id = 1;
+    NodeVmState state = 2;
+    optional string message = 3;
 }
 
 message ResourcesChanged {

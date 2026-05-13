@@ -27,9 +27,13 @@ use tower::service_fn;
 use tracing::{info, warn};
 
 use crate::ca::extract_identity_from_der;
-use crate::command::{NodeResources, NodeStatus};
+use crate::command::{NodeResources, NodeStatus, VmPhase, VmStatus};
 use crate::grpc::proto::node_agent_client::NodeAgentClient;
-use crate::grpc::proto::{CurrentResourcesRequest, NodeResources as ProtoNodeResources, WatchEventsRequest};
+use crate::grpc::proto::node_event::Kind as NodeEventKind;
+use crate::grpc::proto::{
+    CurrentResourcesRequest, NodeResources as ProtoNodeResources, NodeVmState, VmStateChanged,
+    WatchEventsRequest,
+};
 use crate::store::{DataStore, UpdateNodeStatusRequest};
 
 /// How often to re-pull resource counters from a connected node.
@@ -52,6 +56,49 @@ impl From<ProtoNodeResources> for NodeResources {
 ///
 /// Returns Ok on success; logs (does not propagate) any RPC or store error so
 /// the caller's tunnel lifecycle is unaffected.
+/// Translate a node-emitted `NodeEvent` into a raft `Command::UpdateVmStatus`.
+/// Currently only `VmStateChanged` is consumed; resource and daemon-health
+/// events are no-ops here because the periodic CurrentResources pull
+/// already covers the former and there's no daemon-health column in raft
+/// state yet.
+async fn handle_node_event<S: DataStore + ?Sized>(
+    event: crate::grpc::proto::NodeEvent,
+    store: &Arc<S>,
+    node_id: &str,
+) {
+    let Some(NodeEventKind::VmState(vs)) = event.kind else {
+        return;
+    };
+    let VmStateChanged {
+        vm_id,
+        state,
+        message,
+    } = vs;
+    let phase = match NodeVmState::try_from(state).unwrap_or(NodeVmState::Unspecified) {
+        NodeVmState::Running => VmPhase::Running,
+        NodeVmState::Starting => VmPhase::Creating,
+        NodeVmState::Stopping => VmPhase::Stopping,
+        NodeVmState::Stopped => VmPhase::Stopped,
+        // The VM vanished from vmm (deleted out-of-band, or the process
+        // exited without going through Stopping). Mark Failed so the UI
+        // and any operator see "this is broken" rather than a forever-
+        // STARTING state.
+        NodeVmState::Gone => VmPhase::Failed,
+        NodeVmState::Unspecified => return,
+    };
+    let req = crate::store::UpdateVmStatusRequest {
+        status: VmStatus {
+            phase,
+            node_id: Some(node_id.to_string()),
+            ip_address: None,
+            message,
+        },
+    };
+    if let Err(e) = store.update_vm_status(&vm_id, req).await {
+        warn!(node_id = %node_id, vm = %vm_id, error = %e, "submit UpdateVmStatus from node event failed");
+    }
+}
+
 async fn pull_resources<S: DataStore + ?Sized>(
     agent: &mut NodeAgentClient<Channel>,
     store: &Arc<S>,
@@ -286,8 +333,8 @@ async fn handle_connection(
             loop {
                 tokio::select! {
                     msg = stream.message() => match msg {
-                        Ok(Some(_event)) => {
-                            // Phase 3 TODO: drive controller from node-emitted events.
+                        Ok(Some(event)) => {
+                            handle_node_event(event, &store, &node_id).await;
                         }
                         Ok(None) => {
                             info!(node_id = %node_id, "node closed event stream cleanly");

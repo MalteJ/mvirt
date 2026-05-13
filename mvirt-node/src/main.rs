@@ -166,12 +166,19 @@ async fn main() -> Result<()> {
         available_memory_mb: memory_mb,
         available_storage_gb: args.storage_gb,
     };
+    // Typed gRPC client for the local mvirt-vmm. Used by WatchEvents to
+    // poll VM state for diff-based push to the cplane. Endpoint stays
+    // pending until vmm is reachable; tonic will reconnect lazily.
+    let vmm_endpoint_uri = parse_uri(&args.vmm_endpoint, "vmm_endpoint")?;
+    let vmm_channel = tonic::transport::Endpoint::from_shared(vmm_endpoint_uri.to_string())?
+        .connect_lazy();
     let agent = NodeAgentService {
         node_id: pki.state.node_id.clone(),
         name: node_name,
         address: String::new(),
         resources,
         agent_version: agent_version.to_string(),
+        vmm: mvirt_daemon_protos::vmm::vm_service_client::VmServiceClient::new(vmm_channel),
     };
     let proxies = ProxyBundle {
         vmm: DaemonProxy::new(parse_uri(&args.vmm_endpoint, "vmm_endpoint")?),
