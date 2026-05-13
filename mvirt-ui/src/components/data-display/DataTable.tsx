@@ -63,12 +63,12 @@ export function DataTable<TData, TValue>({
             onChange={(event) =>
               table.getColumn(searchColumn)?.setFilterValue(event.target.value)
             }
-            className="max-w-sm"
+            className="w-full sm:max-w-sm"
           />
         </div>
       )}
-      <div className="rounded-md border border-border">
-        <table className="w-full">
+      <div className="overflow-x-auto rounded-md border border-border">
+        <table className="w-full min-w-max">
           <thead>
             {table.getHeaderGroups().map((headerGroup) => (
               <tr key={headerGroup.id} className="border-b border-border bg-muted/50">

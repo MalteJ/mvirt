@@ -1,10 +1,17 @@
-import { ReactNode } from 'react'
+import { ReactNode, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Building2, FolderKanban, Sparkles } from 'lucide-react'
 import { Sidebar } from './Sidebar'
 import { Header } from './Header'
 import { Button } from '@/components/ui/button'
+import {
+  Sheet,
+  SheetContent,
+  SheetTitle,
+  SheetDescription,
+} from '@/components/ui/sheet'
 import { useOrgs, useProjects } from '@/hooks/queries'
+import { useSidebar } from '@/hooks/useSidebar'
 
 interface LayoutProps {
   children: ReactNode
@@ -55,6 +62,15 @@ export function Layout({ children }: LayoutProps) {
   const location = useLocation()
   const { data: projects, isLoading: projectsLoading } = useProjects()
   const { data: orgs, isLoading: orgsLoading } = useOrgs()
+  const drawerOpen = useSidebar((s) => s.open)
+  const setDrawerOpen = useSidebar((s) => s.setOpen)
+
+  // Belt-and-suspenders close: NavLink onClicks already close, but a back-
+  // button or programmatic navigation can leave the drawer open. Sync on
+  // every pathname change.
+  useEffect(() => {
+    setDrawerOpen(false)
+  }, [location.pathname, setDrawerOpen])
 
   const hasProjects = projects && projects.length > 0
   const hasOrgs = !!orgs && orgs.length > 0
@@ -77,28 +93,50 @@ export function Layout({ children }: LayoutProps) {
     !projectsLoading && !orgsLoading && !hasProjects && !isAdminPage
 
   return (
-    <div className="flex h-screen flex-col bg-background">
+    <div className="flex h-dvh flex-col bg-background">
       {/* Animated gradient background */}
       <div className="bg-gradient-animated" />
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        {/* Desktop sidebar — inline, ≥ lg */}
+        <aside className="hidden lg:flex">
+          <Sidebar />
+        </aside>
+
+        {/* Mobile sidebar — slide-in drawer, < lg */}
+        <Sheet open={drawerOpen} onOpenChange={setDrawerOpen}>
+          <SheetContent side="left" className="w-72 p-0" hideCloseButton>
+            <SheetTitle className="sr-only">Navigation</SheetTitle>
+            <SheetDescription className="sr-only">
+              Workload and admin navigation
+            </SheetDescription>
+            <Sidebar variant="sheet" />
+          </SheetContent>
+        </Sheet>
+
         <div className="relative z-10 flex flex-1 flex-col overflow-hidden">
           <Header />
-          <main className="main-content flex-1 overflow-auto p-6">
+          <main className="main-content flex-1 overflow-auto p-4 md:p-6">
             {showEmptyState ? <EmptyProjectsState hasOrgs={hasOrgs} /> : children}
           </main>
         </div>
       </div>
 
-      {/* Pride stripe */}
-      <div className="h-1 w-full flex shrink-0">
-        <div className="flex-1 bg-[#e40303]" />
-        <div className="flex-1 bg-[#ff8c00]" />
-        <div className="flex-1 bg-[#ffed00]" />
-        <div className="flex-1 bg-[#008026]" />
-        <div className="flex-1 bg-[#24408e]" />
-        <div className="flex-1 bg-[#732982]" />
+      {/* Pride stripe — sits above the iOS home-indicator safe area so
+          neither the stripe nor a home gesture obscures the other. */}
+      <div className="shrink-0">
+        <div className="flex h-1 w-full">
+          <div className="flex-1 bg-[#e40303]" />
+          <div className="flex-1 bg-[#ff8c00]" />
+          <div className="flex-1 bg-[#ffed00]" />
+          <div className="flex-1 bg-[#008026]" />
+          <div className="flex-1 bg-[#24408e]" />
+          <div className="flex-1 bg-[#732982]" />
+        </div>
+        <div
+          className="bg-card"
+          style={{ height: 'env(safe-area-inset-bottom, 0px)' }}
+        />
       </div>
     </div>
   )

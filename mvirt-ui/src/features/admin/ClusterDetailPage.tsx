@@ -142,7 +142,7 @@ export function ClusterDetailPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <Link
             to={`/orgs/${cluster.orgSlug}/clusters`}
@@ -176,7 +176,7 @@ export function ClusterDetailPage() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="flex items-center gap-2">
               <Server className="h-4 w-4" />
               Nodes ({nodes?.length ?? 0})

@@ -245,7 +245,7 @@ export function SecurityGroupDetailPage() {
         </div>
       </div>
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h3 className="text-lg font-semibold">Firewall Rules</h3>
         <Dialog open={ruleDialogOpen} onOpenChange={setRuleDialogOpen}>
           <DialogTrigger asChild>

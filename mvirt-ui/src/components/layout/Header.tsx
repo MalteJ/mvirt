@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { Bell, Moon, Sun, LogOut, User, Check, AlertTriangle, Info, AlertCircle, CheckCircle } from 'lucide-react'
+import { Bell, Menu, Moon, Sun, LogOut, User, Check, AlertTriangle, Info, AlertCircle, CheckCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -11,6 +11,7 @@ import {
 import { useTheme } from '@/hooks/useTheme'
 import { useAuth } from '@/hooks/useAuth'
 import { useMe, useNotifications, useMarkAllNotificationsRead } from '@/hooks/queries'
+import { useSidebar } from '@/hooks/useSidebar'
 import { NotificationType } from '@/types'
 import { cn } from '@/lib/utils'
 import { OrgProjectSwitcher } from './OrgProjectSwitcher'
@@ -36,6 +37,7 @@ export function Header() {
   const { data: me } = useMe()
   const { data: notifications } = useNotifications()
   const markAllRead = useMarkAllNotificationsRead()
+  const toggleSidebar = useSidebar((s) => s.toggle)
 
   const unreadCount = notifications?.filter((n) => !n.read).length ?? 0
 
@@ -58,10 +60,23 @@ export function Header() {
   }
 
   return (
-    <header className="flex h-14 items-center justify-between border-b border-border bg-card/80 backdrop-blur-xl px-6">
-      <OrgProjectSwitcher />
+    <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-card/80 backdrop-blur-xl px-2 md:px-6">
+      <div className="flex min-w-0 items-center gap-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-10 w-10 shrink-0 hover:bg-purple/20 hover:text-purple-light lg:hidden"
+          onClick={toggleSidebar}
+          aria-label="Toggle navigation"
+        >
+          <Menu className="h-5 w-5" />
+        </Button>
+        <div className="min-w-0 flex-1">
+          <OrgProjectSwitcher />
+        </div>
+      </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1 md:gap-2">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-10 w-10 hover:bg-purple/20 hover:text-purple-light relative">

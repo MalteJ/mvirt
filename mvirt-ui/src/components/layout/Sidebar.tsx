@@ -16,6 +16,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useApiHealth } from '@/hooks/queries'
 import { useIsPlatformAdmin } from '@/hooks/useAuth'
+import { useSidebar } from '@/hooks/useSidebar'
 
 const projectNav = [
   { name: 'Virtual Machines', path: '/vms', icon: Server },
@@ -44,15 +45,26 @@ const linkClass = (isActive: boolean) =>
       : 'text-foreground/80 border-transparent hover:bg-secondary hover:text-foreground',
   )
 
-export function Sidebar() {
-  // Sidebar lives outside the inner <Routes> tree that defines :projectSlug
-  // / :orgSlug, so useParams() returns nothing here — pull the active scope
-  // out of `pathname` directly.
+interface SidebarProps {
+  /**
+   * When true, the sidebar is rendered inside a Sheet (mobile drawer). The
+   * outer wrapper drops its fixed width and right border because the Sheet
+   * owns those; click handlers also close the drawer on navigation.
+   */
+  variant?: 'inline' | 'sheet'
+}
+
+/**
+ * The persistent nav rail. Defaults to the inline (desktop) variant; the
+ * mobile drawer in Layout renders it with `variant="sheet"`.
+ */
+export function Sidebar({ variant = 'inline' }: SidebarProps) {
   const { pathname } = useLocation()
   const projectSlug = pathname.match(/^\/projects\/([^/]+)/)?.[1]
   const orgSlug = pathname.match(/^\/orgs\/([^/]+)/)?.[1]
   const apiHealth = useApiHealth()
   const isAdmin = useIsPlatformAdmin()
+  const closeDrawer = useSidebar((s) => s.setOpen)
 
   const apiStatus: 'connected' | 'connecting' | 'disconnected' =
     apiHealth.isSuccess ? 'connected'
@@ -69,10 +81,22 @@ export function Sidebar() {
     : apiStatus === 'disconnected' ? 'Disconnected'
     : 'Connecting…'
 
+  const handleNavigate = () => {
+    if (variant === 'sheet') closeDrawer(false)
+  }
+
+  const isSheet = variant === 'sheet'
+
   return (
-    <div className="relative z-10 flex w-64 flex-col border-r border-border bg-card/80 backdrop-blur-xl">
+    <div
+      className={cn(
+        'relative z-10 flex h-full flex-col bg-card/80 backdrop-blur-xl',
+        !isSheet && 'w-64 border-r border-border',
+      )}
+    >
       <Link
         to="/"
+        onClick={handleNavigate}
         className="group flex h-14 items-center border-b border-border px-4 hover:bg-secondary/50 transition-colors"
       >
         <div className="logo-box-shimmer mr-3 flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-purple to-blue text-white text-lg font-bold shadow-glow-purple">
@@ -80,12 +104,13 @@ export function Sidebar() {
         </div>
         <span className="logo-shimmer text-lg font-semibold">mvirt</span>
       </Link>
-      <nav className="flex-1 space-y-1 p-2">
+      <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {projectSlug &&
           projectNav.map((item) => (
             <NavLink
               key={item.name}
               to={`/projects/${projectSlug}${item.path}`}
+              onClick={handleNavigate}
               className={({ isActive }) => linkClass(isActive)}
             >
               <item.icon className="mr-3 h-4 w-4" />
@@ -99,6 +124,7 @@ export function Sidebar() {
               key={item.name}
               to={`/orgs/${orgSlug}/${item.path}`}
               end={item.end}
+              onClick={handleNavigate}
               className={({ isActive }) => linkClass(isActive)}
             >
               <item.icon className="mr-3 h-4 w-4" />
@@ -111,6 +137,7 @@ export function Sidebar() {
           <NavLink
             to="/cluster"
             end
+            onClick={handleNavigate}
             className={({ isActive }) => linkClass(isActive)}
           >
             <Cog className="mr-3 h-4 w-4" />
@@ -118,7 +145,7 @@ export function Sidebar() {
           </NavLink>
         </div>
       )}
-      <div className="border-t border-border p-4">
+      <div className="border-t border-border p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
         <div className="flex items-center gap-2 text-xs text-foreground/60">
           <div className={cn('h-2 w-2 rounded-full', dotClass)} />
           <span>{statusLabel}</span>
