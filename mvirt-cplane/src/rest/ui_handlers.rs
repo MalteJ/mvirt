@@ -840,6 +840,7 @@ pub async fn bootstrap_onboarding(
         client_cert_pem: outcome.client_cert_pem,
         ca_cert_pem: outcome.ca_cert_pem,
         cert_not_after: outcome.cert_not_after,
+        log_endpoints: state.log_advertise.clone(),
     }))
 }
 
@@ -1928,10 +1929,14 @@ pub async fn get_import_job(
     Path(id): Path<String>,
     auth: Option<crate::auth::AuthenticatedAccount>,
 ) -> Result<Json<UiImportJob>, ApiError> {
-    let template = state.store.get_template(&id).await?.ok_or_else(|| ApiError {
-        error: "Import job not found".to_string(),
-        code: 404,
-    })?;
+    let template = state
+        .store
+        .get_template(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: "Import job not found".to_string(),
+            code: 404,
+        })?;
     require_project_access(&state, &auth, &template.spec.project_slug).await?;
     Ok(Json(UiImportJob::from(template)))
 }
@@ -1994,6 +1999,11 @@ pub struct UiLogEntry {
     pub message: String,
     pub level: String,
     pub component: String,
+    /// IDs of objects this entry pertains to (vm-, volume-, node ids, etc.).
+    /// Indexed server-side so callers can do `?object_id=...` filtered
+    /// queries — the Logs tab in NodeDetailPage relies on this to scope
+    /// to a single node.
+    pub related_object_ids: Vec<String>,
 }
 
 /// Response wrapper for logs
@@ -2011,12 +2021,11 @@ pub async fn query_logs(
 ) -> Result<Json<LogsResponse>, ApiError> {
     use mvirt_log::{LogServiceClient, QueryRequest};
 
-    let mut client = LogServiceClient::connect(state.log_endpoint.clone())
-        .await
-        .map_err(|e| ApiError {
-            error: format!("Failed to connect to log service: {}", e),
-            code: 503,
-        })?;
+    let channel = state.log_channel.clone().ok_or(ApiError {
+        error: "log service not configured (dev mode)".into(),
+        code: 503,
+    })?;
+    let mut client = LogServiceClient::new(channel);
 
     let req = QueryRequest {
         object_id: params.object_id,
@@ -2049,6 +2058,7 @@ pub async fn query_logs(
                 mvirt_log::LogLevel::try_from(entry.level).unwrap_or(mvirt_log::LogLevel::Info)
             ),
             component: entry.component,
+            related_object_ids: entry.related_object_ids,
         });
     }
 
@@ -2061,10 +2071,10 @@ pub async fn log_events(
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     use mvirt_log::{LogServiceClient, QueryRequest};
 
-    let endpoint = state.log_endpoint.clone();
+    let channel = state.log_channel.clone();
     let stream = async_stream::try_stream! {
-        let mut client = LogServiceClient::connect(endpoint).await
-            .map_err(|_| std::io::Error::other("connection failed"))?;
+        let channel = channel.ok_or_else(|| std::io::Error::other("log service not configured (dev mode)"))?;
+        let mut client = LogServiceClient::new(channel);
 
         let req = QueryRequest {
             object_id: None,
@@ -2086,6 +2096,7 @@ pub async fn log_events(
                 message: entry.message,
                 level: format!("{:?}", mvirt_log::LogLevel::try_from(entry.level).unwrap_or(mvirt_log::LogLevel::Info)),
                 component: entry.component,
+                related_object_ids: entry.related_object_ids,
             };
             yield SseEvent::default()
                 .json_data(&log_entry)

@@ -4540,7 +4540,10 @@ mod tests {
     fn ensure_test_project(state: &mut ApiState, proj: &str) -> String {
         ensure_test_org(state);
         if state.get_project(proj).is_none() {
-            apply(state, create_project_cmd(&format!("setup-{}", proj), proj, proj));
+            apply(
+                state,
+                create_project_cmd(&format!("setup-{}", proj), proj, proj),
+            );
         }
         proj.to_string()
     }
@@ -4563,7 +4566,10 @@ mod tests {
         let mut state = ApiState::default();
         let proj = ensure_test_project(&mut state, "ci");
 
-        let response = apply(&mut state, create_sa_cmd("req-1", "acc_ci", &proj, "github"));
+        let response = apply(
+            &mut state,
+            create_sa_cmd("req-1", "acc_ci", &proj, "github"),
+        );
         match response {
             Response::Account(a) => {
                 assert_eq!(a.id, "acc_ci");
@@ -4601,7 +4607,10 @@ mod tests {
 
         // Same name in a *different* project is fine — uniqueness is per-project.
         let proj2 = ensure_test_project(&mut state, "staging");
-        let ok = apply(&mut state, create_sa_cmd("req-3", "acc_c", &proj2, "github"));
+        let ok = apply(
+            &mut state,
+            create_sa_cmd("req-3", "acc_c", &proj2, "github"),
+        );
         assert!(matches!(ok, Response::Account(_)));
     }
 
@@ -4620,7 +4629,10 @@ mod tests {
     fn test_create_and_revoke_static_api_key() {
         let mut state = ApiState::default();
         let proj = ensure_test_project(&mut state, "ci");
-        apply(&mut state, create_sa_cmd("req-1", "acc_ci", &proj, "github"));
+        apply(
+            &mut state,
+            create_sa_cmd("req-1", "acc_ci", &proj, "github"),
+        );
 
         let create_key = Command::CreateStaticApiKey {
             request_id: "req-2".into(),
@@ -4711,7 +4723,10 @@ mod tests {
     fn test_delete_service_account_cascades_keys_and_memberships() {
         let mut state = ApiState::default();
         let proj = ensure_test_project(&mut state, "ci");
-        apply(&mut state, create_sa_cmd("req-1", "acc_ci", &proj, "github"));
+        apply(
+            &mut state,
+            create_sa_cmd("req-1", "acc_ci", &proj, "github"),
+        );
         apply(
             &mut state,
             Command::CreateStaticApiKey {

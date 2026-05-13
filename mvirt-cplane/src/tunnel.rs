@@ -85,7 +85,12 @@ async fn handle_node_event<S: DataStore + ?Sized>(
                     };
                     (phase, Some(vol.path.clone()), vol.used_bytes, None)
                 }
-                None => (VolumePhase::Failed, None, 0, Some("daemon reports gone".to_string())),
+                None => (
+                    VolumePhase::Failed,
+                    None,
+                    0,
+                    Some("daemon reports gone".to_string()),
+                ),
             };
             let req = crate::store::UpdateVolumeStatusRequest {
                 phase,
@@ -102,8 +107,8 @@ async fn handle_node_event<S: DataStore + ?Sized>(
             // Template updates funnel through update_template_status — same
             // request DTO the template reconciler uses. Pull phase from the
             // ImportJob if present, otherwise treat presence-only as Ready.
-            use mvirt_daemon_protos::zfs::ImportJobState;
             use crate::command::TemplatePhase;
+            use mvirt_daemon_protos::zfs::ImportJobState;
             let (phase, bytes_written, size_bytes, error) = match (&t.template, &t.import_job) {
                 (_, Some(job)) => {
                     let phase = match ImportJobState::try_from(job.state)
@@ -121,7 +126,12 @@ async fn handle_node_event<S: DataStore + ?Sized>(
                     )
                 }
                 (Some(tpl), None) => (TemplatePhase::Ready, tpl.size_bytes, tpl.size_bytes, None),
-                (None, None) => (TemplatePhase::Failed, 0, 0, Some("daemon reports gone".to_string())),
+                (None, None) => (
+                    TemplatePhase::Failed,
+                    0,
+                    0,
+                    Some("daemon reports gone".to_string()),
+                ),
             };
             let req = crate::store::UpdateTemplateStatusRequest {
                 phase,
@@ -176,7 +186,10 @@ async fn handle_node_event<S: DataStore + ?Sized>(
     // K8s-style: vm = None means the daemon no longer has this VM.
     // Derive the api-side phase from the embedded daemon state.
     use mvirt_daemon_protos::vmm::VmState as VmmVmState;
-    let phase = match vm.as_ref().map(|v| VmmVmState::try_from(v.state).unwrap_or(VmmVmState::Unspecified)) {
+    let phase = match vm
+        .as_ref()
+        .map(|v| VmmVmState::try_from(v.state).unwrap_or(VmmVmState::Unspecified))
+    {
         Some(VmmVmState::Running) => VmPhase::Running,
         Some(VmmVmState::Starting) => VmPhase::Creating,
         Some(VmmVmState::Stopping) => VmPhase::Stopping,

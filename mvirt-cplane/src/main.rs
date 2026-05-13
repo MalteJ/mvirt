@@ -7,7 +7,6 @@ use std::time::Duration;
 use tokio::signal;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 use mvirt_cplane::JwtValidator;
 use mvirt_cplane::audit::create_audit_logger;
@@ -81,9 +80,27 @@ struct Args {
     #[arg(long)]
     reset: bool,
 
-    /// Log service endpoint for audit logging
-    #[arg(long, default_value = "http://[::1]:50052")]
+    /// Log service endpoint for audit logging. Defaults to the co-resident
+    /// mvirt-log over mTLS on loopback. The hostname (`localhost`) must
+    /// resolve and be in the server cert's SAN; IPv6 literals like `[::1]`
+    /// break tonic's SNI/hostname verification (`invalid dns name`).
+    #[arg(long, default_value = "https://localhost:50052")]
     log_endpoint: String,
+
+    /// Directory where cplane publishes CA + server cert + key as PEM files
+    /// for the co-resident mvirt-log to consume. Defaults to
+    /// `${data_dir}/log-tls`. mvirt-log's `--tls-{ca,cert,key}` flags point
+    /// at these paths.
+    #[arg(long)]
+    log_tls_dir: Option<PathBuf>,
+
+    /// mvirt-log endpoints to advertise to onboarding nodes (full URLs).
+    /// Returned in the bootstrap response so daemons on the node know
+    /// where to send audit traffic. If empty, derived from the first
+    /// `--tunnel-san` value with port 50052 (or `https://localhost:50052`
+    /// if none configured).
+    #[arg(long = "log-advertise", value_name = "URL")]
+    log_advertise: Vec<String>,
 
     /// Join an existing cluster (leader's Raft gRPC address)
     #[arg(long)]
@@ -104,9 +121,7 @@ fn parse_peer(s: &str) -> Result<(NodeId, String), String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("mvirt_cplane=info".parse()?))
-        .init();
+    mvirt_log::tracing_setup::init("mvirt_cplane=info", &[]);
 
     let args = Args::parse();
 
@@ -244,17 +259,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         warn!("No leader elected within timeout");
     }
 
-    let audit = if args.dev {
-        Arc::new(ApiAuditLogger::new_noop())
-    } else {
-        create_audit_logger(&args.log_endpoint)
-    };
-
     let (event_tx, _) = broadcast::channel::<Event>(256);
     node.set_event_sink(event_tx.clone());
 
     let raft_node = Arc::new(RwLock::new(node));
     let store = Arc::new(RaftStore::new(raft_node.clone(), event_tx, node_id));
+
+    // self-AuditLogger uses mTLS even on loopback: the co-resident mvirt-log
+    // requires client certs. Mint an ephemeral client cert against the same
+    // raft-state CA — cplane never persists it; on restart a fresh one is
+    // generated. Mvirt-log identifies the caller via SAN URI
+    // `mvirt://service/cplane`.
+    ca::install_default_crypto_provider();
+    let pki_store: Arc<dyn DataStore> = store.clone();
+    // Both audit-side writes and the REST query path want a TLS channel to
+    // the co-resident mvirt-log. Build it whenever the CA is available, even
+    // in --dev mode: a developer running the dev cplane against a real
+    // mvirt-log needs the UI Logs tab to work. Falls back to a noop logger
+    // + None channel if cert minting or channel construction fails (e.g.
+    // because mvirt-log isn't running locally) — endpoints handle None by
+    // returning 503, audit calls become local-tracing-only.
+    let (audit, log_channel): (Arc<ApiAuditLogger>, Option<tonic::transport::Channel>) =
+        match build_self_audit_tls(pki_store.as_ref()).await {
+            Ok(tls) => {
+                let endpoints = vec![args.log_endpoint.clone()];
+                let channel = build_log_channel(&endpoints, &tls).await.ok();
+                (create_audit_logger(endpoints, Some(tls)), channel)
+            }
+            Err(e) => {
+                warn!(error = %e, "self-audit TLS init failed; falling back to noop logger");
+                (Arc::new(ApiAuditLogger::new_noop()), None)
+            }
+        };
 
     let jwt_validator = JwtValidator::from_env().await?;
     let initial_admin_email = std::env::var("MVIRT_INITIAL_ADMIN_EMAIL").ok();
@@ -264,11 +300,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "initial-admin bootstrap armed — first OIDC login with this email + no existing platform-admin → granted Platform/PlatformAdmin"
         );
     }
+    let log_advertise = if !args.log_advertise.is_empty() {
+        args.log_advertise.clone()
+    } else if let Some(host) = args.tunnel_san.first() {
+        // Bracket bare IPv6 addresses for URL form.
+        let host_part = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{host}]")
+        } else {
+            host.clone()
+        };
+        vec![format!("https://{host_part}:50052")]
+    } else {
+        vec!["https://localhost:50052".to_string()]
+    };
+
     let app_state = Arc::new(AppState {
         store: store.clone(),
         audit: audit.clone(),
         node_id,
-        log_endpoint: args.log_endpoint.clone(),
+        log_channel,
+        log_advertise,
         jwt_validator,
         initial_admin_email,
     });
@@ -296,10 +347,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .await
     });
 
-    // Bootstrap PKI: ensure the internal CA exists, generate a server cert
-    // for the tunnel listener. Both are raft-replicated, so on join we end
-    // up with whatever the cluster already has.
-    ca::install_default_crypto_provider();
+    // Bootstrap the rest of PKI: a server cert for the tunnel listener.
+    // The CA was already ensured up above when building the self-audit TLS.
     let san = if args.tunnel_san.is_empty() {
         vec![
             "localhost".to_string(),
@@ -309,16 +358,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         args.tunnel_san.clone()
     };
-    let pki_store: Arc<dyn DataStore> = store.clone();
-    let _ = pki_store.ensure_internal_ca("mvirt").await.map_err(|e| {
-        warn!(error = %e, "ensure_internal_ca failed; tunnel will be retried");
-        e
-    });
     let server_cert = match pki_store.get_server_cert().await? {
         Some(c) => c,
         None => pki_store.rotate_server_cert(san).await?,
     };
     let internal_ca = pki_store.ensure_internal_ca("mvirt").await?;
+
+    // Publish the same CA + server cert + key on disk for the co-resident
+    // mvirt-log to consume. Same identity, same hostnames — mvirt-log just
+    // listens on a different port. Re-written on every startup so the
+    // disk copy follows raft state after a rotation.
+    let log_tls_dir = args
+        .log_tls_dir
+        .clone()
+        .unwrap_or_else(|| data_dir.join("log-tls"));
+    if let Err(e) = ca::write_tls_material_to_disk(
+        &log_tls_dir,
+        &internal_ca.ca_cert_pem,
+        &server_cert.cert_pem,
+        &server_cert.key_pem,
+    ) {
+        warn!(error = %e, path = %log_tls_dir.display(), "failed to publish mvirt-log TLS material; mvirt-log won't be able to start");
+    } else {
+        info!(path = %log_tls_dir.display(), "published mvirt-log TLS material");
+    }
+
     let server_config = ca::build_server_config(
         &internal_ca.ca_cert_pem,
         &server_cert.cert_pem,
@@ -354,4 +418,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!("Shutdown complete");
     Ok(())
+}
+
+/// Bootstrap the CA and mint an ephemeral client cert for cplane's
+/// self-audit RPC stream. Returns a tonic ClientTlsConfig ready to feed
+/// to `create_audit_logger`. The key is never persisted; on restart a
+/// fresh one is generated.
+async fn build_self_audit_tls(
+    pki_store: &dyn DataStore,
+) -> Result<tonic::transport::ClientTlsConfig, Box<dyn std::error::Error + Send + Sync>> {
+    use tonic::transport::{Certificate, ClientTlsConfig, Identity};
+
+    let ca = pki_store.ensure_internal_ca("mvirt").await?;
+    let (leaf, key_pem) = ca::sign_service_client_cert(&ca, "cplane", ca::new_serial())?;
+    Ok(ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(ca.ca_cert_pem.into_bytes()))
+        .identity(Identity::from_pem(
+            leaf.cert_pem.into_bytes(),
+            key_pem.into_bytes(),
+        )))
+}
+
+/// Build a load-balanced tonic Channel to mvirt-log using the given TLS
+/// config. Used for the REST handlers' Query path which needs raw Channel
+/// access (vs AuditLogger which wraps its own).
+async fn build_log_channel(
+    endpoints: &[String],
+    tls: &tonic::transport::ClientTlsConfig,
+) -> Result<tonic::transport::Channel, Box<dyn std::error::Error + Send + Sync>> {
+    use tonic::transport::{Channel, Endpoint};
+
+    let mut parsed: Vec<Endpoint> = Vec::with_capacity(endpoints.len());
+    for url in endpoints {
+        let ep = Endpoint::from_shared(url.clone())
+            .map_err(|e| format!("invalid endpoint {url}: {e}"))?;
+        parsed.push(
+            ep.tls_config(tls.clone())
+                .map_err(|e| format!("tls config for {url}: {e}"))?,
+        );
+    }
+    Ok(Channel::balance_list(parsed.into_iter()))
 }

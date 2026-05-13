@@ -4,9 +4,19 @@
 //!
 //! # Example (AuditLogger - recommended)
 //! ```ignore
-//! use mvirt_log::{AuditLogger, LogLevel, create_audit_logger};
+//! use mvirt_log::{AuditLogger, LogLevel, create_audit_logger, tls_config_from_paths};
+//! use std::path::Path;
 //!
-//! let audit = create_audit_logger("http://[::1]:50052", "vmm");
+//! let tls = tls_config_from_paths(
+//!     Path::new("/var/lib/mvirt-node/ca.pem"),
+//!     Path::new("/var/lib/mvirt-node/cert.pem"),
+//!     Path::new("/var/lib/mvirt-node/key.pem"),
+//! )?;
+//! let audit = create_audit_logger(
+//!     vec!["https://cplane:50052".into()],
+//!     "vmm",
+//!     Some(tls),
+//! );
 //! audit.log(LogLevel::Audit, "VM created", vec![vm_id]).await;
 //! ```
 //!
@@ -41,4 +51,6 @@ pub use proto::log_service_server::{LogService, LogServiceServer};
 pub use proto::{LogEntry, LogLevel, LogRequest, LogResponse, QueryRequest};
 
 // Re-export AuditLogger
-pub use audit::{create_audit_logger, AuditLogger};
+pub use audit::{create_audit_logger, tls_config_from_paths, AuditLogger};
+
+pub mod tracing_setup;

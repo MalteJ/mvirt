@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use mvirt_log::{AuditLogger, LogLevel};
+use tonic::transport::ClientTlsConfig;
 
 /// ZFS audit logger with domain-specific methods
 pub struct ZfsAuditLogger {
@@ -13,9 +14,13 @@ pub struct ZfsAuditLogger {
 
 impl ZfsAuditLogger {
     /// Create a new ZFS audit logger
-    pub fn new(log_endpoint: &str) -> Self {
+    pub fn new(endpoints: Vec<String>, tls: Option<ClientTlsConfig>) -> Self {
+        let inner = AuditLogger::new(endpoints, "zfs", tls).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "ZfsAuditLogger init failed; falling back to noop");
+            AuditLogger::new_noop()
+        });
         Self {
-            inner: Arc::new(AuditLogger::new(log_endpoint, "zfs")),
+            inner: Arc::new(inner),
         }
     }
 
@@ -167,6 +172,9 @@ impl ZfsAuditLogger {
 }
 
 /// Create a shared ZFS audit logger
-pub fn create_audit_logger(log_endpoint: &str) -> Arc<ZfsAuditLogger> {
-    Arc::new(ZfsAuditLogger::new(log_endpoint))
+pub fn create_audit_logger(
+    endpoints: Vec<String>,
+    tls: Option<ClientTlsConfig>,
+) -> Arc<ZfsAuditLogger> {
+    Arc::new(ZfsAuditLogger::new(endpoints, tls))
 }

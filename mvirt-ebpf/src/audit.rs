@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use mvirt_log::{AuditLogger, LogLevel};
+use tonic::transport::ClientTlsConfig;
 
 /// eBPF network audit logger with domain-specific methods.
 ///
@@ -17,9 +18,13 @@ pub struct EbpfAuditLogger {
 
 impl EbpfAuditLogger {
     /// Create a new eBPF network audit logger
-    pub fn new(log_endpoint: &str) -> Self {
+    pub fn new(endpoints: Vec<String>, tls: Option<ClientTlsConfig>) -> Self {
+        let inner = AuditLogger::new(endpoints, "ebpf", tls).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "EbpfAuditLogger init failed; falling back to noop");
+            AuditLogger::new_noop()
+        });
         Self {
-            inner: Arc::new(AuditLogger::new(log_endpoint, "ebpf")),
+            inner: Arc::new(inner),
         }
     }
 
@@ -210,6 +215,9 @@ impl EbpfAuditLogger {
 }
 
 /// Create a shared eBPF network audit logger
-pub fn create_audit_logger(log_endpoint: &str) -> Arc<EbpfAuditLogger> {
-    Arc::new(EbpfAuditLogger::new(log_endpoint))
+pub fn create_audit_logger(
+    endpoints: Vec<String>,
+    tls: Option<ClientTlsConfig>,
+) -> Arc<EbpfAuditLogger> {
+    Arc::new(EbpfAuditLogger::new(endpoints, tls))
 }

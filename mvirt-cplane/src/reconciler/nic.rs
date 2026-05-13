@@ -13,8 +13,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use chrono::Utc;
 use mvirt_daemon_protos::net::{
-    CreateNetworkRequest, CreateNicRequest, GetNetworkRequest, GetNicRequest,
-    get_network_request, get_nic_request,
+    CreateNetworkRequest, CreateNicRequest, GetNetworkRequest, GetNicRequest, get_network_request,
+    get_nic_request,
 };
 use tonic::Code;
 use tracing::{info, warn};

@@ -20,7 +20,6 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use http::Uri;
 use tracing::{info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::agent_impl::NodeAgentService;
 use crate::proto::NodeResources;
@@ -86,13 +85,10 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "mvirt_node=info,tonic=warn,tower=warn,hyper=warn".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    mvirt_log::tracing_setup::init(
+        "mvirt_node=info,tonic=warn,tower=warn,hyper=warn",
+        &[],
+    );
 
     let args = Args::parse();
     let agent_version = env!("CARGO_PKG_VERSION");
@@ -170,15 +166,18 @@ async fn main() -> Result<()> {
     // each daemon's Watch* stream and forwards events upstream to the
     // cplane via NodeAgent.WatchEvents. tonic Channels reconnect lazily,
     // so we can construct them before the daemons are reachable.
-    let vmm_channel =
-        tonic::transport::Endpoint::from_shared(parse_uri(&args.vmm_endpoint, "vmm_endpoint")?.to_string())?
-            .connect_lazy();
-    let zfs_channel =
-        tonic::transport::Endpoint::from_shared(parse_uri(&args.zfs_endpoint, "zfs_endpoint")?.to_string())?
-            .connect_lazy();
-    let net_channel =
-        tonic::transport::Endpoint::from_shared(parse_uri(&args.net_endpoint, "net_endpoint")?.to_string())?
-            .connect_lazy();
+    let vmm_channel = tonic::transport::Endpoint::from_shared(
+        parse_uri(&args.vmm_endpoint, "vmm_endpoint")?.to_string(),
+    )?
+    .connect_lazy();
+    let zfs_channel = tonic::transport::Endpoint::from_shared(
+        parse_uri(&args.zfs_endpoint, "zfs_endpoint")?.to_string(),
+    )?
+    .connect_lazy();
+    let net_channel = tonic::transport::Endpoint::from_shared(
+        parse_uri(&args.net_endpoint, "net_endpoint")?.to_string(),
+    )?
+    .connect_lazy();
     let agent = NodeAgentService {
         node_id: pki.state.node_id.clone(),
         name: node_name,

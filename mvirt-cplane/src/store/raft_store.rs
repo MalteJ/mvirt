@@ -380,11 +380,7 @@ impl NicStore for RaftStore {
         }
     }
 
-    async fn update_nic_status(
-        &self,
-        id: &str,
-        req: UpdateNicStatusRequest,
-    ) -> Result<NicData> {
+    async fn update_nic_status(&self, id: &str, req: UpdateNicStatusRequest) -> Result<NicData> {
         let cmd = Command::UpdateNicStatus {
             request_id: uuid::Uuid::new_v4().to_string(),
             id: id.to_string(),

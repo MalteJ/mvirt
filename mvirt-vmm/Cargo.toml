@@ -34,7 +34,7 @@ hyperlocal = "0.9"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Audit logging
 mvirt-log = { path = "../mvirt-log" }

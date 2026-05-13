@@ -6,12 +6,12 @@ use mvirt_ebpf::grpc::proto::net_service_server::NetServiceServer;
 use mvirt_ebpf::grpc::{EbpfNetServiceImpl, Storage};
 use mvirt_ebpf::nat;
 use mvirt_ebpf::proto_handler::ProtocolHandler;
-use std::path::Path;
+use mvirt_log::tls_config_from_paths;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
 use tonic::transport::Server;
-use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
+use tracing::{error, info, warn};
 
 /// gRPC server address.
 const GRPC_ADDR: &str = "[::1]:50054";
@@ -19,16 +19,21 @@ const GRPC_ADDR: &str = "[::1]:50054";
 /// Database path.
 const DB_PATH: &str = "/var/lib/mvirt/ebpf/networks.db";
 
-/// Log service endpoint.
-const LOG_ENDPOINT: &str = "http://[::1]:50052";
+/// mvirt-log endpoints (override with `MVIRT_LOG_ENDPOINTS=https://h1,https://h2`).
+const LOG_ENDPOINTS_ENV: &str = "MVIRT_LOG_ENDPOINTS";
+const LOG_ENDPOINTS_DEFAULT: &str = "https://[::1]:50052";
+
+/// TLS material — node-cert paths, see `/var/lib/mvirt-node/`.
+const TLS_CA_ENV: &str = "MVIRT_TLS_CA";
+const TLS_CERT_ENV: &str = "MVIRT_TLS_CERT";
+const TLS_KEY_ENV: &str = "MVIRT_TLS_KEY";
+const TLS_CA_DEFAULT: &str = "/var/lib/mvirt-node/ca.pem";
+const TLS_CERT_DEFAULT: &str = "/var/lib/mvirt-node/cert.pem";
+const TLS_KEY_DEFAULT: &str = "/var/lib/mvirt-node/key.pem";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // Initialize logging with h2 filtered to warn level
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))
-        .add_directive("h2=warn".parse().unwrap());
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    mvirt_log::tracing_setup::init("info", &["h2=warn"]);
 
     info!("mvirt-ebpf starting...");
 
@@ -70,7 +75,25 @@ async fn main() {
     let proto_handler = Arc::new(ProtocolHandler::new());
 
     // Create audit logger
-    let audit = create_audit_logger(LOG_ENDPOINT);
+    let log_endpoints: Vec<String> = std::env::var(LOG_ENDPOINTS_ENV)
+        .unwrap_or_else(|_| LOG_ENDPOINTS_DEFAULT.to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let tls_ca = PathBuf::from(std::env::var(TLS_CA_ENV).unwrap_or_else(|_| TLS_CA_DEFAULT.into()));
+    let tls_cert =
+        PathBuf::from(std::env::var(TLS_CERT_ENV).unwrap_or_else(|_| TLS_CERT_DEFAULT.into()));
+    let tls_key =
+        PathBuf::from(std::env::var(TLS_KEY_ENV).unwrap_or_else(|_| TLS_KEY_DEFAULT.into()));
+    let tls = match tls_config_from_paths(&tls_ca, &tls_cert, &tls_key) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            warn!(error = %e, "TLS config for audit logger failed; running without remote audit");
+            None
+        }
+    };
+    let audit = create_audit_logger(log_endpoints, tls);
 
     // Create gRPC service
     let service = EbpfNetServiceImpl::new(

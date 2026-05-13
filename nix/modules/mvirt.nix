@@ -52,7 +52,15 @@ in {
     };
 
     log = {
-      enable = mkEnableOption "mvirt-log (Logging service)" // { default = true; };
+      # mvirt-log runs alongside mvirt-cplane (it reads CA + server cert
+      # material that cplane mints in raft state and publishes on disk).
+      # Default tracks cplane.enable so node-only hosts don't try to start
+      # it without the cert files.
+      enable = mkOption {
+        type = types.bool;
+        default = cfg.cplane.enable;
+        description = "Enable mvirt-log (centralized logging service). Defaults to cfg.cplane.enable.";
+      };
 
       port = mkOption {
         type = types.port;
@@ -202,17 +210,52 @@ in {
       "d /run/mvirt/ebpf 0755 root root -"
     ];
 
-    # mvirt-log service (starts first, others depend on it)
+    # mvirt-log service.
+    # Runs on cplane hosts only — node-only deployments should set
+    # `services.mvirt.log.enable = false`. Depends on mvirt-cplane having
+    # bootstrapped the CA and written TLS material to disk; AuditLogger
+    # clients on node hosts dial in via mTLS using their node certs.
     systemd.services.mvirt-log = mkIf cfg.log.enable {
       description = "mvirt Logging Service";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" "mvirt-cplane.service" ];
+      wants = [ "mvirt-cplane.service" ];
+
+      serviceConfig = {
+        Type = "simple";
+        # Root because the cert files cplane writes are root-owned; rather
+        # than chowning to a shared group, keep the file permissions tight
+        # and have both services run as the same user.
+        User = "root";
+        ExecStart = "${mvirtPkgs}/bin/mvirt-log --listen [::]:${toString cfg.log.port} --data-dir ${cfg.dataDir}/log --tls-ca ${cfg.dataDir}/cplane/log-tls/ca.pem --tls-cert ${cfg.dataDir}/cplane/log-tls/cert.pem --tls-key ${cfg.dataDir}/cplane/log-tls/key.pem ${concatStringsSep " " cfg.log.extraArgs}";
+        Restart = "on-failure";
+        RestartSec = "5s";
+
+        # Hardening
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = [ cfg.dataDir ];
+        PrivateTmp = true;
+      };
+    };
+
+    # mvirt-shipper service.
+    # Stays on every node — ships journald entries to the cplane-hosted
+    # mvirt-log over mTLS. Picks up endpoints + TLS paths from
+    # /var/lib/mvirt-node/env which mvirt-node writes during onboarding.
+    systemd.services.mvirt-shipper = mkIf cfg.shipper.enable {
+      description = "mvirt Journald Log Shipper";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
 
       serviceConfig = {
         Type = "simple";
-        User = "mvirt";
-        Group = "mvirt";
-        ExecStart = "${mvirtPkgs}/bin/mvirt-log --listen [::1]:${toString cfg.log.port} --data-dir ${cfg.dataDir}/log ${concatStringsSep " " cfg.log.extraArgs}";
+        User = "root";
+        # `-` makes the env file optional: shipper falls back to defaults
+        # before onboarding has run.
+        EnvironmentFile = "-/var/lib/mvirt-node/env";
+        ExecStart = "${mvirtPkgs}/bin/mvirt-shipper --units ${concatStringsSep "," cfg.shipper.units} --cursor-dir ${cfg.dataDir}/shipper ${concatStringsSep " " cfg.shipper.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
@@ -221,40 +264,19 @@ in {
         ProtectSystem = "strict";
         ProtectHome = true;
         ReadWritePaths = [ cfg.dataDir ];
+        ReadOnlyPaths = [ "/var/lib/mvirt-node" ];
         PrivateTmp = true;
       };
     };
 
-    # mvirt-shipper service
-    systemd.services.mvirt-shipper = mkIf cfg.shipper.enable {
-      description = "mvirt Journald Log Shipper";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" "mvirt-log.service" ];
-      wants = [ "mvirt-log.service" ];
-
-      serviceConfig = {
-        Type = "simple";
-        User = "mvirt";
-        Group = "mvirt";
-        ExecStart = "${mvirtPkgs}/bin/mvirt-shipper --units ${concatStringsSep "," cfg.shipper.units} --log-endpoint http://[::1]:${toString cfg.log.port} --cursor-dir ${cfg.dataDir}/shipper ${concatStringsSep " " cfg.shipper.extraArgs}";
-        Restart = "on-failure";
-        RestartSec = "5s";
-
-        # Hardening
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        ReadWritePaths = [ cfg.dataDir ];
-        PrivateTmp = true;
-      };
-    };
-
-    # mvirt-vmm service
+    # mvirt-vmm service.
+    # Audit logger endpoints + TLS paths come from /var/lib/mvirt-node/env
+    # (written by mvirt-node onboarding). Dependency on mvirt-log dropped:
+    # AuditLogger reconnects lazily once the remote becomes reachable.
     systemd.services.mvirt-vmm = mkIf cfg.vmm.enable {
       description = "mvirt Virtual Machine Manager";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" "mvirt-log.service" ];
-      wants = [ "mvirt-log.service" ];
+      after = [ "network.target" ];
 
       # cdrkit provides genisoimage, which mvirt-vmm shells out to in
       # `create_cloudinit_iso` to build the NoCloud CIDATA ISO attached
@@ -263,13 +285,13 @@ in {
 
       environment = {
         MVIRT_DATA_DIR = cfg.dataDir;
-        MVIRT_LOG_ENDPOINT = "http://[::1]:${toString cfg.log.port}";
         HYPERVISOR_FW = "${cfg.firmware}/share/firmware/CLOUDHV.fd";
       };
 
       serviceConfig = {
         Type = "simple";
         User = "root";  # Needs root for KVM/TAP access
+        EnvironmentFile = "-/var/lib/mvirt-node/env";
         ExecStart = "${mvirtPkgs}/bin/mvirt-vmm --listen [::1]:${toString cfg.vmm.port} --data-dir ${cfg.dataDir}/vmm ${concatStringsSep " " cfg.vmm.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
@@ -285,20 +307,16 @@ in {
     systemd.services.mvirt-zfs = mkIf cfg.zfs.enable {
       description = "mvirt ZFS Storage Manager";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" "mvirt-log.service" "zfs.target" ];
-      wants = [ "mvirt-log.service" ];
+      after = [ "network.target" "zfs.target" ];
       requires = [ "zfs.target" ];
 
       path = [ config.boot.zfs.package pkgs.qemu-utils ];
 
-      environment = {
-        MVIRT_LOG_ENDPOINT = "http://[::1]:${toString cfg.log.port}";
-      };
-
       serviceConfig = {
         Type = "simple";
         User = "root";  # Needs root for ZFS operations
-        ExecStart = "${mvirtPkgs}/bin/mvirt-zfs --listen [::1]:${toString cfg.zfs.port} --pool ${cfg.zfs.pool} --log-endpoint http://[::1]:${toString cfg.log.port} ${concatStringsSep " " cfg.zfs.extraArgs}";
+        EnvironmentFile = "-/var/lib/mvirt-node/env";
+        ExecStart = "${mvirtPkgs}/bin/mvirt-zfs --listen [::1]:${toString cfg.zfs.port} --pool ${cfg.zfs.pool} ${concatStringsSep " " cfg.zfs.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 
@@ -313,19 +331,18 @@ in {
     systemd.services.mvirt-ebpf = mkIf cfg.ebpf.enable {
       description = "mvirt eBPF Network Manager";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" "mvirt-log.service" ];
-      wants = [ "mvirt-log.service" ];
+      after = [ "network.target" ];
 
       path = [ pkgs.nftables pkgs.iproute2 ];
 
       environment = {
         MVIRT_DATA_DIR = cfg.dataDir;
-        MVIRT_LOG_ENDPOINT = "http://[::1]:${toString cfg.log.port}";
       };
 
       serviceConfig = {
         Type = "simple";
         User = "root";  # Needs root for eBPF and TUN device
+        EnvironmentFile = "-/var/lib/mvirt-node/env";
         ExecStart = "${mvirtPkgs}/bin/mvirt-ebpf ${concatStringsSep " " cfg.ebpf.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
@@ -357,12 +374,14 @@ in {
       };
     };
 
-    # mvirt-cplane service
+    # mvirt-cplane service.
+    # mvirt-log is the OTHER way round now: log waits for cplane to come
+    # up because cplane writes the cert files mvirt-log reads. Cplane's
+    # own AuditLogger reconnects lazily.
     systemd.services.mvirt-cplane = mkIf cfg.cplane.enable {
       description = "mvirt control plane";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" "mvirt-log.service" ];
-      wants = [ "mvirt-log.service" ];
+      after = [ "network.target" ];
 
       serviceConfig = {
         Type = "simple";
@@ -370,7 +389,7 @@ in {
         ExecStart = let
           devFlag = if cfg.cplane.dev then " --dev" else "";
           nodeIdFlag = " --node-id ${toString cfg.cplane.nodeId}";
-        in "${mvirtPkgs}/bin/mvirt-cplane --listen [::]:${toString cfg.cplane.port} --tunnel-listen ${cfg.cplane.tunnelListen} --data-dir ${cfg.dataDir}/cplane --log-endpoint http://[::1]:${toString cfg.log.port}${devFlag}${nodeIdFlag} ${concatStringsSep " " cfg.cplane.extraArgs}";
+        in "${mvirtPkgs}/bin/mvirt-cplane --listen [::]:${toString cfg.cplane.port} --tunnel-listen ${cfg.cplane.tunnelListen} --data-dir ${cfg.dataDir}/cplane --log-endpoint https://[::1]:${toString cfg.log.port}${devFlag}${nodeIdFlag} ${concatStringsSep " " cfg.cplane.extraArgs}";
         Restart = "on-failure";
         RestartSec = "5s";
 

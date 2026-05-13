@@ -76,11 +76,8 @@
       allowedTCPPorts = [
         22
         50051  # mvirt-vmm
-        50052  # mvirt-log
         50053  # mvirt-zfs
         50054  # mvirt-ebpf
-        8080   # mvirt-cplane REST
-        50056  # mvirt-cplane reverse tunnel (node agents dial here)
       ];
     };
   };
@@ -91,6 +88,9 @@
   };
 
   # mvirt services
+  # Node-only deployment: mvirt-log lives on cplane hosts. Daemons here
+  # send audit traffic to the cplane-hosted log service over mTLS, with
+  # endpoints discovered via mvirt-node onboarding.
   services.mvirt = {
     enable = true;
     package = mvirtPkgs.mvirt;
@@ -98,7 +98,7 @@
     firmware = mvirtPkgs.edk2-cloudhv;
 
     vmm.enable = true;
-    log.enable = true;
+    log.enable = false;
     ebpf.enable = true;
     zfs.enable = true;
   };

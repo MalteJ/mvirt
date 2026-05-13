@@ -1,5 +1,6 @@
 use mvirt_log::{AuditLogger, LogLevel};
 use std::sync::Arc;
+use tonic::transport::ClientTlsConfig;
 
 /// API Server audit logger
 pub struct ApiAuditLogger {
@@ -7,9 +8,13 @@ pub struct ApiAuditLogger {
 }
 
 impl ApiAuditLogger {
-    pub fn new(log_endpoint: &str) -> Self {
+    pub fn new(endpoints: Vec<String>, tls: Option<ClientTlsConfig>) -> Self {
+        let inner = AuditLogger::new(endpoints, "api", tls).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "ApiAuditLogger init failed; falling back to noop");
+            AuditLogger::new_noop()
+        });
         Self {
-            inner: Arc::new(AuditLogger::new(log_endpoint, "api")),
+            inner: Arc::new(inner),
         }
     }
 
@@ -271,8 +276,11 @@ impl ApiAuditLogger {
     }
 }
 
-pub fn create_audit_logger(log_endpoint: &str) -> Arc<ApiAuditLogger> {
-    Arc::new(ApiAuditLogger::new(log_endpoint))
+pub fn create_audit_logger(
+    endpoints: Vec<String>,
+    tls: Option<ClientTlsConfig>,
+) -> Arc<ApiAuditLogger> {
+    Arc::new(ApiAuditLogger::new(endpoints, tls))
 }
 
 #[cfg(test)]
@@ -299,7 +307,7 @@ mod tests {
     async fn test_create_audit_logger_with_invalid_endpoint() {
         // Should not panic even with invalid endpoint
         // The logger will just fail silently on log attempts
-        let logger = create_audit_logger("http://invalid-endpoint:99999");
+        let logger = create_audit_logger(vec!["http://invalid-endpoint:99999".into()], None);
         logger.network_created("net-1", "test");
     }
 }

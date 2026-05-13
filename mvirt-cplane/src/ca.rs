@@ -27,6 +27,9 @@ use time::{Duration, OffsetDateTime};
 /// URI scheme used in SubjectAlternativeName extensions to pin identity.
 pub const NODE_URI_PREFIX: &str = "mvirt://node/";
 pub const CLUSTER_URI_PREFIX: &str = "mvirt://cluster/";
+/// SAN URI prefix for in-cluster services (cplane, log, etc.) that talk
+/// over mTLS without being a "node".
+pub const SERVICE_URI_PREFIX: &str = "mvirt://service/";
 
 /// Validity period for freshly-issued leaf certs (server + client).
 pub const LEAF_VALIDITY_DAYS: i64 = 90;
@@ -215,6 +218,60 @@ pub fn sign_server_cert(
     ))
 }
 
+/// Mint a fresh ed25519 client cert for an in-process service (e.g. cplane
+/// talking to its co-resident mvirt-log). The key is generated fresh and
+/// returned alongside the cert so the caller can build a tonic
+/// `ClientTlsConfig` in-memory without ever touching disk.
+///
+/// SAN URI: `mvirt://service/{service_name}` — symmetric with node certs
+/// so mvirt-log (and future verifiers) can identify the caller.
+pub fn sign_service_client_cert(
+    ca: &InternalCa,
+    service_name: &str,
+    serial_bytes: [u8; 16],
+) -> Result<(SignedLeaf, String)> {
+    let (ca_cert, ca_key) = load_ca(ca)?;
+
+    let mut params = CertificateParams::default();
+    params.distinguished_name = {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, service_name);
+        dn
+    };
+    params.subject_alt_names = vec![SanType::URI(
+        format!("{SERVICE_URI_PREFIX}{service_name}")
+            .try_into()
+            .map_err(|e| anyhow!("bad service URI: {e}"))?,
+    )];
+    params.use_authority_key_identifier_extension = true;
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+
+    let now = OffsetDateTime::now_utc();
+    params.not_before = now - Duration::minutes(5);
+    params.not_after = now + Duration::days(LEAF_VALIDITY_DAYS);
+    params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial_bytes));
+
+    let client_key =
+        KeyPair::generate_for(&rcgen::PKCS_ED25519).context("generate service client keypair")?;
+    let not_after = params.not_after;
+    let leaf = params
+        .signed_by(&client_key, &ca_cert, &ca_key)
+        .context("sign service client cert")?;
+
+    Ok((
+        SignedLeaf {
+            cert_pem: leaf.pem(),
+            serial_hex: hex_serial(&serial_bytes),
+            not_after: chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::from(
+                not_after,
+            ))
+            .to_rfc3339(),
+        },
+        client_key.serialize_pem(),
+    ))
+}
+
 /// Extract `(node_id, cluster_slug)` from a verified peer cert's SAN URIs.
 /// Returns an error if either pin is missing. Used by the mTLS tunnel
 /// listener after the handshake completes.
@@ -343,6 +400,42 @@ pub fn build_client_config(
         .context("client config with_client_auth_cert")
 }
 
+/// Atomically publish the CA + server cert + key as PEM files under `dir`,
+/// for sibling services on the same host that can't reach raft state
+/// directly (today: mvirt-log). Writes via tmp + rename so a partial write
+/// never gets loaded by a watcher.
+///
+/// File modes: ca.pem and cert.pem 0644 (public material), key.pem 0600.
+pub fn write_tls_material_to_disk(
+    dir: &std::path::Path,
+    ca_cert_pem: &str,
+    server_cert_pem: &str,
+    server_key_pem: &str,
+) -> anyhow::Result<()> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(dir).with_context(|| format!("create tls dir {}", dir.display()))?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o750))
+        .with_context(|| format!("chmod tls dir {}", dir.display()))?;
+
+    let write = |name: &str, contents: &str, mode: u32| -> anyhow::Result<()> {
+        let final_path = dir.join(name);
+        let tmp_path = dir.join(format!(".{name}.tmp"));
+        fs::write(&tmp_path, contents).with_context(|| format!("write {}", tmp_path.display()))?;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("chmod {}", tmp_path.display()))?;
+        fs::rename(&tmp_path, &final_path)
+            .with_context(|| format!("rename to {}", final_path.display()))?;
+        Ok(())
+    };
+
+    write("ca.pem", ca_cert_pem, 0o644)?;
+    write("cert.pem", server_cert_pem, 0o644)?;
+    write("key.pem", server_key_pem, 0o600)?;
+    Ok(())
+}
+
 /// Install the ring-backed default crypto provider exactly once.
 pub fn install_default_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -387,5 +480,33 @@ mod tests {
             sign_server_cert(&ca, vec!["localhost".into()], new_serial()).unwrap();
         assert!(server_leaf.cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(server_leaf.cert_pem.contains("END CERTIFICATE"));
+    }
+
+    #[test]
+    fn write_tls_material_publishes_three_files_with_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let ca = generate_root_ca("test").unwrap();
+        let (leaf, key_pem) =
+            sign_server_cert(&ca, vec!["localhost".into()], new_serial()).unwrap();
+
+        write_tls_material_to_disk(dir.path(), &ca.ca_cert_pem, &leaf.cert_pem, &key_pem).unwrap();
+
+        let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap();
+        assert_eq!(read("ca.pem"), ca.ca_cert_pem);
+        assert_eq!(read("cert.pem"), leaf.cert_pem);
+        assert_eq!(read("key.pem"), key_pem);
+
+        let mode = |name: &str| {
+            std::fs::metadata(dir.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("ca.pem"), 0o644);
+        assert_eq!(mode("cert.pem"), 0o644);
+        assert_eq!(mode("key.pem"), 0o600);
     }
 }

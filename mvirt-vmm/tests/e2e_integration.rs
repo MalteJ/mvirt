@@ -147,7 +147,8 @@ async fn test_e2e_nginx() {
     // 2. Create NIC
     println!("Step 2: Creating NIC in network...");
     let nic = net_client
-        .create_nic(CreateNicRequest { id: String::new(),
+        .create_nic(CreateNicRequest {
+            id: String::new(),
             network_id: network_id.clone(),
             name: "e2e-nginx-nic".into(),
             mac_address: String::new(),
@@ -332,7 +333,8 @@ async fn test_dhcp_network_info() {
     // 2. Create NIC
     println!("Step 2: Creating NIC in network...");
     let nic = net_client
-        .create_nic(CreateNicRequest { id: String::new(),
+        .create_nic(CreateNicRequest {
+            id: String::new(),
             network_id: network_id.clone(),
             name: "dhcp-test-nic".into(),
             mac_address: String::new(),

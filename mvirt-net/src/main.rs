@@ -77,8 +77,16 @@ async fn run_grpc_server() {
         // Continue anyway - NICs can be recreated manually
     }
 
-    // Create audit logger
-    let audit = create_audit_logger(LOG_ENDPOINT);
+    // Create audit logger. mvirt-net is the legacy bridge-based net daemon,
+    // superseded by mvirt-ebpf; keep it loopback/plain-h2c-only — operators
+    // running it must point at a local mvirt-log.
+    let endpoints: Vec<String> = std::env::var("MVIRT_LOG_ENDPOINTS")
+        .unwrap_or_else(|_| LOG_ENDPOINT.to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let audit = create_audit_logger(endpoints, None);
 
     // Create gRPC service
     let service = NetServiceImpl::new(Arc::clone(&storage), Arc::clone(&manager), audit);

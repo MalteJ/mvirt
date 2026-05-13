@@ -1,11 +1,12 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use tokio::signal;
 use tonic::transport::Server;
-use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing::{info, warn};
 
+use mvirt_log::tls_config_from_paths;
 use mvirt_zfs::audit::create_audit_logger;
 use mvirt_zfs::grpc::ZfsServiceImpl;
 use mvirt_zfs::import::ImportManager;
@@ -25,16 +26,50 @@ struct Args {
     #[arg(short, long, default_value = "[::1]:50053")]
     listen: String,
 
-    /// mvirt-log endpoint for audit logging
-    #[arg(long, default_value = "http://[::1]:50052")]
-    log_endpoint: String,
+    /// mvirt-log endpoints (comma-separated). Multi-endpoint failover via
+    /// `Channel::balance_list`. Reads from `MVIRT_LOG_ENDPOINTS` if set —
+    /// populated by mvirt-node's env sidecar after onboarding.
+    #[arg(
+        long,
+        env = "MVIRT_LOG_ENDPOINTS",
+        default_value = "https://[::1]:50052",
+        value_delimiter = ','
+    )]
+    log_endpoint: Vec<String>,
+
+    /// Path to the internal CA cert (PEM). Required for mTLS to mvirt-log.
+    /// Omit only when mvirt-log is plain h2c (dev / loopback no-TLS).
+    #[arg(
+        long,
+        env = "MVIRT_TLS_CA",
+        default_value = "/var/lib/mvirt-node/ca.pem"
+    )]
+    tls_ca: PathBuf,
+
+    /// Path to this daemon's client cert (PEM), signed by the cplane CA.
+    #[arg(
+        long,
+        env = "MVIRT_TLS_CERT",
+        default_value = "/var/lib/mvirt-node/cert.pem"
+    )]
+    tls_cert: PathBuf,
+
+    /// Path to this daemon's client key (PEM).
+    #[arg(
+        long,
+        env = "MVIRT_TLS_KEY",
+        default_value = "/var/lib/mvirt-node/key.pem"
+    )]
+    tls_key: PathBuf,
+
+    /// Disable mTLS to mvirt-log (talk plain h2c). Dev/loopback only.
+    #[arg(long, env = "MVIRT_LOG_INSECURE")]
+    log_insecure: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("mvirt_zfs=info".parse()?))
-        .init();
+    mvirt_log::tracing_setup::init("mvirt_zfs=info", &[]);
 
     let args = Args::parse();
 
@@ -55,7 +90,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     zfs_manager.ensure_pool_structure(&tmp_dir).await?;
 
     // Initialize audit logger (connects lazily to mvirt-log)
-    let audit = create_audit_logger(&args.log_endpoint);
+    let tls = if args.log_insecure {
+        None
+    } else {
+        match tls_config_from_paths(&args.tls_ca, &args.tls_cert, &args.tls_key) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                warn!(error = %e, "TLS config for audit logger failed; running without remote audit");
+                None
+            }
+        }
+    };
+    let audit = create_audit_logger(args.log_endpoint.clone(), tls);
 
     // Initialize import manager
     let import_manager = Arc::new(ImportManager::new(

@@ -100,7 +100,8 @@ impl TestCluster {
             store,
             audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
-            log_endpoint: String::new(),
+            log_channel: None,
+            log_advertise: Vec::new(),
             jwt_validator: None,
             initial_admin_email: None,
         });
@@ -186,7 +187,8 @@ impl TestCluster {
             store,
             audit: Arc::new(ApiAuditLogger::new_noop()),
             node_id,
-            log_endpoint: String::new(),
+            log_channel: None,
+            log_advertise: Vec::new(),
             jwt_validator: None,
             initial_admin_email: None,
         });

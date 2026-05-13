@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{
+    transport::{Certificate, Identity, Server, ServerTlsConfig},
+    Request, Response, Status,
+};
 use tracing::{info, warn};
 
 use mvirt_log::command::{LogCommand, LogCommandResponse};
@@ -21,13 +24,27 @@ use batcher::Batcher;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Listen address (e.g., [::1]:50052)
-    #[arg(short, long, default_value = "[::1]:50052")]
+    /// Listen address (e.g., [::]:50052)
+    #[arg(short, long, default_value = "[::]:50052")]
     listen: String,
 
     /// Data directory for logs
     #[arg(short, long, default_value = "/var/lib/mvirt/log")]
     data_dir: PathBuf,
+
+    /// PEM file with the internal CA used to verify client certs. Required
+    /// unless --dev. Together with --tls-cert/--tls-key this enables mTLS;
+    /// clients without a CA-signed cert are rejected at handshake time.
+    #[arg(long)]
+    tls_ca: Option<PathBuf>,
+
+    /// PEM file with this server's certificate. Required unless --dev.
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+
+    /// PEM file with this server's private key. Required unless --dev.
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
 
     /// Node ID for this instance
     #[arg(long)]
@@ -183,12 +200,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = args.listen.parse()?;
     let service = MyLogService { store, batcher };
 
-    info!("mvirt-log listening on {}", addr);
+    let tls = build_tls_config(args.tls_ca, args.tls_cert, args.tls_key, args.dev)?;
 
-    Server::builder()
+    let mut builder = Server::builder();
+    if let Some(tls_cfg) = tls {
+        builder = builder.tls_config(tls_cfg)?;
+        info!("mvirt-log listening on {} (mTLS)", addr);
+    } else {
+        info!("mvirt-log listening on {} (plain h2c — dev mode)", addr);
+    }
+
+    builder
         .add_service(LogServiceServer::new(service))
         .serve(addr)
         .await?;
 
     Ok(())
+}
+
+/// Construct the tonic ServerTlsConfig from PEM files.
+///
+/// All three paths are required together. In --dev mode all three may be
+/// omitted; missing them outside of --dev is an error so production
+/// can't accidentally start unencrypted.
+fn build_tls_config(
+    ca: Option<PathBuf>,
+    cert: Option<PathBuf>,
+    key: Option<PathBuf>,
+    dev: bool,
+) -> Result<Option<ServerTlsConfig>, Box<dyn std::error::Error + Send + Sync>> {
+    match (ca, cert, key) {
+        (Some(ca_path), Some(cert_path), Some(key_path)) => {
+            let ca_pem = std::fs::read(&ca_path)
+                .map_err(|e| format!("read tls-ca {}: {e}", ca_path.display()))?;
+            let cert_pem = std::fs::read(&cert_path)
+                .map_err(|e| format!("read tls-cert {}: {e}", cert_path.display()))?;
+            let key_pem = std::fs::read(&key_path)
+                .map_err(|e| format!("read tls-key {}: {e}", key_path.display()))?;
+            let identity = Identity::from_pem(cert_pem, key_pem);
+            let ca_cert = Certificate::from_pem(ca_pem);
+            Ok(Some(
+                ServerTlsConfig::new()
+                    .identity(identity)
+                    .client_ca_root(ca_cert)
+                    .client_auth_optional(false),
+            ))
+        }
+        (None, None, None) if dev => Ok(None),
+        (None, None, None) => {
+            Err("TLS material required: pass --tls-ca, --tls-cert, --tls-key (or --dev)".into())
+        }
+        _ => Err("--tls-ca, --tls-cert, --tls-key must all be passed together".into()),
+    }
 }

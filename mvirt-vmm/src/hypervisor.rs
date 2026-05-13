@@ -574,7 +574,13 @@ ethernets:
         // Notify subscribers (cplane via mvirt-node) that this VM transitioned
         // to Stopped — without this, the cplane keeps a stale Running view
         // until the 30s reconciler resync stumbles over it.
-        let vm = self.store.get(vm_id).await.ok().flatten().map(|e| e.to_proto());
+        let vm = self
+            .store
+            .get(vm_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.to_proto());
         let _ = self.events.send(VmEvent {
             vm_id: vm_id.to_string(),
             r#type: VmEventType::VmEventStopped as i32,

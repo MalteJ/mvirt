@@ -39,6 +39,12 @@ pub struct NodeState {
     pub cluster_slug: String,
     pub tunnel_endpoint: String,
     pub cert_not_after: String,
+    /// mvirt-log endpoints learned at bootstrap (cplane-side mvirt-log
+    /// instances). Daemons read these from the sidecar env file the
+    /// onboarding flow writes alongside state.toml. Older state.toml
+    /// files without this field deserialize to an empty Vec.
+    #[serde(default)]
+    pub log_endpoints: Vec<String>,
 }
 
 /// Result of the bootstrap REST exchange. Field names match the cplane's
@@ -51,6 +57,8 @@ struct BootstrapResponse {
     client_cert_pem: String,
     ca_cert_pem: String,
     cert_not_after: String,
+    #[serde(default)]
+    log_endpoints: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -175,6 +183,7 @@ pub async fn bootstrap(
             cluster_slug: body.cluster_slug,
             tunnel_endpoint,
             cert_not_after: body.cert_not_after,
+            log_endpoints: body.log_endpoints,
         },
     })
 }
@@ -189,6 +198,21 @@ pub fn persist(state_dir: &Path, pki: &NodePki) -> Result<()> {
     std::fs::write(state_dir.join("ca.pem"), &pki.ca_pem).context("write ca.pem")?;
     let state_str = toml::to_string_pretty(&pki.state).context("serialize state.toml")?;
     std::fs::write(state_dir.join("state.toml"), state_str).context("write state.toml")?;
+    write_env_sidecar(state_dir, &pki.state)?;
+    Ok(())
+}
+
+/// Write `state_dir/env` for systemd `EnvironmentFile=`. Daemons (vmm,
+/// zfs, ebpf, shipper) pick up the values from here so they don't have
+/// to parse `state.toml` themselves. Re-written on every
+/// onboarding/refresh so it always tracks the latest state.
+fn write_env_sidecar(state_dir: &Path, state: &NodeState) -> Result<()> {
+    let body = format!(
+        "MVIRT_LOG_ENDPOINTS={}\nMVIRT_NODE_ID={}\n",
+        state.log_endpoints.join(","),
+        state.node_id,
+    );
+    std::fs::write(state_dir.join("env"), body).context("write env sidecar")?;
     Ok(())
 }
 

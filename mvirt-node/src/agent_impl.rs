@@ -27,9 +27,9 @@ use tracing::{debug, info};
 use crate::proto::node::node_agent_server::NodeAgent;
 use crate::proto::node_event::Kind as NodeEventKind;
 use crate::proto::{
-    CurrentResourcesRequest, IdentifyRequest, IdentifyResponse, NetworkStateChanged, NicStateChanged,
-    NodeEvent, NodeResources, TemplateStateChanged, VmStateChanged, VolumeStateChanged,
-    WatchEventsRequest,
+    CurrentResourcesRequest, IdentifyRequest, IdentifyResponse, NetworkStateChanged,
+    NicStateChanged, NodeEvent, NodeResources, TemplateStateChanged, VmStateChanged,
+    VolumeStateChanged, WatchEventsRequest,
 };
 
 const EVENT_CHANNEL_CAPACITY: usize = 64;

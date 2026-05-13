@@ -128,14 +128,7 @@ pub async fn reconcile(ctx: &Ctx, id: &str) -> Result<()> {
 
     info!(vm = %id, node = %node_id, name = %vm.spec.name, phase = ?vm.status.phase, "reconciling vm");
 
-    let outcome = drive(
-        &node,
-        &vm,
-        &disk_path,
-        nic_attach.as_ref(),
-        target_running,
-    )
-    .await;
+    let outcome = drive(&node, &vm, &disk_path, nic_attach.as_ref(), target_running).await;
 
     let cmd = match outcome {
         Ok(new_phase) => Command::UpdateVmStatus {
@@ -239,7 +232,11 @@ async fn create_vm(
         .map(|(socket, mac)| {
             vec![NicConfig {
                 tap: None,
-                mac: if mac.is_empty() { None } else { Some(mac.clone()) },
+                mac: if mac.is_empty() {
+                    None
+                } else {
+                    Some(mac.clone())
+                },
                 vhost_socket: Some(socket.clone()),
             }]
         })
@@ -270,7 +267,10 @@ async fn create_vm(
         // NoCloud seed, Ubuntu cloud-image's cloud-init hangs in the
         // metadata-probe loop forever and netplan never fires DHCP.
         user_data: Some(vm.spec.user_data.clone().unwrap_or_else(|| {
-            format!("#cloud-config\nhostname: {}\n", vm.spec.name.replace('_', "-"))
+            format!(
+                "#cloud-config\nhostname: {}\n",
+                vm.spec.name.replace('_', "-")
+            )
         })),
         nested_virt: false,
     };

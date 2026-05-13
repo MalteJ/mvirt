@@ -35,7 +35,16 @@ pub struct AppState {
     pub store: Arc<dyn DataStore>,
     pub audit: Arc<ApiAuditLogger>,
     pub node_id: NodeId,
-    pub log_endpoint: String,
+    /// Pre-built tonic channel to the co-resident mvirt-log. mTLS handshake
+    /// is configured at channel-construction time so REST handlers can
+    /// build a `LogServiceClient` cheaply per request. `None` in dev mode
+    /// where audit/log forwarding is disabled — handlers must return 503.
+    pub log_channel: Option<tonic::transport::Channel>,
+    /// mvirt-log endpoints to advertise to onboarding nodes. Each entry is
+    /// a full URL like `https://cplane-1.example.com:50052`. Returned in
+    /// the bootstrap response so daemons on the node know where to send
+    /// audit + shipper traffic.
+    pub log_advertise: Vec<String>,
     /// OIDC JWT validator. `None` in dev / test mode (auth disabled);
     /// `Some` in production. The auth middleware reads it from here so it
     /// can also reach the store for Account lazy-creation.

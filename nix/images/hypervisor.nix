@@ -164,7 +164,6 @@ in
       allowedTCPPorts = [
         22      # SSH
         50051   # mvirt-vmm gRPC
-        50052   # mvirt-log gRPC
         50053   # mvirt-zfs gRPC
         50054   # mvirt-ebpf gRPC
       ];
@@ -181,6 +180,9 @@ in
   };
 
   # mvirt services
+  # mvirt-log now lives only on cplane hosts (it reads cert files cplane
+  # mints). To run cplane co-located here, set `cplane.enable = true` and
+  # `log.enable` will follow automatically.
   services.mvirt = {
     enable = true;
     package = mvirtPkgs.mvirt;
@@ -188,7 +190,7 @@ in
     firmware = mvirtPkgs.edk2-cloudhv;
 
     vmm.enable = true;
-    log.enable = true;
+    log.enable = false;
     ebpf.enable = true;
     zfs.enable = true;
   };

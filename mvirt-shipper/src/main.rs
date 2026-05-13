@@ -14,18 +14,58 @@ struct Args {
     #[arg(long)]
     units: String,
 
-    /// mvirt-log gRPC endpoint
-    #[arg(long, default_value = "http://[::1]:50052")]
-    log_endpoint: String,
+    /// mvirt-log gRPC endpoints (comma-separated). Multi-endpoint failover
+    /// via `Channel::balance_list`. Reads from `MVIRT_LOG_ENDPOINTS` if set.
+    #[arg(
+        long,
+        env = "MVIRT_LOG_ENDPOINTS",
+        default_value = "https://[::1]:50052",
+        value_delimiter = ','
+    )]
+    log_endpoint: Vec<String>,
 
     /// Directory to persist journal cursors
     #[arg(long, default_value = "/var/lib/mvirt/shipper")]
     cursor_dir: PathBuf,
+
+    /// Path to the internal CA cert (PEM).
+    #[arg(
+        long,
+        env = "MVIRT_TLS_CA",
+        default_value = "/var/lib/mvirt-node/ca.pem"
+    )]
+    tls_ca: PathBuf,
+
+    /// Path to this daemon's client cert (PEM).
+    #[arg(
+        long,
+        env = "MVIRT_TLS_CERT",
+        default_value = "/var/lib/mvirt-node/cert.pem"
+    )]
+    tls_cert: PathBuf,
+
+    /// Path to this daemon's client key (PEM).
+    #[arg(
+        long,
+        env = "MVIRT_TLS_KEY",
+        default_value = "/var/lib/mvirt-node/key.pem"
+    )]
+    tls_key: PathBuf,
+
+    /// Disable mTLS to mvirt-log (talk plain h2c). Dev/loopback only.
+    #[arg(long, env = "MVIRT_LOG_INSECURE")]
+    log_insecure: bool,
+
+    /// Node identifier to attach as `related_object_ids` on every shipped
+    /// entry. Picked up from `MVIRT_NODE_ID` (written by mvirt-node's env
+    /// sidecar) so the UI can filter logs to a specific node.
+    #[arg(long, env = "MVIRT_NODE_ID")]
+    node_id: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    mvirt_log::tracing_setup::init("info", &[]);
 
     let args = Args::parse();
 
@@ -39,7 +79,16 @@ async fn main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    info!(units = ?units, endpoint = %args.log_endpoint, "Starting mvirt-shipper");
+    info!(units = ?units, endpoints = ?args.log_endpoint, "Starting mvirt-shipper");
+
+    let tls = if args.log_insecure {
+        None
+    } else {
+        Some(
+            mvirt_log::tls_config_from_paths(&args.tls_ca, &args.tls_cert, &args.tls_key)
+                .map_err(|e| anyhow::anyhow!("TLS config: {e}"))?,
+        )
+    };
 
     let mut tasks = Vec::new();
 
@@ -60,10 +109,12 @@ async fn main() -> Result<()> {
         }));
 
         // Spawn shipper (gRPC forwarder)
-        let endpoint = args.log_endpoint.clone();
+        let endpoints = args.log_endpoint.clone();
         let unit_name = unit.clone();
+        let tls = tls.clone();
+        let node_id = args.node_id.clone();
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = shipper::run_shipper(endpoint, unit_name, rx).await {
+            if let Err(e) = shipper::run_shipper(endpoints, tls, unit_name, node_id, rx).await {
                 tracing::error!(error = %e, "Shipper failed");
             }
         }));

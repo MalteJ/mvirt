@@ -622,6 +622,10 @@ pub struct UiBootstrapResponse {
     pub client_cert_pem: String,
     pub ca_cert_pem: String,
     pub cert_not_after: String,
+    /// mvirt-log endpoints (URLs) the onboarded node should send audit
+    /// and journald traffic to. Cplane-managed; nodes treat this as
+    /// canonical, falling back to local defaults only if empty.
+    pub log_endpoints: Vec<String>,
 }
 
 /// Body of `POST /v1/nodes/{id}/revoke`.
