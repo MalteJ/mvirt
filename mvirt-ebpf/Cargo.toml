@@ -26,6 +26,7 @@ ipnet = "2.9"
 
 # Async runtime
 tokio = { version = "1", features = ["rt", "macros", "signal", "time", "sync", "net", "io-util"] }
+tokio-stream = "0.1"
 futures = "0.3"
 
 # gRPC

@@ -166,12 +166,19 @@ async fn main() -> Result<()> {
         available_memory_mb: memory_mb,
         available_storage_gb: args.storage_gb,
     };
-    // Typed gRPC client for the local mvirt-vmm. Used by WatchEvents to
-    // poll VM state for diff-based push to the cplane. Endpoint stays
-    // pending until vmm is reachable; tonic will reconnect lazily.
-    let vmm_endpoint_uri = parse_uri(&args.vmm_endpoint, "vmm_endpoint")?;
-    let vmm_channel = tonic::transport::Endpoint::from_shared(vmm_endpoint_uri.to_string())?
-        .connect_lazy();
+    // Typed gRPC clients for the local daemons. mvirt-node subscribes to
+    // each daemon's Watch* stream and forwards events upstream to the
+    // cplane via NodeAgent.WatchEvents. tonic Channels reconnect lazily,
+    // so we can construct them before the daemons are reachable.
+    let vmm_channel =
+        tonic::transport::Endpoint::from_shared(parse_uri(&args.vmm_endpoint, "vmm_endpoint")?.to_string())?
+            .connect_lazy();
+    let zfs_channel =
+        tonic::transport::Endpoint::from_shared(parse_uri(&args.zfs_endpoint, "zfs_endpoint")?.to_string())?
+            .connect_lazy();
+    let net_channel =
+        tonic::transport::Endpoint::from_shared(parse_uri(&args.net_endpoint, "net_endpoint")?.to_string())?
+            .connect_lazy();
     let agent = NodeAgentService {
         node_id: pki.state.node_id.clone(),
         name: node_name,
@@ -179,6 +186,8 @@ async fn main() -> Result<()> {
         resources,
         agent_version: agent_version.to_string(),
         vmm: mvirt_daemon_protos::vmm::vm_service_client::VmServiceClient::new(vmm_channel),
+        zfs: mvirt_daemon_protos::zfs::zfs_service_client::ZfsServiceClient::new(zfs_channel),
+        net: mvirt_daemon_protos::net::net_service_client::NetServiceClient::new(net_channel),
     };
     let proxies = ProxyBundle {
         vmm: DaemonProxy::new(parse_uri(&args.vmm_endpoint, "vmm_endpoint")?),

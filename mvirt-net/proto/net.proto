@@ -31,6 +31,32 @@ service NetService {
   rpc RemoveSecurityGroupRule(RemoveSecurityGroupRuleRequest) returns (RemoveSecurityGroupRuleResponse);
   rpc AttachSecurityGroup(AttachSecurityGroupRequest) returns (AttachSecurityGroupResponse);
   rpc DetachSecurityGroup(DetachSecurityGroupRequest) returns (DetachSecurityGroupResponse);
+
+  // Server-streaming. NIC lifecycle (created / updated / deleted) and
+  // network lifecycle, mirroring vmm.WatchVms / zfs.WatchVolumes shape.
+  rpc WatchNics(WatchNicsRequest) returns (stream NicEvent);
+  rpc WatchNetworks(WatchNetworksRequest) returns (stream NetworkEvent);
+}
+
+// === Watch streams ===
+//
+// K8s-style: each event carries the current full object state. Empty
+// payload means "this id is gone" — consumers drop their cached copy.
+
+message WatchNicsRequest {}
+
+message NicEvent {
+  string nic_id = 1;
+  int64 timestamp = 2;
+  optional Nic nic = 3;
+}
+
+message WatchNetworksRequest {}
+
+message NetworkEvent {
+  string network_id = 1;
+  int64 timestamp = 2;
+  optional Network network = 3;
 }
 
 // === System Messages ===

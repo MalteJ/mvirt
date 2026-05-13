@@ -715,4 +715,31 @@ impl NetService for NetServiceImpl {
             "Security groups are only supported in mvirt-ebpf",
         ))
     }
+
+    // Watch streams: not implemented on this legacy daemon. mvirt-ebpf
+    // is the real network manager and exposes them. We must satisfy
+    // the proto contract so the crate compiles.
+    type WatchNicsStream =
+        tokio_stream::wrappers::ReceiverStream<Result<NicEvent, Status>>;
+
+    async fn watch_nics(
+        &self,
+        _request: Request<WatchNicsRequest>,
+    ) -> Result<Response<Self::WatchNicsStream>, Status> {
+        Err(Status::unimplemented(
+            "WatchNics not implemented in legacy mvirt-net (use mvirt-ebpf)",
+        ))
+    }
+
+    type WatchNetworksStream =
+        tokio_stream::wrappers::ReceiverStream<Result<NetworkEvent, Status>>;
+
+    async fn watch_networks(
+        &self,
+        _request: Request<WatchNetworksRequest>,
+    ) -> Result<Response<Self::WatchNetworksStream>, Status> {
+        Err(Status::unimplemented(
+            "WatchNetworks not implemented in legacy mvirt-net (use mvirt-ebpf)",
+        ))
+    }
 }

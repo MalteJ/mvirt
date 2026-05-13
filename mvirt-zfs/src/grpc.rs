@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio::sync::{broadcast, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -15,6 +17,12 @@ pub struct ZfsServiceImpl {
     zfs: Arc<ZfsManager>,
     import: Arc<ImportManager>,
     audit: Arc<ZfsAuditLogger>,
+    /// Broadcast bus for volume lifecycle. Mutator paths publish snapshots
+    /// of the current Volume (or None on delete). WatchVolumes subscribers
+    /// fan-out from here.
+    volume_events: broadcast::Sender<VolumeEvent>,
+    /// Same for templates + import jobs.
+    template_events: broadcast::Sender<TemplateEvent>,
 }
 
 impl ZfsServiceImpl {
@@ -24,12 +32,38 @@ impl ZfsServiceImpl {
         import: Arc<ImportManager>,
         audit: Arc<ZfsAuditLogger>,
     ) -> Self {
+        let (volume_events, _) = broadcast::channel(64);
+        let (template_events, _) = broadcast::channel(64);
         Self {
             store,
             zfs,
             import,
             audit,
+            volume_events,
+            template_events,
         }
+    }
+
+    fn publish_volume(&self, volume_id: &str, volume: Option<Volume>) {
+        let _ = self.volume_events.send(VolumeEvent {
+            volume_id: volume_id.to_string(),
+            timestamp: chrono::Utc::now().timestamp(),
+            volume,
+        });
+    }
+
+    fn publish_template(
+        &self,
+        template_id: &str,
+        template: Option<Template>,
+        import_job: Option<ImportJob>,
+    ) {
+        let _ = self.template_events.send(TemplateEvent {
+            template_id: template_id.to_string(),
+            timestamp: chrono::Utc::now().timestamp(),
+            template,
+            import_job,
+        });
     }
 
     /// Sync DB snapshot entries with actual ZFS snapshots after rollback.
@@ -163,7 +197,9 @@ impl ZfsService for ZfsServiceImpl {
             .volume_created(&entry.id, &entry.name, req.size_bytes)
             .await;
 
-        Ok(Response::new(volume_to_proto(&entry, &vol)))
+        let proto = volume_to_proto(&entry, &vol);
+        self.publish_volume(&entry.id, Some(proto.clone()));
+        Ok(Response::new(proto))
     }
 
     async fn list_volumes(
@@ -293,6 +329,7 @@ impl ZfsService for ZfsServiceImpl {
         // Audit log
         self.audit.volume_deleted(&entry.id, &entry.name).await;
 
+        self.publish_volume(&entry.id, None);
         Ok(Response::new(DeleteVolumeResponse { deleted: true }))
     }
 
@@ -792,6 +829,7 @@ impl ZfsService for ZfsServiceImpl {
         // Audit log
         self.audit.template_deleted(&template_id, &req.name).await;
 
+        self.publish_template(&template_id, None, None);
         Ok(Response::new(DeleteTemplateResponse { deleted: true }))
     }
 
@@ -867,7 +905,57 @@ impl ZfsService for ZfsServiceImpl {
             .volume_cloned(&entry.id, &req.new_volume_name, &req.template_name)
             .await;
 
-        Ok(Response::new(volume_to_proto(&entry, &vol)))
+        let proto = volume_to_proto(&entry, &vol);
+        self.publish_volume(&entry.id, Some(proto.clone()));
+        Ok(Response::new(proto))
+    }
+
+    type WatchVolumesStream = ReceiverStream<Result<VolumeEvent, Status>>;
+
+    async fn watch_volumes(
+        &self,
+        _request: Request<WatchVolumesRequest>,
+    ) -> Result<Response<Self::WatchVolumesStream>, Status> {
+        let mut rx = self.volume_events.subscribe();
+        let (tx, out_rx) = mpsc::channel::<Result<VolumeEvent, Status>>(64);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if tx.send(Ok(ev)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(out_rx)))
+    }
+
+    type WatchTemplatesStream = ReceiverStream<Result<TemplateEvent, Status>>;
+
+    async fn watch_templates(
+        &self,
+        _request: Request<WatchTemplatesRequest>,
+    ) -> Result<Response<Self::WatchTemplatesStream>, Status> {
+        let mut rx = self.template_events.subscribe();
+        let (tx, out_rx) = mpsc::channel::<Result<TemplateEvent, Status>>(64);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if tx.send(Ok(ev)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(out_rx)))
     }
 }
 

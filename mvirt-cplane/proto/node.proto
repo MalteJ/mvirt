@@ -2,6 +2,8 @@ syntax = "proto3";
 package mvirt.node;
 
 import "mvirt.proto";
+import "zfs.proto";
+import "net.proto";
 
 // =============================================================================
 // Reverse-tunnel architecture
@@ -75,29 +77,51 @@ message NodeEvent {
         // The api consumes this to keep its VmStatus phase in sync without
         // waiting for the 30s reconciler resync.
         VmStateChanged vm_state = 3;
+        // Aggregated daemon-side lifecycle events. Each variant carries the
+        // full daemon-native resource snapshot (same shape as the
+        // corresponding GetX response) so the api can write back observed
+        // state without a follow-up RPC.
+        VolumeStateChanged volume_state = 4;
+        TemplateStateChanged template_state = 5;
+        NicStateChanged nic_state = 6;
+        NetworkStateChanged network_state = 7;
     }
 }
 
-enum NodeVmState {
-    NODE_VM_STATE_UNSPECIFIED = 0;
-    NODE_VM_STATE_STOPPED = 1;
-    NODE_VM_STATE_STARTING = 2;
-    NODE_VM_STATE_RUNNING = 3;
-    NODE_VM_STATE_STOPPING = 4;
-    // The VM is no longer present in vmm at all (deleted out-of-band,
-    // or stopped + recovery removed the entry). The api should mark it
-    // Failed if its spec still demanded Running.
-    NODE_VM_STATE_GONE = 5;
-}
+// K8s-style envelope: each event is "this id's current state on the
+// node side", carrying the full daemon-native object. `vm` being None
+// means the daemon no longer has this VM at all (deleted out-of-band
+// or process exited + recovery removed it) — the api marks it Failed
+// when its spec still demanded Running.
 
 message VmStateChanged {
     string vm_id = 1;
-    NodeVmState state = 2;
-    optional string message = 3;
-    // Full vmm-side Vm snapshot at the time of the event, identical to
-    // what mvirt-vmm.GetVm would return. Consumers can use this to update
-    // every observed field in one pass rather than re-fetching.
-    optional mvirt.Vm vm = 4;
+    optional mvirt.Vm vm = 2;
+}
+
+// Daemon-side state snapshots, mirroring the *.Event messages in each
+// daemon's proto. The id is always set; the resource payload is None
+// when the daemon no longer has it (deletion / gone after restart).
+
+message VolumeStateChanged {
+    string volume_id = 1;
+    optional mvirt.zfs.Volume volume = 2;
+}
+
+message TemplateStateChanged {
+    string template_id = 1;
+    optional mvirt.zfs.Template template = 2;
+    optional mvirt.zfs.ImportJob import_job = 3;
+}
+
+message NicStateChanged {
+    string nic_id = 1;
+    optional mvirt.net.Nic nic = 2;
+}
+
+message NetworkStateChanged {
+    string network_id = 1;
+    optional mvirt.net.Network network = 2;
 }
 
 message ResourcesChanged {

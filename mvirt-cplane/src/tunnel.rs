@@ -31,7 +31,7 @@ use crate::command::{NodeResources, NodeStatus, VmPhase, VmStatus};
 use crate::grpc::proto::node_agent_client::NodeAgentClient;
 use crate::grpc::proto::node_event::Kind as NodeEventKind;
 use crate::grpc::proto::{
-    CurrentResourcesRequest, NodeResources as ProtoNodeResources, NodeVmState, VmStateChanged,
+    CurrentResourcesRequest, NodeResources as ProtoNodeResources, VmStateChanged,
     WatchEventsRequest,
 };
 use crate::store::{DataStore, UpdateNodeStatusRequest};
@@ -66,34 +66,78 @@ async fn handle_node_event<S: DataStore + ?Sized>(
     store: &Arc<S>,
     node_id: &str,
 ) {
-    let Some(NodeEventKind::VmState(vs)) = event.kind else {
+    use tracing::debug;
+    let Some(kind) = event.kind else {
         return;
     };
-    let VmStateChanged {
-        vm_id,
-        state,
-        message,
-        vm: _vm, // full vmm.Vm snapshot, currently unused — extract more
-                 // observed fields (ip_address, etc.) here as we grow them.
-    } = vs;
-    let phase = match NodeVmState::try_from(state).unwrap_or(NodeVmState::Unspecified) {
-        NodeVmState::Running => VmPhase::Running,
-        NodeVmState::Starting => VmPhase::Creating,
-        NodeVmState::Stopping => VmPhase::Stopping,
-        NodeVmState::Stopped => VmPhase::Stopped,
-        // The VM vanished from vmm (deleted out-of-band, or the process
-        // exited without going through Stopping). Mark Failed so the UI
-        // and any operator see "this is broken" rather than a forever-
-        // STARTING state.
-        NodeVmState::Gone => VmPhase::Failed,
-        NodeVmState::Unspecified => return,
+    let vs = match kind {
+        NodeEventKind::VmState(vs) => vs,
+        // Volume / template / nic / network snapshots flow through the
+        // same NodeEvent oneof. They're not yet wired through to raft
+        // because DataStore lacks UpdateVolumeStatus etc on the trait
+        // — the volume/nic reconcilers submit Commands directly via the
+        // concrete RaftStore. Hoisting them onto the trait so this
+        // handler can call them is the next step; for now we log so the
+        // wire activity is visible.
+        NodeEventKind::VolumeState(v) => {
+            debug!(
+                node_id,
+                volume_id = %v.volume_id,
+                present = v.volume.is_some(),
+                "node-pushed volume state (handler stub)"
+            );
+            return;
+        }
+        NodeEventKind::TemplateState(t) => {
+            debug!(
+                node_id,
+                template_id = %t.template_id,
+                present = t.template.is_some(),
+                "node-pushed template state (handler stub)"
+            );
+            return;
+        }
+        NodeEventKind::NicState(n) => {
+            debug!(
+                node_id,
+                nic_id = %n.nic_id,
+                present = n.nic.is_some(),
+                "node-pushed nic state (handler stub)"
+            );
+            return;
+        }
+        NodeEventKind::NetworkState(n) => {
+            debug!(
+                node_id,
+                network_id = %n.network_id,
+                present = n.network.is_some(),
+                "node-pushed network state (handler stub)"
+            );
+            return;
+        }
+        NodeEventKind::Resources(_) | NodeEventKind::DaemonHealth(_) => return,
+    };
+    let VmStateChanged { vm_id, vm } = vs;
+    // K8s-style: vm = None means the daemon no longer has this VM.
+    // Derive the api-side phase from the embedded daemon state.
+    use mvirt_daemon_protos::vmm::VmState as VmmVmState;
+    let phase = match vm.as_ref().map(|v| VmmVmState::try_from(v.state).unwrap_or(VmmVmState::Unspecified)) {
+        Some(VmmVmState::Running) => VmPhase::Running,
+        Some(VmmVmState::Starting) => VmPhase::Creating,
+        Some(VmmVmState::Stopping) => VmPhase::Stopping,
+        Some(VmmVmState::Stopped) => VmPhase::Stopped,
+        Some(VmmVmState::Unspecified) => return,
+        // None: vmm has no record of this VM. If our spec still wants
+        // it Running this is a failure; the cplane's reconciler will
+        // re-create or fail-mark on next pass.
+        None => VmPhase::Failed,
     };
     let req = crate::store::UpdateVmStatusRequest {
         status: VmStatus {
             phase,
             node_id: Some(node_id.to_string()),
             ip_address: None,
-            message,
+            message: None,
         },
     };
     if let Err(e) = store.update_vm_status(&vm_id, req).await {

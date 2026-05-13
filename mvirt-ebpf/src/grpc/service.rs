@@ -161,6 +161,10 @@ pub struct EbpfNetServiceImpl {
     audit: Arc<EbpfAuditLogger>,
     /// Active NICs with their TAP devices
     nics: Arc<RwLock<HashMap<Uuid, ManagedNic>>>,
+    /// Broadcast buses for NIC and network lifecycle. K8s-style:
+    /// publisher emits current snapshot (None payload ⇒ deletion).
+    nic_events: tokio::sync::broadcast::Sender<super::proto::NicEvent>,
+    network_events: tokio::sync::broadcast::Sender<super::proto::NetworkEvent>,
 }
 
 impl EbpfNetServiceImpl {
@@ -171,13 +175,33 @@ impl EbpfNetServiceImpl {
         proto_handler: Arc<ProtocolHandler>,
         audit: Arc<EbpfAuditLogger>,
     ) -> Self {
+        let (nic_events, _) = tokio::sync::broadcast::channel(64);
+        let (network_events, _) = tokio::sync::broadcast::channel(64);
         Self {
             storage,
             ebpf,
             proto_handler,
             audit,
             nics: Arc::new(RwLock::new(HashMap::new())),
+            nic_events,
+            network_events,
         }
+    }
+
+    fn publish_nic(&self, nic_id: &str, nic: Option<super::proto::Nic>) {
+        let _ = self.nic_events.send(super::proto::NicEvent {
+            nic_id: nic_id.to_string(),
+            timestamp: chrono::Utc::now().timestamp(),
+            nic,
+        });
+    }
+
+    fn publish_network(&self, network_id: &str, network: Option<super::proto::Network>) {
+        let _ = self.network_events.send(super::proto::NetworkEvent {
+            network_id: network_id.to_string(),
+            timestamp: chrono::Utc::now().timestamp(),
+            network,
+        });
     }
 
     /// Resolve network by ID or name.
@@ -506,7 +530,9 @@ impl NetService for EbpfNetServiceImpl {
         self.audit
             .network_created(&network.id.to_string(), &network.name);
 
-        Ok(Response::new(network_data_to_proto(&network, 0)))
+        let proto = network_data_to_proto(&network, 0);
+        self.publish_network(&network.id.to_string(), Some(proto.clone()));
+        Ok(Response::new(proto))
     }
 
     async fn get_network(
@@ -654,6 +680,7 @@ impl NetService for EbpfNetServiceImpl {
                 }
             }
             self.audit.network_deleted(&n.id.to_string(), &n.name);
+            self.publish_network(&n.id.to_string(), None);
         }
 
         Ok(Response::new(DeleteNetworkResponse {
@@ -800,7 +827,9 @@ impl NetService for EbpfNetServiceImpl {
             ipv6_address.map(|a| a.to_string()).as_deref(),
         );
 
-        Ok(Response::new(nic_data_to_proto(&nic)))
+        let proto = nic_data_to_proto(&nic);
+        self.publish_nic(&nic.id.to_string(), Some(proto.clone()));
+        Ok(Response::new(proto))
     }
 
     async fn get_nic(&self, request: Request<GetNicRequest>) -> Result<Response<Nic>, Status> {
@@ -898,6 +927,7 @@ impl NetService for EbpfNetServiceImpl {
 
             self.audit
                 .nic_deleted(&nic.id.to_string(), &nic.network_id.to_string());
+            self.publish_nic(&nic.id.to_string(), None);
         }
 
         // Delete from DB
@@ -1279,5 +1309,59 @@ impl NetService for EbpfNetServiceImpl {
         }
 
         Ok(Response::new(DetachSecurityGroupResponse { detached }))
+    }
+
+    type WatchNicsStream =
+        tokio_stream::wrappers::ReceiverStream<Result<super::proto::NicEvent, Status>>;
+
+    async fn watch_nics(
+        &self,
+        _request: Request<super::proto::WatchNicsRequest>,
+    ) -> Result<Response<Self::WatchNicsStream>, Status> {
+        let mut rx = self.nic_events.subscribe();
+        let (tx, out_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if tx.send(Ok(ev)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            out_rx,
+        )))
+    }
+
+    type WatchNetworksStream =
+        tokio_stream::wrappers::ReceiverStream<Result<super::proto::NetworkEvent, Status>>;
+
+    async fn watch_networks(
+        &self,
+        _request: Request<super::proto::WatchNetworksRequest>,
+    ) -> Result<Response<Self::WatchNetworksStream>, Status> {
+        let mut rx = self.network_events.subscribe();
+        let (tx, out_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if tx.send(Ok(ev)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            out_rx,
+        )))
     }
 }

@@ -30,6 +30,42 @@ service ZfsService {
   rpc DeleteTemplate(DeleteTemplateRequest) returns (DeleteTemplateResponse);
   rpc CloneFromTemplate(CloneFromTemplateRequest) returns (Volume);
   rpc PromoteSnapshotToTemplate(PromoteSnapshotRequest) returns (Template);
+
+  // Server-streaming. Subscribers (mvirt-node) get a VolumeEvent for
+  // every volume lifecycle transition. Embedded Volume is identical
+  // to what GetVolume would return.
+  rpc WatchVolumes(WatchVolumesRequest) returns (stream VolumeEvent);
+
+  // Server-streaming. Template + import-job lifecycle. Embedded
+  // Template / ImportJob mirrors the synchronous RPCs.
+  rpc WatchTemplates(WatchTemplatesRequest) returns (stream TemplateEvent);
+}
+
+// === Watch streams ===
+//
+// K8s-style: every event carries the current full object state. A
+// missing payload (volume / template / import_job all empty) signals
+// deletion — the consumer drops its cached copy. No transition enum;
+// the consumer derives "created vs updated" from its own last-seen
+// map if it cares (typically it doesn't).
+
+message WatchVolumesRequest {}
+
+message VolumeEvent {
+  string volume_id = 1;
+  int64 timestamp = 2;
+  // None ⇒ deleted.
+  optional Volume volume = 3;
+}
+
+message WatchTemplatesRequest {}
+
+message TemplateEvent {
+  string template_id = 1;
+  int64 timestamp = 2;
+  // Either or both can be set; both empty ⇒ deleted.
+  optional Template template = 3;
+  optional ImportJob import_job = 4;
 }
 
 // === System Messages ===
