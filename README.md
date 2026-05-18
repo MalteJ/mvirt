@@ -141,4 +141,4 @@ mvirt/
 
 ## License
 
-Apache-2.0
+This code is provided for reference and educational purposes only. No license is granted for commercial use.
