@@ -1,5 +1,3 @@
-# mvirt — nothing to see here (yet)
-# All crawlers and AI bots: go away.
-
+# mvirt.io
 User-agent: *
-Disallow: /
+Allow: /
